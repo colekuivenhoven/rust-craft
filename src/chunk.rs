@@ -98,6 +98,13 @@ impl Chunk {
         let biome_perlin = Perlin::new(44);     // very low frequency: ocean/land mask
         let mountain_perlin = Perlin::new(45);  // low frequency: mountain mask
         let detail_perlin = Perlin::new(46);    // higher frequency: small variation
+
+        // Cave noise generators
+        let cave_perlin_1 = Perlin::new(100);   // Primary spaghetti cave noise
+        let cave_perlin_2 = Perlin::new(101);   // Secondary spaghetti cave noise (perpendicular)
+        let cheese_perlin = Perlin::new(102);   // Large cavern "cheese" caves
+        let cave_mask_perlin = Perlin::new(103); // Controls cave density in different areas
+
         let world_offset_x = self.position.0 * CHUNK_SIZE as i32;
         let world_offset_z = self.position.1 * CHUNK_SIZE as i32;
         let sea_level: isize = 28;
@@ -173,10 +180,132 @@ impl Chunk {
                         self.blocks[x][y][z] = BlockType::Water;
                     }
                 }
+            }
+        }
+
+        // === Cave Generation ===
+        // Carve caves using 3D noise after terrain is generated
+        // This creates both "spaghetti" tunnels and "cheese" caverns
+
+        let cave_floor = 3;  // Don't carve below this (bedrock layer)
+        let base_surface_depth = 4;  // Base minimum depth below surface
+        let surface_opening_perlin = Perlin::new(104);  // Controls where caves can reach surface
+
+        for x in 0..CHUNK_SIZE {
+            for z in 0..CHUNK_SIZE {
+                let world_x = (world_offset_x + x as i32) as f64;
+                let world_z = (world_offset_z + z as i32) as f64;
+
+                // Find surface height at this column
+                let mut surface_y = 0;
+                for y in (0..CHUNK_HEIGHT).rev() {
+                    if self.blocks[x][y][z] != BlockType::Air && self.blocks[x][y][z] != BlockType::Water {
+                        surface_y = y;
+                        break;
+                    }
+                }
+
+                // Regional cave density mask - some areas have more caves than others
+                let cave_density = (cave_mask_perlin.get([world_x * 0.008, world_z * 0.008]) + 1.0) * 0.5;
+
+                // Surface opening chance - occasional spots where caves can reach surface
+                // Uses low frequency noise so openings cluster into natural-looking sinkholes
+                let surface_opening_noise = surface_opening_perlin.get([world_x * 0.02, world_z * 0.02]);
+                let allow_surface_opening = surface_opening_noise > 0.7;  // ~15% of terrain can have openings
+                let min_surface_depth = if allow_surface_opening { 0 } else { base_surface_depth };
+
+                for y in cave_floor..CHUNK_HEIGHT {
+                    // Skip air and water blocks
+                    let block = self.blocks[x][y][z];
+                    if block == BlockType::Air || block == BlockType::Water {
+                        continue;
+                    }
+
+                    // Don't carve too close to surface (unless this is an opening zone)
+                    let depth_below_surface = surface_y.saturating_sub(y);
+                    if depth_below_surface < min_surface_depth {
+                        continue;
+                    }
+
+                    let world_y = y as f64;
+
+                    // === Spaghetti Caves ===
+                    // Two perpendicular noise fields that create winding tunnels where they intersect
+                    let spaghetti_scale = 0.04;
+                    let spaghetti_1 = cave_perlin_1.get([
+                        world_x * spaghetti_scale,
+                        world_y * spaghetti_scale * 0.5,  // Stretch vertically for horizontal tunnels
+                        world_z * spaghetti_scale
+                    ]);
+                    let spaghetti_2 = cave_perlin_2.get([
+                        world_x * spaghetti_scale,
+                        world_y * spaghetti_scale * 0.5,
+                        world_z * spaghetti_scale
+                    ]);
+
+                    // Tunnel forms where both noise values are near zero (narrow band)
+                    let tunnel_threshold = 0.12 + (1.0 - cave_density) * 0.08;  // Varies with density
+                    let is_spaghetti = spaghetti_1.abs() < tunnel_threshold && spaghetti_2.abs() < tunnel_threshold;
+
+                    // === Cheese Caves (larger caverns) ===
+                    let cheese_scale = 0.025;
+                    let cheese_value = cheese_perlin.get([
+                        world_x * cheese_scale,
+                        world_y * cheese_scale * 0.6,  // Slightly squashed vertically
+                        world_z * cheese_scale
+                    ]);
+
+                    // Cheese caves only appear at lower elevations and where density allows
+                    let cheese_y_factor = (1.0 - (world_y / 40.0).min(1.0)).max(0.0);  // Stronger at lower Y
+                    let cheese_threshold = 0.55 + (1.0 - cave_density) * 0.2 - cheese_y_factor * 0.15;
+                    let is_cheese = cheese_value > cheese_threshold && cave_density > 0.3;
+
+                    // Carve the cave
+                    if is_spaghetti || is_cheese {
+                        // Don't carve through sand underwater (prevents ocean flooding caves)
+                        if block == BlockType::Sand && y < sea_level as usize {
+                            continue;
+                        }
+                        self.blocks[x][y][z] = BlockType::Air;
+                    }
+                }
+            }
+        }
+
+        // === Tree Generation ===
+        // (Now separate loop after caves are carved)
+        for x in 0..CHUNK_SIZE {
+            for z in 0..CHUNK_SIZE {
+                let world_x = (world_offset_x + x as i32) as f64;
+                let world_z = (world_offset_z + z as i32) as f64;
+
+                // Recalculate biome values for tree placement
+                let biome_scale = 0.0035;
+                let biome_raw = (biome_perlin.get([world_x * biome_scale, world_z * biome_scale]) + 1.0) * 0.5;
+                let inland = smoothstep(0.35, 0.55, biome_raw);
+
+                // Find grass surface for tree placement
+                // Trees should only spawn on Grass blocks (original terrain surface, not cave ceilings)
+                let mut height = 0;
+                let mut found_grass = false;
+                for y in (0..CHUNK_HEIGHT).rev() {
+                    if self.blocks[x][y][z] == BlockType::Grass {
+                        height = y;
+                        found_grass = true;
+                        break;
+                    }
+                }
+
+                // Skip if no grass found (underwater, cave, etc.)
+                if !found_grass {
+                    continue;
+                }
+
+                let sea = sea_level as usize;
 
                 // Tree generation with variable height and occasional branching
                 let max_tree_space = TREE_MAX_HEIGHT + 4; // trunk + leaves
-                
+
                 // Avoid trees in/near oceans (require inlandness) and keep them above sea level.
                 if height > sea && height < CHUNK_HEIGHT - max_tree_space && x > 3 && x < CHUNK_SIZE - 3 && z > 3 && z < CHUNK_SIZE - 3 {
                     // Reduce trees near coasts.
