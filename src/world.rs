@@ -19,6 +19,9 @@ impl World {
     }
 
     pub fn generate_chunks(&mut self, center_x: i32, center_z: i32) {
+        // Collect positions of newly created chunks
+        let mut new_chunks = Vec::new();
+
         for x in -self.render_distance..=self.render_distance {
             for z in -self.render_distance..=self.render_distance {
                 let chunk_pos = (center_x + x, center_z + z);
@@ -26,6 +29,18 @@ impl World {
                     let mut chunk = Chunk::new(chunk_pos.0, chunk_pos.1);
                     lighting::calculate_chunk_lighting(&mut chunk);
                     self.chunks.insert(chunk_pos, chunk);
+                    new_chunks.push(chunk_pos);
+                }
+            }
+        }
+
+        // Mark neighboring chunks dirty so they re-mesh with proper boundary faces
+        for (cx, cz) in new_chunks {
+            // Mark all 4 neighbors as dirty (if they exist)
+            for (dx, dz) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+                let neighbor_pos = (cx + dx, cz + dz);
+                if let Some(neighbor) = self.chunks.get_mut(&neighbor_pos) {
+                    neighbor.dirty = true;
                 }
             }
         }

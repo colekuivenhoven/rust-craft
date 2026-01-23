@@ -5,7 +5,7 @@ use noise::{NoiseFn, Perlin};
 use rand::{Rng, SeedableRng};
 use rand::rngs::StdRng;
 
-pub const CHUNK_SIZE: usize = 8;
+pub const CHUNK_SIZE: usize = 32;
 pub const CHUNK_HEIGHT: usize = 64;
 
 // Tree generation configuration
@@ -45,7 +45,7 @@ impl<'a> ChunkNeighbors<'a> {
 
         match target_chunk {
             Some(chunk) => chunk.blocks[lx][y as usize][lz],
-            None => BlockType::Stone, // Return Stone (opaque), instead of Air, as this prevents rendering artifacts (esp w/ water).
+            None => BlockType::Boundary, // Virtual block: transparent for solids, opaque for water
         }
     }
 
@@ -365,8 +365,15 @@ impl Chunk {
                         // Check neighbor block via the neighbor struct
                         let neighbor_block = neighbors.get_block(nx, ny, nz);
 
-                        // If neighbor is transparent (like air) and not the same block (for internal faces), draw the face
-                        if neighbor_block.is_transparent() && neighbor_block != block {
+                        // Check if we should draw this face
+                        // For water, use special transparency check that treats Boundary as opaque
+                        let should_draw = if is_water {
+                            neighbor_block.is_transparent_for_water() && neighbor_block != block
+                        } else {
+                            neighbor_block.is_transparent() && neighbor_block != block
+                        };
+
+                        if should_draw {
                             let light = neighbors.get_light(nx, ny, nz);
                             let light_normalized = light as f32 / 15.0;
 

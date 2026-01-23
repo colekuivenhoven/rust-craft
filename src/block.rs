@@ -13,14 +13,23 @@ pub enum BlockType {
     Cobblestone,
     Planks,
     GlowStone,
+    /// Virtual block type for unloaded chunk boundaries.
+    /// Transparent for regular blocks (so faces render) but opaque for water (prevents artifacts).
+    Boundary,
 }
 
 impl BlockType {
     pub fn is_solid(&self) -> bool {
-        !matches!(self, BlockType::Air | BlockType::Water)
+        !matches!(self, BlockType::Air | BlockType::Water | BlockType::Boundary)
     }
 
     pub fn is_transparent(&self) -> bool {
+        matches!(self, BlockType::Air | BlockType::Water | BlockType::Leaves | BlockType::Boundary)
+    }
+
+    /// Returns true if this block is transparent specifically for water face culling.
+    /// Boundary blocks are NOT transparent for water to prevent rendering artifacts.
+    pub fn is_transparent_for_water(&self) -> bool {
         matches!(self, BlockType::Air | BlockType::Water | BlockType::Leaves)
     }
 
@@ -37,6 +46,7 @@ impl BlockType {
             BlockType::Cobblestone => [0.4, 0.4, 0.4],
             BlockType::Planks => [0.7, 0.5, 0.3],
             BlockType::GlowStone => [1.0, 0.9, 0.5],
+            BlockType::Boundary => [0.0, 0.0, 0.0], // Never rendered
         }
     }
 
@@ -53,6 +63,7 @@ impl BlockType {
             BlockType::Cobblestone => "Cobblestone",
             BlockType::Planks => "Planks",
             BlockType::GlowStone => "Glow",
+            BlockType::Boundary => "Boundary",
         }
     }
 
@@ -69,6 +80,7 @@ impl BlockType {
             BlockType::Cobblestone => 8,
             BlockType::Planks => 9,
             BlockType::GlowStone => 10,
+            BlockType::Boundary => 11,
         }
     }
 
@@ -85,6 +97,7 @@ impl BlockType {
             8 => BlockType::Cobblestone,
             9 => BlockType::Planks,
             10 => BlockType::GlowStone,
+            11 => BlockType::Boundary,
             _ => BlockType::Air,
         }
     }
@@ -93,6 +106,7 @@ impl BlockType {
     pub fn get_light_emission(&self) -> u8 {
         match self {
             BlockType::GlowStone => 15,
+            BlockType::Boundary => 0, // Virtual block, no light
             _ => 0,
         }
     }

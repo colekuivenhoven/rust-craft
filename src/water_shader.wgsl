@@ -72,7 +72,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let water_distance = max(scene_depth - water_depth, 0.0);
 
     // Water absorption parameters
-    let absorption_coefficient = 0.1;  // How quickly light is absorbed (higher = more opaque faster)
+    let absorption_coefficient = 0.25;  // How quickly light is absorbed (higher = more opaque faster)
     let min_alpha = 0.4;               // Minimum opacity (shallow water)
     let max_alpha = 1.0;               // Maximum opacity (very deep water)
 
