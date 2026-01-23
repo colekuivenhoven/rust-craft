@@ -5,7 +5,7 @@ use noise::{NoiseFn, Perlin};
 use rand::{Rng, SeedableRng};
 use rand::rngs::StdRng;
 
-pub const CHUNK_SIZE: usize = 32;
+pub const CHUNK_SIZE: usize = 8;
 pub const CHUNK_HEIGHT: usize = 64;
 
 // Tree generation configuration
