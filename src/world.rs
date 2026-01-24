@@ -34,15 +34,21 @@ impl World {
             }
         }
 
-        // Mark neighboring chunks dirty so they re-mesh with proper boundary faces
-        for (cx, cz) in new_chunks {
-            // Mark all 4 neighbors as dirty (if they exist)
-            for (dx, dz) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
-                let neighbor_pos = (cx + dx, cz + dz);
-                if let Some(neighbor) = self.chunks.get_mut(&neighbor_pos) {
-                    neighbor.dirty = true;
+        // Only perform updates if we actually generated something
+        if !new_chunks.is_empty() {
+            // 1. Mark neighbors dirty so they re-mesh (stitch) with the new chunks
+            for (cx, cz) in &new_chunks {
+                for (dx, dz) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+                    let neighbor_pos = (cx + dx, cz + dz);
+                    if let Some(neighbor) = self.chunks.get_mut(&neighbor_pos) {
+                        neighbor.dirty = true;
+                    }
                 }
             }
+
+            // 2. Propagate light between the new chunks and the existing world
+            // This ensures sunlight or caves flow correctly across the new boundaries
+            self.propagate_cross_chunk_lighting(&new_chunks);
         }
     }
 
@@ -135,8 +141,6 @@ impl World {
 
         // Cross-chunk light propagation: propagate light from chunk edges into neighbors
         // This is needed because calculate_chunk_lighting only works within a single chunk
-        // We run this even if no chunks were light_dirty, because a previous propagation 
-        // might have finished incomplete in a complex scenario, though usually valid.
         if !light_dirty_positions.is_empty() {
             self.propagate_cross_chunk_lighting(&light_dirty_positions);
         }
