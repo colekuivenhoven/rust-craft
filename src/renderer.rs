@@ -1,5 +1,6 @@
 use crate::block::{BlockType, Vertex, UiVertex, LineVertex, create_cube_vertices, create_block_outline, CUBE_INDICES};
 use crate::camera::{Camera, CameraController, CameraUniform, Projection};
+use crate::chunk::{CHUNK_SIZE, CHUNK_HEIGHT};
 use crate::crafting::CraftingSystem;
 use crate::enemy::EnemyManager;
 use crate::bitmap_font;
@@ -48,6 +49,8 @@ pub struct State {
     // Block outline rendering
     outline_pipeline: wgpu::RenderPipeline,
     targeted_block: Option<(i32, i32, i32)>,
+    // Chunk outline rendering (debug)
+    chunk_outline_pipeline: wgpu::RenderPipeline,
     // Mouse capture state
     mouse_captured: bool,
     // Depth textures: one for rendering, one for sampling in water shader
@@ -62,6 +65,8 @@ pub struct State {
     fps: f32,
     fps_frame_count: u32,
     fps_timer: f32,
+    // Debug mode
+    show_chunk_outlines: bool,
 }
 
 impl State {
@@ -552,6 +557,56 @@ impl State {
             cache: None,
         });
 
+        // Chunk Outline Pipeline for debug visualization
+        let chunk_outline_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Chunk Outline Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("chunk_outline_shader.wgsl").into()),
+        });
+
+        let chunk_outline_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Chunk Outline Pipeline"),
+            layout: Some(&outline_pipeline_layout),  // Reuse the same layout
+            vertex: wgpu::VertexState {
+                module: &chunk_outline_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[LineVertex::desc()],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &chunk_outline_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::LineList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: false,
+                depth_compare: wgpu::CompareFunction::LessEqual,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            multiview: None,
+            cache: None,
+        });
+
         Self {
             surface,
             device,
@@ -584,6 +639,7 @@ impl State {
             hud_vertex_count: 0,
             outline_pipeline,
             targeted_block: None,
+            chunk_outline_pipeline,
             mouse_captured: false,
             depth_texture,
             depth_view,
@@ -596,6 +652,8 @@ impl State {
             fps: 0.0,
             fps_frame_count: 0,
             fps_timer: 0.0,
+            // Debug mode
+            show_chunk_outlines: false,
         }
     }
 
@@ -784,6 +842,37 @@ impl State {
             fps_scale,
             fps_scale,
             fps_color,
+            screen_w,
+            screen_h,
+        );
+
+        // === Chunk Outline Toggle Indicator (below FPS) ===
+        let (debug_text, debug_color, debug_bg_color) = if self.show_chunk_outlines {
+            ("F1 - CHUNK OUTLINE: ON", [0.5, 1.0, 0.5, 1.0], [0.0, 0.2, 0.0, 0.6])  // Light green when on
+        } else {
+            ("F1 - CHUNK OUTLINE: OFF", [1.0, 1.0, 1.0, 0.9], [0.0, 0.0, 0.0, 0.5])  // White when off
+        };
+        let debug_y = fps_y + fps_char_h + 8.0;
+        let debug_text_width = debug_text.len() as f32 * fps_char_w;
+        // Background
+        bitmap_font::push_rect_px(
+            &mut verts,
+            fps_x - 4.0,
+            debug_y - 4.0,
+            debug_text_width + 8.0,
+            fps_char_h + 8.0,
+            debug_bg_color,
+            screen_w,
+            screen_h,
+        );
+        bitmap_font::draw_text_quads(
+            &mut verts,
+            debug_text,
+            fps_x,
+            debug_y,
+            fps_scale,
+            fps_scale,
+            debug_color,
             screen_w,
             screen_h,
         );
@@ -1024,6 +1113,47 @@ impl State {
         bitmap_font::draw_text_quads(verts, "Z", z_label_x, z_label_y, label_scale, label_scale, blue, screen_w, screen_h);
     }
 
+    /// Generate line vertices for chunk boundary outlines
+    fn build_chunk_outline_vertices(&self) -> Vec<LineVertex> {
+        let mut vertices = Vec::new();
+
+        for (&(cx, cz), _chunk) in &self.world.chunks {
+            // World coordinates of chunk boundaries
+            let x0 = (cx * CHUNK_SIZE as i32) as f32;
+            let x1 = x0 + CHUNK_SIZE as f32;
+            let z0 = (cz * CHUNK_SIZE as i32) as f32;
+            let z1 = z0 + CHUNK_SIZE as f32;
+            let y0 = 0.0f32;
+            let y1 = CHUNK_HEIGHT as f32;
+
+            // Vertical edges (4 corners)
+            vertices.extend_from_slice(&[
+                LineVertex { position: [x0, y0, z0] }, LineVertex { position: [x0, y1, z0] },
+                LineVertex { position: [x1, y0, z0] }, LineVertex { position: [x1, y1, z0] },
+                LineVertex { position: [x0, y0, z1] }, LineVertex { position: [x0, y1, z1] },
+                LineVertex { position: [x1, y0, z1] }, LineVertex { position: [x1, y1, z1] },
+            ]);
+
+            // Bottom edges
+            vertices.extend_from_slice(&[
+                LineVertex { position: [x0, y0, z0] }, LineVertex { position: [x1, y0, z0] },
+                LineVertex { position: [x1, y0, z0] }, LineVertex { position: [x1, y0, z1] },
+                LineVertex { position: [x1, y0, z1] }, LineVertex { position: [x0, y0, z1] },
+                LineVertex { position: [x0, y0, z1] }, LineVertex { position: [x0, y0, z0] },
+            ]);
+
+            // Top edges
+            vertices.extend_from_slice(&[
+                LineVertex { position: [x0, y1, z0] }, LineVertex { position: [x1, y1, z0] },
+                LineVertex { position: [x1, y1, z0] }, LineVertex { position: [x1, y1, z1] },
+                LineVertex { position: [x1, y1, z1] }, LineVertex { position: [x0, y1, z1] },
+                LineVertex { position: [x0, y1, z1] }, LineVertex { position: [x0, y1, z0] },
+            ]);
+        }
+
+        vertices
+    }
+
     pub fn input(&mut self, event: &WindowEvent) -> bool {
         match event {
             WindowEvent::KeyboardInput {
@@ -1131,6 +1261,13 @@ impl State {
                         }
                         true
                     }
+                    KeyCode::F1 => {
+                        if is_pressed {
+                            self.show_chunk_outlines = !self.show_chunk_outlines;
+                            println!("Chunk outlines: {}", if self.show_chunk_outlines { "ON" } else { "OFF" });
+                        }
+                        true
+                    }
                     _ => false,
                 }
             }
@@ -1154,6 +1291,27 @@ impl State {
                 // Only handle block place if mouse is captured (in-game)
                 if self.mouse_captured {
                     self.handle_block_place();
+                }
+                true
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                // Only handle scroll if mouse is captured (in-game) and not in crafting mode
+                if self.mouse_captured && !self.show_crafting {
+                    let scroll_amount = match delta {
+                        MouseScrollDelta::LineDelta(_, y) => *y as i32,
+                        MouseScrollDelta::PixelDelta(pos) => {
+                            // Convert pixel delta to line units (typical ~40 pixels per line)
+                            (pos.y / 40.0) as i32
+                        }
+                    };
+
+                    if scroll_amount != 0 {
+                        let slots = self.player.inventory.size;
+                        let current = self.player.inventory.selected_slot as i32;
+                        // Scroll up = previous slot, scroll down = next slot
+                        let new_slot = (current - scroll_amount).rem_euclid(slots as i32) as usize;
+                        self.player.inventory.selected_slot = new_slot;
+                    }
                 }
                 true
             }
@@ -1480,6 +1638,47 @@ impl State {
             outline_pass.set_bind_group(0, &self.camera_bind_group, &[]);
             outline_pass.set_vertex_buffer(0, outline_vertex_buffer.slice(..));
             outline_pass.draw(0..outline_vertices.len() as u32, 0..1);
+        }
+
+        // Render chunk outlines if debug mode is enabled
+        if self.show_chunk_outlines {
+            let mut chunk_outline_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Chunk Outline Render Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+
+            let chunk_outline_vertices = self.build_chunk_outline_vertices();
+            if !chunk_outline_vertices.is_empty() {
+                let chunk_outline_buffer =
+                    self.device
+                        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                            label: Some("Chunk Outline Vertex Buffer"),
+                            contents: bytemuck::cast_slice(&chunk_outline_vertices),
+                            usage: wgpu::BufferUsages::VERTEX,
+                        });
+
+                chunk_outline_pass.set_pipeline(&self.chunk_outline_pipeline);
+                chunk_outline_pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                chunk_outline_pass.set_vertex_buffer(0, chunk_outline_buffer.slice(..));
+                chunk_outline_pass.draw(0..chunk_outline_vertices.len() as u32, 0..1);
+            }
         }
 
         // Render UI (crosshair) - separate pass without depth

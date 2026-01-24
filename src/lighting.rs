@@ -344,3 +344,31 @@ fn get_light_checked(chunk: &Chunk, x: i32, y: i32, z: i32) -> Option<u8> {
         None
     }
 }
+
+/// Seed light at a specific position and propagate within the chunk.
+/// Used for cross-chunk light propagation.
+/// Returns true if the light was actually updated (was brighter than existing).
+pub fn seed_light_and_propagate(chunk: &mut Chunk, x: usize, y: usize, z: usize, light: u8) -> bool {
+    // Check if the block allows light to pass through
+    let block = chunk.blocks[x][y][z];
+    if block.is_solid() && !block.is_transparent() {
+        return false;
+    }
+
+    // Only update if new light is brighter
+    if light <= chunk.light_levels[x][y][z] {
+        return false;
+    }
+
+    chunk.light_levels[x][y][z] = light;
+
+    let mut queue = VecDeque::new();
+    queue.push_back(LightNode {
+        x: x as i32,
+        y: y as i32,
+        z: z as i32,
+    });
+    propagate_light(chunk, &mut queue);
+
+    true
+}
