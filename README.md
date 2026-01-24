@@ -1,4 +1,4 @@
-# Craft - Minecraft Clone in Rust
+# RustCraft - Minecraft Clone in Rust
 
 A Minecraft-inspired voxel game built in Rust. Features procedural world generation, destructible blocks, and inventory management.
 
