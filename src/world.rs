@@ -36,7 +36,7 @@ impl World {
 
         // Only perform updates if we actually generated something
         if !new_chunks.is_empty() {
-            // 1. Mark neighbors dirty so they re-mesh (stitch) with the new chunks
+            // Mark neighbors dirty so they re-mesh (stitch) with the new chunks
             for (cx, cz) in &new_chunks {
                 for (dx, dz) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
                     let neighbor_pos = (cx + dx, cz + dz);
@@ -46,8 +46,8 @@ impl World {
                 }
             }
 
-            // 2. Propagate light between the new chunks and the existing world
-            // This ensures sunlight or caves flow correctly across the new boundaries
+            // Propagate light between the new chunks and the existing world
+            // - This ensures sunlight or caves flow correctly across the new boundaries
             self.propagate_cross_chunk_lighting(&new_chunks);
         }
     }
@@ -102,7 +102,7 @@ impl World {
         }
 
         // 2. Check all neighbors (including diagonals) within range.
-        // We determine the range of chunk offsets (-1, 0, or 1) based on proximity to edges.
+        // - We determine the range of chunk offsets (-1, 0, or 1) based on proximity to edges.
         
         let min_dx = if local_x < light_propagation_distance { -1 } else { 0 };
         let max_dx = if local_x >= CHUNK_SIZE - light_propagation_distance { 1 } else { 0 };
@@ -135,12 +135,11 @@ impl World {
         for pos in light_dirty_positions.iter() {
             if let Some(chunk) = self.chunks.get_mut(pos) {
                 lighting::calculate_chunk_lighting(chunk);
-                // light_dirty is cleared inside calculate_chunk_lighting
             }
         }
 
         // Cross-chunk light propagation: propagate light from chunk edges into neighbors
-        // This is needed because calculate_chunk_lighting only works within a single chunk
+        // - This is needed because calculate_chunk_lighting only works within a single chunk
         if !light_dirty_positions.is_empty() {
             self.propagate_cross_chunk_lighting(&light_dirty_positions);
         }
@@ -184,13 +183,7 @@ impl World {
     }
 
     /// Propagate light across chunk boundaries.
-    /// After individual chunk lighting is calculated, this spreads light from
-    /// one chunk's edge into neighboring chunks.
     fn propagate_cross_chunk_lighting(&mut self, _dirty_positions: &[(i32, i32)]) {
-        // We need multiple iterations because light can propagate across multiple chunks
-        // (e.g., a glowstone at a corner might affect diagonal chunks through intermediate ones)
-        // We iterate over ALL chunks, not just dirty ones, because a chunk that received
-        // light in a previous iteration needs to propagate to its neighbors too.
         for _ in 0..15 {
             let mut any_changes = false;
 
@@ -199,8 +192,6 @@ impl World {
 
             // For each chunk, propagate its edge light into neighbors
             for (cx, cz) in all_positions {
-                // Collect edge light values from current chunk to propagate to neighbors
-                // We need to do this in a specific order to avoid borrow issues
 
                 // Propagate to right neighbor (cx+1): our x=CHUNK_SIZE-1 -> their x=0
                 if self.chunks.contains_key(&(cx + 1, cz)) {
@@ -225,7 +216,7 @@ impl World {
                         for (y, z, light) in edge_lights {
                             if lighting::seed_light_and_propagate(neighbor, 0, y, z, light) {
                                 any_changes = true;
-                                neighbor.dirty = true; // Crucial: Rebuild mesh if light changed
+                                neighbor.dirty = true; // Rebuild mesh if light changed
                             }
                         }
                     }
@@ -254,7 +245,7 @@ impl World {
                         for (y, z, light) in edge_lights {
                             if lighting::seed_light_and_propagate(neighbor, CHUNK_SIZE - 1, y, z, light) {
                                 any_changes = true;
-                                neighbor.dirty = true; // Crucial: Rebuild mesh if light changed
+                                neighbor.dirty = true; // Rebuild mesh if light changed
                             }
                         }
                     }
@@ -283,7 +274,7 @@ impl World {
                         for (x, y, light) in edge_lights {
                             if lighting::seed_light_and_propagate(neighbor, x, y, 0, light) {
                                 any_changes = true;
-                                neighbor.dirty = true; // Crucial: Rebuild mesh if light changed
+                                neighbor.dirty = true; // Rebuild mesh if light changed
                             }
                         }
                     }
@@ -312,7 +303,7 @@ impl World {
                         for (x, y, light) in edge_lights {
                             if lighting::seed_light_and_propagate(neighbor, x, y, CHUNK_SIZE - 1, light) {
                                 any_changes = true;
-                                neighbor.dirty = true; // Crucial: Rebuild mesh if light changed
+                                neighbor.dirty = true; // Rebuild mesh if light changed
                             }
                         }
                     }
