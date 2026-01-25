@@ -9,12 +9,21 @@ struct CameraUniform {
 @group(0) @binding(0)
 var<uniform> camera: CameraUniform;
 
+// Texture atlas bindings
+@group(1) @binding(0)
+var texture_atlas: texture_2d<f32>;
+
+@group(1) @binding(1)
+var texture_sampler: sampler;
+
 struct VertexInput {
     @location(0) position: vec3<f32>,
     @location(1) color: vec3<f32>,
     @location(2) normal: vec3<f32>,
     @location(3) light_level: f32,
     @location(4) alpha: f32,
+    @location(5) uv: vec2<f32>,
+    @location(6) tex_index: u32,
 };
 
 struct VertexOutput {
@@ -24,6 +33,8 @@ struct VertexOutput {
     @location(2) frag_pos: vec3<f32>,
     @location(3) light_level: f32,
     @location(4) alpha: f32,
+    @location(5) uv: vec2<f32>,
+    @location(6) @interpolate(flat) tex_index: u32,
 };
 
 @vertex
@@ -36,11 +47,25 @@ fn vs_main(model: VertexInput) -> VertexOutput {
     out.frag_pos = model.position;
     out.light_level = model.light_level;
     out.alpha = model.alpha;
+    out.uv = model.uv;
+    out.tex_index = model.tex_index;
     return out;
 }
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    // Determine base color: texture or vertex color
+    var base_color: vec3<f32>;
+
+    if (in.tex_index == 255u) {
+        // No texture - use vertex color (fallback for untextured blocks)
+        base_color = in.color;
+    } else {
+        // Sample from texture atlas
+        let tex_color = textureSample(texture_atlas, texture_sampler, in.uv);
+        base_color = tex_color.rgb;
+    }
+
     // Minimum ambient light (visibility even in complete darkness)
     let min_ambient = 0.05;
 
@@ -57,7 +82,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Combine lighting: voxel light is primary, directional adds depth
     let total_light = min_ambient + curved_light * 0.9 + directional * voxel_light;
 
-    let lit_color = in.color * total_light;
+    let lit_color = base_color * total_light;
 
     return vec4<f32>(lit_color, in.alpha);
 }

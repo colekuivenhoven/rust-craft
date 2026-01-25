@@ -21,6 +21,8 @@ struct VertexInput {
     @location(2) normal: vec3<f32>,
     @location(3) light_level: f32,
     @location(4) alpha: f32,  // Base alpha - unused as I'm calculating dynamically
+    @location(5) uv: vec2<f32>,  // Unused for water but required for vertex format compatibility
+    @location(6) tex_index: u32,  // Unused for water but required for vertex format compatibility
 };
 
 struct VertexOutput {

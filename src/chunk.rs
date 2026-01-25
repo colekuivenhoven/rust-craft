@@ -1,5 +1,6 @@
 use crate::block::{BlockType, Vertex, create_face_vertices};
 use crate::lighting;
+use crate::texture::{get_face_uvs, TEX_NONE};
 use cgmath::Vector3;
 use noise::{NoiseFn, Perlin};
 use rand::{Rng, SeedableRng};
@@ -506,9 +507,24 @@ impl Chunk {
                             let light = neighbors.get_light(nx, ny, nz);
                             let light_normalized = light as f32 / 15.0;
 
+                            // Check if block above is solid (for grass/dirt texture selection)
+                            let block_above = neighbors.get_block(x as i32, y as i32 + 1, z as i32);
+                            let has_block_above = block_above.is_solid();
+
+                            // Get texture info for this block
+                            let face_textures = block.get_face_textures(has_block_above);
+                            let tex_index = face_textures.get_for_face(face_idx);
+
+                            // Get UVs for this texture (or default for non-textured)
+                            let uvs = if tex_index != TEX_NONE {
+                                get_face_uvs(tex_index)
+                            } else {
+                                [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]
+                            };
+
                             if is_water {
                                 // Water uses separate mesh, alpha calculated in shader based on depth
-                                let face_verts = create_face_vertices(world_pos, block, face_idx, light_normalized);
+                                let face_verts = create_face_vertices(world_pos, block, face_idx, light_normalized, tex_index, uvs);
 
                                 let base_index = water_vertices.len() as u16;
                                 water_vertices.extend_from_slice(&face_verts);
@@ -517,7 +533,7 @@ impl Chunk {
                                     base_index + 2, base_index + 3, base_index,
                                 ]);
                             } else {
-                                let face_verts = create_face_vertices(world_pos, block, face_idx, light_normalized);
+                                let face_verts = create_face_vertices(world_pos, block, face_idx, light_normalized, tex_index, uvs);
 
                                 let base_index = vertices.len() as u16;
                                 vertices.extend_from_slice(&face_verts);

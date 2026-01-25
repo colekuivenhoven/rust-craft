@@ -1,10 +1,11 @@
-use crate::block::{BlockType, Vertex, UiVertex, LineVertex, create_cube_vertices, create_block_outline, CUBE_INDICES};
+use crate::block::{BlockType, Vertex, UiVertex, LineVertex, create_cube_vertices, create_block_outline, create_face_vertices, CUBE_INDICES};
 use crate::camera::{Camera, CameraController, CameraUniform, Projection};
 use crate::chunk::{CHUNK_SIZE, CHUNK_HEIGHT};
 use crate::crafting::CraftingSystem;
 use crate::enemy::EnemyManager;
 use crate::bitmap_font;
 use crate::player::Player;
+use crate::texture::{TextureAtlas, get_face_uvs, TEX_DESTROY_BASE};
 use crate::water::WaterSimulation;
 use crate::world::World;
 use cgmath::{Point3, Vector3};
@@ -14,6 +15,32 @@ use wgpu::util::DeviceExt;
 use winit::event::*;
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::Window;
+
+/// Tracks the state of an in-progress block break
+pub struct BreakingState {
+    /// Block position being broken
+    pub block_pos: (i32, i32, i32),
+    /// Breaking progress from 0.0 to 1.0
+    pub progress: f32,
+    /// Block type being broken (for durability lookup)
+    pub block_type: BlockType,
+}
+
+impl BreakingState {
+    pub fn new(pos: (i32, i32, i32), block_type: BlockType) -> Self {
+        Self {
+            block_pos: pos,
+            progress: 0.0,
+            block_type,
+        }
+    }
+
+    /// Returns the destroy stage index (0-9) based on progress
+    pub fn get_destroy_stage(&self) -> u32 {
+        let stage = (self.progress * 10.0).floor() as u32;
+        stage.min(9)
+    }
+}
 
 pub struct State {
     surface: wgpu::Surface<'static>,
@@ -67,6 +94,12 @@ pub struct State {
     fps_timer: f32,
     // Debug mode
     show_chunk_outlines: bool,
+    // Texture atlas
+    texture_atlas: TextureAtlas,
+    // Breaking mechanics
+    breaking_pipeline: wgpu::RenderPipeline,
+    breaking_state: Option<BreakingState>,
+    left_mouse_held: bool,
 }
 
 impl State {
@@ -170,10 +203,13 @@ impl State {
             source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
         });
 
+        // Create texture atlas
+        let texture_atlas = TextureAtlas::new(&device, &queue);
+
         let render_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("Render Pipeline Layout"),
-                bind_group_layouts: &[&camera_bind_group_layout],
+                bind_group_layouts: &[&camera_bind_group_layout, &texture_atlas.bind_group_layout],
                 push_constant_ranges: &[],
             });
 
@@ -607,6 +643,67 @@ impl State {
             cache: None,
         });
 
+        // Breaking overlay pipeline
+        let breaking_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Breaking Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("breaking_shader.wgsl").into()),
+        });
+
+        let breaking_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Breaking Pipeline"),
+            layout: Some(&render_pipeline_layout),  // Reuse main pipeline layout (camera + texture)
+            vertex: wgpu::VertexState {
+                module: &breaking_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[Vertex::desc()],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &breaking_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: Some(wgpu::BlendState {
+                        color: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::SrcAlpha,
+                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                        alpha: wgpu::BlendComponent::OVER,
+                    }),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: Some(wgpu::Face::Back),
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: false,
+                depth_compare: wgpu::CompareFunction::LessEqual,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState {
+                    constant: -1,  // Push slightly toward camera
+                    slope_scale: -1.0,
+                    clamp: 0.0,
+                },
+            }),
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            multiview: None,
+            cache: None,
+        });
+
         Self {
             surface,
             device,
@@ -654,6 +751,12 @@ impl State {
             fps_timer: 0.0,
             // Debug mode
             show_chunk_outlines: false,
+            // Texture atlas
+            texture_atlas,
+            // Breaking mechanics
+            breaking_pipeline,
+            breaking_state: None,
+            left_mouse_held: false,
         }
     }
 
@@ -1276,10 +1379,13 @@ impl State {
                 button: MouseButton::Left,
                 ..
             } => {
-                self.mouse_pressed = *state == ElementState::Pressed;
-                // Only handle block break if mouse is captured (in-game)
-                if self.mouse_pressed && self.mouse_captured {
-                    self.handle_block_break();
+                let is_pressed = *state == ElementState::Pressed;
+                self.mouse_pressed = is_pressed;
+                self.left_mouse_held = is_pressed;
+
+                if !is_pressed {
+                    // Mouse released - cancel any breaking in progress
+                    self.breaking_state = None;
                 }
                 true
             }
@@ -1319,14 +1425,104 @@ impl State {
         }
     }
 
-    fn handle_block_break(&mut self) {
+    fn complete_block_break(&mut self, x: i32, y: i32, z: i32, block_type: BlockType) {
+        self.player.inventory.add_item(block_type, 1);
+        self.world.set_block_world(x, y, z, BlockType::Air);
+        println!("Broke block: {:?}", block_type);
+    }
+
+    /// Creates vertices for the breaking overlay on visible faces of a block
+    fn create_breaking_overlay_vertices(&self, x: i32, y: i32, z: i32, destroy_stage: u32) -> (Vec<Vertex>, Vec<u16>) {
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+
+        let world_pos = Vector3::new(x as f32, y as f32, z as f32);
+        let block_type = self.world.get_block_world(x, y, z);
+
+        // Small offset to render in front of block faces (prevents z-fighting)
+        let offset = 0.001;
+
+        let face_directions: [(i32, i32, i32); 6] = [
+            (0, 0, 1), (0, 0, -1), (0, 1, 0), (0, -1, 0), (1, 0, 0), (-1, 0, 0),
+        ];
+
+        // Get UVs for the destroy texture
+        let tex_index = TEX_DESTROY_BASE + destroy_stage;
+        let uvs = get_face_uvs(tex_index);
+
+        for (face_idx, &(dx, dy, dz)) in face_directions.iter().enumerate() {
+            let neighbor = self.world.get_block_world(x + dx, y + dy, z + dz);
+
+            // Only render overlay on visible faces (where neighbor is transparent)
+            if neighbor.is_transparent() {
+                // Offset position slightly toward camera based on face normal
+                let offset_pos = Vector3::new(
+                    world_pos.x + dx as f32 * offset,
+                    world_pos.y + dy as f32 * offset,
+                    world_pos.z + dz as f32 * offset,
+                );
+
+                let face_verts = create_face_vertices(offset_pos, block_type, face_idx, 1.0, tex_index, uvs);
+
+                let base_index = vertices.len() as u16;
+                vertices.extend_from_slice(&face_verts);
+                indices.extend_from_slice(&[
+                    base_index, base_index + 1, base_index + 2,
+                    base_index + 2, base_index + 3, base_index,
+                ]);
+            }
+        }
+
+        (vertices, indices)
+    }
+
+    fn update_block_breaking(&mut self, dt: f32) {
+        if !self.left_mouse_held || !self.mouse_captured {
+            // Not holding left mouse or not in game
+            self.breaking_state = None;
+            return;
+        }
+
+        // Get currently targeted block
         let direction = self.camera.get_direction();
-        if let Some((x, y, z, _)) = self.player.raycast_block(direction, &self.world) {
-            let block = self.world.get_block_world(x, y, z);
-            if block != BlockType::Air {
-                self.player.inventory.add_item(block, 1);
-                self.world.set_block_world(x, y, z, BlockType::Air);
-                println!("Broke block: {:?}", block);
+        let target = self.player.raycast_block(direction, &self.world);
+
+        match (&mut self.breaking_state, target) {
+            (Some(state), Some((x, y, z, _))) => {
+                if state.block_pos == (x, y, z) {
+                    // Still targeting same block - increment progress
+                    let durability = state.block_type.get_durability();
+                    if durability > 0.0 {
+                        state.progress += dt / durability;
+
+                        if state.progress >= 1.0 {
+                            // Block broken!
+                            let block_type = state.block_type;
+                            let pos = state.block_pos;
+                            self.breaking_state = None;
+                            self.complete_block_break(pos.0, pos.1, pos.2, block_type);
+                        }
+                    }
+                } else {
+                    // Targeting different block - reset
+                    let block_type = self.world.get_block_world(x, y, z);
+                    if block_type.is_breakable() {
+                        self.breaking_state = Some(BreakingState::new((x, y, z), block_type));
+                    } else {
+                        self.breaking_state = None;
+                    }
+                }
+            }
+            (None, Some((x, y, z, _))) => {
+                // Start breaking new block
+                let block_type = self.world.get_block_world(x, y, z);
+                if block_type.is_breakable() {
+                    self.breaking_state = Some(BreakingState::new((x, y, z), block_type));
+                }
+            }
+            (_, None) => {
+                // Not targeting any block
+                self.breaking_state = None;
             }
         }
     }
@@ -1397,6 +1593,9 @@ impl State {
         self.targeted_block = self.player.raycast_block(direction, &self.world)
             .map(|(x, y, z, _)| (x, y, z));
 
+        // Update block breaking
+        self.update_block_breaking(dt);
+
         // Update camera uniform
         self.camera_uniform
             .update_view_proj(&self.camera, &self.projection);
@@ -1451,6 +1650,7 @@ impl State {
 
             render_pass.set_pipeline(&self.render_pipeline);
             render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
+            render_pass.set_bind_group(1, &self.texture_atlas.bind_group, &[]);
 
             // Render chunks
             for chunk in self.world.chunks.values() {
@@ -1598,6 +1798,58 @@ impl State {
                         .set_index_buffer(water_index_buffer.slice(..), wgpu::IndexFormat::Uint16);
                     water_pass.draw_indexed(0..chunk.water_indices.len() as u32, 0, 0..1);
                 }
+            }
+        }
+
+        // Render breaking overlay if actively breaking a block
+        if let Some(ref breaking_state) = self.breaking_state {
+            let (bx, by, bz) = breaking_state.block_pos;
+            let destroy_stage = breaking_state.get_destroy_stage();
+
+            // Generate overlay vertices for visible faces
+            let (overlay_vertices, overlay_indices) = self.create_breaking_overlay_vertices(bx, by, bz, destroy_stage);
+
+            if !overlay_vertices.is_empty() {
+                let mut breaking_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("Breaking Overlay Pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &self.depth_view,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+
+                let vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Breaking Overlay Vertex Buffer"),
+                    contents: bytemuck::cast_slice(&overlay_vertices),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+
+                let index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Breaking Overlay Index Buffer"),
+                    contents: bytemuck::cast_slice(&overlay_indices),
+                    usage: wgpu::BufferUsages::INDEX,
+                });
+
+                breaking_pass.set_pipeline(&self.breaking_pipeline);
+                breaking_pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                breaking_pass.set_bind_group(1, &self.texture_atlas.bind_group, &[]);
+                breaking_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+                breaking_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+                breaking_pass.draw_indexed(0..overlay_indices.len() as u32, 0, 0..1);
             }
         }
 

@@ -1,4 +1,5 @@
 use cgmath::Vector3;
+use crate::texture::{FaceTextures, TEX_DIRT, TEX_GRASS_TOP, TEX_GRASS_SIDE, TEX_NONE};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BlockType {
@@ -110,6 +111,51 @@ impl BlockType {
             _ => 0,
         }
     }
+
+    /// Returns texture indices for block faces.
+    /// `has_block_above`: true if there's a solid block directly above this one
+    pub fn get_face_textures(&self, has_block_above: bool) -> FaceTextures {
+        match self {
+            BlockType::Dirt | BlockType::Grass => {
+                if has_block_above {
+                    // Covered dirt: all faces use dirt texture
+                    FaceTextures::all(TEX_DIRT)
+                } else {
+                    // Exposed dirt/grass: grass top, grass sides, dirt bottom
+                    FaceTextures {
+                        top: TEX_GRASS_TOP,
+                        bottom: TEX_DIRT,
+                        sides: TEX_GRASS_SIDE,
+                    }
+                }
+            }
+            // All other blocks use color fallback
+            _ => FaceTextures::all(TEX_NONE),
+        }
+    }
+
+    /// Returns the time in seconds required to break this block
+    pub fn get_durability(&self) -> f32 {
+        match self {
+            BlockType::Air => 0.0,
+            BlockType::Grass => 0.6,
+            BlockType::Dirt => 0.5,
+            BlockType::Stone => 1.5,
+            BlockType::Wood => 2.0,
+            BlockType::Leaves => 0.2,
+            BlockType::Sand => 0.5,
+            BlockType::Water => 0.0,  // Cannot break water
+            BlockType::Cobblestone => 2.0,
+            BlockType::Planks => 1.5,
+            BlockType::GlowStone => 0.8,
+            BlockType::Boundary => 0.0,
+        }
+    }
+
+    /// Returns true if this block can be broken
+    pub fn is_breakable(&self) -> bool {
+        !matches!(self, BlockType::Air | BlockType::Water | BlockType::Boundary)
+    }
 }
 
 #[repr(C)]
@@ -120,6 +166,8 @@ pub struct Vertex {
     pub normal: [f32; 3],
     pub light_level: f32,
     pub alpha: f32,  // Transparency (1.0 = opaque, 0.0 = fully transparent)
+    pub uv: [f32; 2],  // Texture coordinates
+    pub tex_index: u32,  // Texture index in atlas (255 = use color fallback)
 }
 
 impl Vertex {
@@ -128,30 +176,47 @@ impl Vertex {
             array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
             step_mode: wgpu::VertexStepMode::Vertex,
             attributes: &[
+                // position: location 0
                 wgpu::VertexAttribute {
                     offset: 0,
                     shader_location: 0,
                     format: wgpu::VertexFormat::Float32x3,
                 },
+                // color: location 1
                 wgpu::VertexAttribute {
                     offset: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
                     shader_location: 1,
                     format: wgpu::VertexFormat::Float32x3,
                 },
+                // normal: location 2
                 wgpu::VertexAttribute {
                     offset: std::mem::size_of::<[f32; 6]>() as wgpu::BufferAddress,
                     shader_location: 2,
                     format: wgpu::VertexFormat::Float32x3,
                 },
+                // light_level: location 3
                 wgpu::VertexAttribute {
                     offset: std::mem::size_of::<[f32; 9]>() as wgpu::BufferAddress,
                     shader_location: 3,
                     format: wgpu::VertexFormat::Float32,
                 },
+                // alpha: location 4
                 wgpu::VertexAttribute {
                     offset: std::mem::size_of::<[f32; 10]>() as wgpu::BufferAddress,
                     shader_location: 4,
                     format: wgpu::VertexFormat::Float32,
+                },
+                // uv: location 5
+                wgpu::VertexAttribute {
+                    offset: std::mem::size_of::<[f32; 11]>() as wgpu::BufferAddress,
+                    shader_location: 5,
+                    format: wgpu::VertexFormat::Float32x2,
+                },
+                // tex_index: location 6
+                wgpu::VertexAttribute {
+                    offset: std::mem::size_of::<[f32; 13]>() as wgpu::BufferAddress,
+                    shader_location: 6,
+                    format: wgpu::VertexFormat::Uint32,
                 },
             ],
         }
@@ -159,12 +224,12 @@ impl Vertex {
 }
 
 /// Creates vertices for a single face of a cube
-pub fn create_face_vertices(pos: Vector3<f32>, block_type: BlockType, face_index: usize, light_level: f32) -> [Vertex; 4] {
-    create_face_vertices_with_alpha(pos, block_type, face_index, light_level, 1.0)
+pub fn create_face_vertices(pos: Vector3<f32>, block_type: BlockType, face_index: usize, light_level: f32, tex_index: u32, uvs: [[f32; 2]; 4]) -> [Vertex; 4] {
+    create_face_vertices_with_alpha(pos, block_type, face_index, light_level, 1.0, tex_index, uvs)
 }
 
 /// Creates vertices for a single face of a cube with custom alpha
-pub fn create_face_vertices_with_alpha(pos: Vector3<f32>, block_type: BlockType, face_index: usize, light_level: f32, alpha: f32) -> [Vertex; 4] {
+pub fn create_face_vertices_with_alpha(pos: Vector3<f32>, block_type: BlockType, face_index: usize, light_level: f32, alpha: f32, tex_index: u32, uvs: [[f32; 2]; 4]) -> [Vertex; 4] {
     let color = block_type.get_color();
     let x = pos.x;
     let y = pos.y;
@@ -172,82 +237,85 @@ pub fn create_face_vertices_with_alpha(pos: Vector3<f32>, block_type: BlockType,
 
     match face_index {
         0 => [ // Front face (+Z)
-            Vertex { position: [x, y, z + 1.0], color, normal: [0.0, 0.0, 1.0], light_level, alpha },
-            Vertex { position: [x + 1.0, y, z + 1.0], color, normal: [0.0, 0.0, 1.0], light_level, alpha },
-            Vertex { position: [x + 1.0, y + 1.0, z + 1.0], color, normal: [0.0, 0.0, 1.0], light_level, alpha },
-            Vertex { position: [x, y + 1.0, z + 1.0], color, normal: [0.0, 0.0, 1.0], light_level, alpha },
+            Vertex { position: [x, y, z + 1.0], color, normal: [0.0, 0.0, 1.0], light_level, alpha, uv: uvs[0], tex_index },
+            Vertex { position: [x + 1.0, y, z + 1.0], color, normal: [0.0, 0.0, 1.0], light_level, alpha, uv: uvs[1], tex_index },
+            Vertex { position: [x + 1.0, y + 1.0, z + 1.0], color, normal: [0.0, 0.0, 1.0], light_level, alpha, uv: uvs[2], tex_index },
+            Vertex { position: [x, y + 1.0, z + 1.0], color, normal: [0.0, 0.0, 1.0], light_level, alpha, uv: uvs[3], tex_index },
         ],
         1 => [ // Back face (-Z)
-            Vertex { position: [x + 1.0, y, z], color, normal: [0.0, 0.0, -1.0], light_level, alpha },
-            Vertex { position: [x, y, z], color, normal: [0.0, 0.0, -1.0], light_level, alpha },
-            Vertex { position: [x, y + 1.0, z], color, normal: [0.0, 0.0, -1.0], light_level, alpha },
-            Vertex { position: [x + 1.0, y + 1.0, z], color, normal: [0.0, 0.0, -1.0], light_level, alpha },
+            Vertex { position: [x + 1.0, y, z], color, normal: [0.0, 0.0, -1.0], light_level, alpha, uv: uvs[0], tex_index },
+            Vertex { position: [x, y, z], color, normal: [0.0, 0.0, -1.0], light_level, alpha, uv: uvs[1], tex_index },
+            Vertex { position: [x, y + 1.0, z], color, normal: [0.0, 0.0, -1.0], light_level, alpha, uv: uvs[2], tex_index },
+            Vertex { position: [x + 1.0, y + 1.0, z], color, normal: [0.0, 0.0, -1.0], light_level, alpha, uv: uvs[3], tex_index },
         ],
         2 => [ // Top face (+Y)
-            Vertex { position: [x, y + 1.0, z + 1.0], color, normal: [0.0, 1.0, 0.0], light_level, alpha },
-            Vertex { position: [x + 1.0, y + 1.0, z + 1.0], color, normal: [0.0, 1.0, 0.0], light_level, alpha },
-            Vertex { position: [x + 1.0, y + 1.0, z], color, normal: [0.0, 1.0, 0.0], light_level, alpha },
-            Vertex { position: [x, y + 1.0, z], color, normal: [0.0, 1.0, 0.0], light_level, alpha },
+            Vertex { position: [x, y + 1.0, z + 1.0], color, normal: [0.0, 1.0, 0.0], light_level, alpha, uv: uvs[0], tex_index },
+            Vertex { position: [x + 1.0, y + 1.0, z + 1.0], color, normal: [0.0, 1.0, 0.0], light_level, alpha, uv: uvs[1], tex_index },
+            Vertex { position: [x + 1.0, y + 1.0, z], color, normal: [0.0, 1.0, 0.0], light_level, alpha, uv: uvs[2], tex_index },
+            Vertex { position: [x, y + 1.0, z], color, normal: [0.0, 1.0, 0.0], light_level, alpha, uv: uvs[3], tex_index },
         ],
         3 => [ // Bottom face (-Y)
-            Vertex { position: [x, y, z], color, normal: [0.0, -1.0, 0.0], light_level, alpha },
-            Vertex { position: [x + 1.0, y, z], color, normal: [0.0, -1.0, 0.0], light_level, alpha },
-            Vertex { position: [x + 1.0, y, z + 1.0], color, normal: [0.0, -1.0, 0.0], light_level, alpha },
-            Vertex { position: [x, y, z + 1.0], color, normal: [0.0, -1.0, 0.0], light_level, alpha },
+            Vertex { position: [x, y, z], color, normal: [0.0, -1.0, 0.0], light_level, alpha, uv: uvs[0], tex_index },
+            Vertex { position: [x + 1.0, y, z], color, normal: [0.0, -1.0, 0.0], light_level, alpha, uv: uvs[1], tex_index },
+            Vertex { position: [x + 1.0, y, z + 1.0], color, normal: [0.0, -1.0, 0.0], light_level, alpha, uv: uvs[2], tex_index },
+            Vertex { position: [x, y, z + 1.0], color, normal: [0.0, -1.0, 0.0], light_level, alpha, uv: uvs[3], tex_index },
         ],
         4 => [ // Right face (+X)
-            Vertex { position: [x + 1.0, y, z + 1.0], color, normal: [1.0, 0.0, 0.0], light_level, alpha },
-            Vertex { position: [x + 1.0, y, z], color, normal: [1.0, 0.0, 0.0], light_level, alpha },
-            Vertex { position: [x + 1.0, y + 1.0, z], color, normal: [1.0, 0.0, 0.0], light_level, alpha },
-            Vertex { position: [x + 1.0, y + 1.0, z + 1.0], color, normal: [1.0, 0.0, 0.0], light_level, alpha },
+            Vertex { position: [x + 1.0, y, z + 1.0], color, normal: [1.0, 0.0, 0.0], light_level, alpha, uv: uvs[0], tex_index },
+            Vertex { position: [x + 1.0, y, z], color, normal: [1.0, 0.0, 0.0], light_level, alpha, uv: uvs[1], tex_index },
+            Vertex { position: [x + 1.0, y + 1.0, z], color, normal: [1.0, 0.0, 0.0], light_level, alpha, uv: uvs[2], tex_index },
+            Vertex { position: [x + 1.0, y + 1.0, z + 1.0], color, normal: [1.0, 0.0, 0.0], light_level, alpha, uv: uvs[3], tex_index },
         ],
         _ => [ // Left face (-X)
-            Vertex { position: [x, y, z], color, normal: [-1.0, 0.0, 0.0], light_level, alpha },
-            Vertex { position: [x, y, z + 1.0], color, normal: [-1.0, 0.0, 0.0], light_level, alpha },
-            Vertex { position: [x, y + 1.0, z + 1.0], color, normal: [-1.0, 0.0, 0.0], light_level, alpha },
-            Vertex { position: [x, y + 1.0, z], color, normal: [-1.0, 0.0, 0.0], light_level, alpha },
+            Vertex { position: [x, y, z], color, normal: [-1.0, 0.0, 0.0], light_level, alpha, uv: uvs[0], tex_index },
+            Vertex { position: [x, y, z + 1.0], color, normal: [-1.0, 0.0, 0.0], light_level, alpha, uv: uvs[1], tex_index },
+            Vertex { position: [x, y + 1.0, z + 1.0], color, normal: [-1.0, 0.0, 0.0], light_level, alpha, uv: uvs[2], tex_index },
+            Vertex { position: [x, y + 1.0, z], color, normal: [-1.0, 0.0, 0.0], light_level, alpha, uv: uvs[3], tex_index },
         ],
     }
 }
 
 pub fn create_cube_vertices(pos: Vector3<f32>, block_type: BlockType, light_level: f32) -> Vec<Vertex> {
+    use crate::texture::TEX_NONE;
     let color = block_type.get_color();
     let x = pos.x;
     let y = pos.y;
     let z = pos.z;
     let alpha = 1.0;
+    let uv = [0.0, 0.0]; // Default UV for non-textured blocks
+    let tex_index = TEX_NONE;
 
     vec![
         // Front face
-        Vertex { position: [x, y, z + 1.0], color, normal: [0.0, 0.0, 1.0], light_level, alpha },
-        Vertex { position: [x + 1.0, y, z + 1.0], color, normal: [0.0, 0.0, 1.0], light_level, alpha },
-        Vertex { position: [x + 1.0, y + 1.0, z + 1.0], color, normal: [0.0, 0.0, 1.0], light_level, alpha },
-        Vertex { position: [x, y + 1.0, z + 1.0], color, normal: [0.0, 0.0, 1.0], light_level, alpha },
+        Vertex { position: [x, y, z + 1.0], color, normal: [0.0, 0.0, 1.0], light_level, alpha, uv, tex_index },
+        Vertex { position: [x + 1.0, y, z + 1.0], color, normal: [0.0, 0.0, 1.0], light_level, alpha, uv, tex_index },
+        Vertex { position: [x + 1.0, y + 1.0, z + 1.0], color, normal: [0.0, 0.0, 1.0], light_level, alpha, uv, tex_index },
+        Vertex { position: [x, y + 1.0, z + 1.0], color, normal: [0.0, 0.0, 1.0], light_level, alpha, uv, tex_index },
         // Back face
-        Vertex { position: [x + 1.0, y, z], color, normal: [0.0, 0.0, -1.0], light_level, alpha },
-        Vertex { position: [x, y, z], color, normal: [0.0, 0.0, -1.0], light_level, alpha },
-        Vertex { position: [x, y + 1.0, z], color, normal: [0.0, 0.0, -1.0], light_level, alpha },
-        Vertex { position: [x + 1.0, y + 1.0, z], color, normal: [0.0, 0.0, -1.0], light_level, alpha },
+        Vertex { position: [x + 1.0, y, z], color, normal: [0.0, 0.0, -1.0], light_level, alpha, uv, tex_index },
+        Vertex { position: [x, y, z], color, normal: [0.0, 0.0, -1.0], light_level, alpha, uv, tex_index },
+        Vertex { position: [x, y + 1.0, z], color, normal: [0.0, 0.0, -1.0], light_level, alpha, uv, tex_index },
+        Vertex { position: [x + 1.0, y + 1.0, z], color, normal: [0.0, 0.0, -1.0], light_level, alpha, uv, tex_index },
         // Top face
-        Vertex { position: [x, y + 1.0, z + 1.0], color, normal: [0.0, 1.0, 0.0], light_level, alpha },
-        Vertex { position: [x + 1.0, y + 1.0, z + 1.0], color, normal: [0.0, 1.0, 0.0], light_level, alpha },
-        Vertex { position: [x + 1.0, y + 1.0, z], color, normal: [0.0, 1.0, 0.0], light_level, alpha },
-        Vertex { position: [x, y + 1.0, z], color, normal: [0.0, 1.0, 0.0], light_level, alpha },
+        Vertex { position: [x, y + 1.0, z + 1.0], color, normal: [0.0, 1.0, 0.0], light_level, alpha, uv, tex_index },
+        Vertex { position: [x + 1.0, y + 1.0, z + 1.0], color, normal: [0.0, 1.0, 0.0], light_level, alpha, uv, tex_index },
+        Vertex { position: [x + 1.0, y + 1.0, z], color, normal: [0.0, 1.0, 0.0], light_level, alpha, uv, tex_index },
+        Vertex { position: [x, y + 1.0, z], color, normal: [0.0, 1.0, 0.0], light_level, alpha, uv, tex_index },
         // Bottom face
-        Vertex { position: [x, y, z], color, normal: [0.0, -1.0, 0.0], light_level, alpha },
-        Vertex { position: [x + 1.0, y, z], color, normal: [0.0, -1.0, 0.0], light_level, alpha },
-        Vertex { position: [x + 1.0, y, z + 1.0], color, normal: [0.0, -1.0, 0.0], light_level, alpha },
-        Vertex { position: [x, y, z + 1.0], color, normal: [0.0, -1.0, 0.0], light_level, alpha },
+        Vertex { position: [x, y, z], color, normal: [0.0, -1.0, 0.0], light_level, alpha, uv, tex_index },
+        Vertex { position: [x + 1.0, y, z], color, normal: [0.0, -1.0, 0.0], light_level, alpha, uv, tex_index },
+        Vertex { position: [x + 1.0, y, z + 1.0], color, normal: [0.0, -1.0, 0.0], light_level, alpha, uv, tex_index },
+        Vertex { position: [x, y, z + 1.0], color, normal: [0.0, -1.0, 0.0], light_level, alpha, uv, tex_index },
         // Right face
-        Vertex { position: [x + 1.0, y, z + 1.0], color, normal: [1.0, 0.0, 0.0], light_level, alpha },
-        Vertex { position: [x + 1.0, y, z], color, normal: [1.0, 0.0, 0.0], light_level, alpha },
-        Vertex { position: [x + 1.0, y + 1.0, z], color, normal: [1.0, 0.0, 0.0], light_level, alpha },
-        Vertex { position: [x + 1.0, y + 1.0, z + 1.0], color, normal: [1.0, 0.0, 0.0], light_level, alpha },
+        Vertex { position: [x + 1.0, y, z + 1.0], color, normal: [1.0, 0.0, 0.0], light_level, alpha, uv, tex_index },
+        Vertex { position: [x + 1.0, y, z], color, normal: [1.0, 0.0, 0.0], light_level, alpha, uv, tex_index },
+        Vertex { position: [x + 1.0, y + 1.0, z], color, normal: [1.0, 0.0, 0.0], light_level, alpha, uv, tex_index },
+        Vertex { position: [x + 1.0, y + 1.0, z + 1.0], color, normal: [1.0, 0.0, 0.0], light_level, alpha, uv, tex_index },
         // Left face
-        Vertex { position: [x, y, z], color, normal: [-1.0, 0.0, 0.0], light_level, alpha },
-        Vertex { position: [x, y, z + 1.0], color, normal: [-1.0, 0.0, 0.0], light_level, alpha },
-        Vertex { position: [x, y + 1.0, z + 1.0], color, normal: [-1.0, 0.0, 0.0], light_level, alpha },
-        Vertex { position: [x, y + 1.0, z], color, normal: [-1.0, 0.0, 0.0], light_level, alpha },
+        Vertex { position: [x, y, z], color, normal: [-1.0, 0.0, 0.0], light_level, alpha, uv, tex_index },
+        Vertex { position: [x, y, z + 1.0], color, normal: [-1.0, 0.0, 0.0], light_level, alpha, uv, tex_index },
+        Vertex { position: [x, y + 1.0, z + 1.0], color, normal: [-1.0, 0.0, 0.0], light_level, alpha, uv, tex_index },
+        Vertex { position: [x, y + 1.0, z], color, normal: [-1.0, 0.0, 0.0], light_level, alpha, uv, tex_index },
     ]
 }
 
