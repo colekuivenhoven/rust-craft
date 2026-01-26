@@ -7,7 +7,7 @@ use rand::{Rng, SeedableRng};
 use rand::rngs::StdRng;
 
 pub const CHUNK_SIZE: usize = 32;
-pub const CHUNK_HEIGHT: usize = 64;
+pub const CHUNK_HEIGHT: usize = 128;
 
 // Tree generation configuration
 pub const TREE_MIN_HEIGHT: usize = 4;      // Minimum trunk height (current average)
@@ -99,12 +99,18 @@ impl Chunk {
         let biome_perlin = Perlin::new(44);     // very low frequency: ocean/land mask
         let mountain_perlin = Perlin::new(45);  // low frequency: mountain mask
         let detail_perlin = Perlin::new(46);    // higher frequency: small variation
+        let jagged_perlin = Perlin::new(47);    // high frequency: jagged mountain detail
 
         // Cave noise generators
         let cave_perlin_1 = Perlin::new(100);   // Primary spaghetti cave noise
         let cave_perlin_2 = Perlin::new(101);   // Secondary spaghetti cave noise (perpendicular)
         let cheese_perlin = Perlin::new(102);   // Large cavern "cheese" caves
         let cave_mask_perlin = Perlin::new(103); // Controls cave density in different areas
+
+        // Sky island noise generators (3D)
+        let sky_island_perlin = Perlin::new(200);      // Primary 3D shape
+        let sky_island_mask_perlin = Perlin::new(201); // 2D mask for sparse placement
+        let sky_island_detail = Perlin::new(202);      // Detail variation
 
         let world_offset_x = self.position.0 * CHUNK_SIZE as i32;
         let world_offset_z = self.position.1 * CHUNK_SIZE as i32;
@@ -147,10 +153,17 @@ impl Chunk {
                 // --- Ocean shaping ---
                 let ocean_drop = (1.0 - inland) * 16.0; // Pull terrain down near coasts/ocean.
 
-                // --- Mountain shaping ---
-                let ridge_scale = 0.018; // Add extra height in mountainous areas. Some ruggedness comes from slightly higher frequency noise.
-                let ridge = (perlin.get([world_x * ridge_scale, world_z * ridge_scale]).abs()) * 12.0;
-                let mountain_lift = mountains * (22.0 + ridge);
+                // --- Mountain shaping (jagged peaks) ---
+                // Use higher frequency noise for sharper, more jagged peaks (but same height)
+                let ridge_scale = 0.04; // Higher frequency for sharper ridges
+                let ridge = (perlin.get([world_x * ridge_scale, world_z * ridge_scale]).abs()) * 10.0;
+
+                // Add extra high-frequency jagged detail for sharp, craggy look
+                let jagged_scale = 0.12;
+                let jagged = (jagged_perlin.get([world_x * jagged_scale, world_z * jagged_scale]).abs()) * 4.0;
+
+                // Keep total mountain height similar to before (~22 + 12 = 34 max)
+                let mountain_lift = mountains * (20.0 + ridge + jagged);
 
                 let height_f = base_height + detail + mountain_lift - ocean_drop;
                 let height_i = height_f.round() as isize;
@@ -410,7 +423,7 @@ impl Chunk {
             }
         }
 
-        let glow_perlin = Perlin::new(43); 
+        let glow_perlin = Perlin::new(43);
         for x in 0..CHUNK_SIZE {
             for z in 0..CHUNK_SIZE {
                 let world_x = (world_offset_x + x as i32) as f64;
@@ -420,6 +433,255 @@ impl Chunk {
                         let noise_val = glow_perlin.get([world_x * 0.15, y as f64 * 0.15, world_z * 0.15]);
                         if noise_val > 0.85 {
                             self.blocks[x][y][z] = BlockType::GlowStone;
+                        }
+                    }
+                }
+            }
+        }
+
+        // === Floating Sky Islands ===
+        // Generate sparse, hilly islands at various heights with stalactites
+        let sky_island_base_y = 60;          // Lower base height
+        let sky_island_height_range = 50;    // More height variation (60-110)
+        let stalactite_perlin = Perlin::new(203); // For bottom stalactites
+        let hill_perlin = Perlin::new(204);       // For top hills
+
+        for x in 0..CHUNK_SIZE {
+            for z in 0..CHUNK_SIZE {
+                let world_x = (world_offset_x + x as i32) as f64;
+                let world_z = (world_offset_z + z as i32) as f64;
+
+                // 2D mask for very sparse island placement
+                let mask_scale = 0.005;
+                let island_mask = (sky_island_mask_perlin.get([world_x * mask_scale, world_z * mask_scale]) + 1.0) * 0.5;
+
+                if island_mask < 0.78 {
+                    continue;
+                }
+
+                // Height of this island cluster
+                let height_noise = (sky_island_detail.get([world_x * 0.003, world_z * 0.003]) + 1.0) * 0.5;
+                let island_center_y = sky_island_base_y + (height_noise * sky_island_height_range as f64) as usize;
+
+                // Hills on top - adds 0-4 blocks of height variation
+                let hill_scale = 0.08;
+                let hill_noise = (hill_perlin.get([world_x * hill_scale, world_z * hill_scale]) + 1.0) * 0.5;
+                let hill_height = (hill_noise * 4.0) as usize;
+
+                // Calculate "centeredness" - how close this point is to the core of the island
+                // Use horizontal slice of island noise to determine center
+                let island_scale = 0.025;
+                let horizontal_island_noise = (sky_island_perlin.get([
+                    world_x * island_scale,
+                    island_center_y as f64 * island_scale * 0.25, // Sample at island center height
+                    world_z * island_scale,
+                ]) + 1.0) * 0.5;
+
+                // Centeredness: higher noise = closer to island core
+                let centeredness = smoothstep(0.5, 0.8, horizontal_island_noise);
+
+                // Stalactites - longer in general, and much longer/thicker toward center
+                let stalactite_scale = 0.15;
+                let stalactite_noise = (stalactite_perlin.get([world_x * stalactite_scale, world_z * stalactite_scale]) + 1.0) * 0.5;
+
+                // Base stalactite depth (longer in general: 2-8 blocks at edges)
+                let base_stalactite = if stalactite_noise > 0.25 {
+                    2 + ((stalactite_noise - 0.25) * 10.0) as usize // 2-8 blocks
+                } else {
+                    0
+                };
+
+                // Center bonus: add up to 8 more blocks at the very center
+                let center_bonus = (centeredness * 8.0) as usize;
+
+                // Combined stalactite depth
+                let stalactite_depth = base_stalactite + center_bonus;
+
+                // Base island thickness
+                let base_thickness = 5;
+                let island_min_y = island_center_y.saturating_sub(base_thickness / 2 + stalactite_depth);
+                let island_max_y = (island_center_y + base_thickness / 2 + hill_height + 2).min(CHUNK_HEIGHT);
+
+                let island_strength = smoothstep(0.78, 0.90, island_mask);
+
+                for y in island_min_y..island_max_y {
+                    let world_y = y as f64;
+
+                    // 3D noise for island shape (island_scale defined above)
+                    let island_noise = sky_island_perlin.get([
+                        world_x * island_scale,
+                        world_y * island_scale * 0.25,
+                        world_z * island_scale,
+                    ]);
+
+                    // Adjusted center accounting for hills
+                    let effective_center_y = (island_center_y + hill_height / 2) as f64;
+                    let effective_thickness = base_thickness as f64 + hill_height as f64 / 2.0 + stalactite_depth as f64 / 2.0;
+
+                    // Vertical falloff
+                    let y_dist = (world_y - effective_center_y).abs() / (effective_thickness / 2.0 + 1.0);
+                    let y_falloff = (1.0 - y_dist.powi(2)).max(0.0);
+
+                    // Bottom tapers more, with stalactites extending further at center
+                    let is_below_center = world_y < effective_center_y;
+                    let taper = if is_below_center {
+                        // Stalactite regions taper less to allow them to extend down
+                        // More centeredness = less taper = longer stalactites
+                        let base_taper = 0.5;
+                        let center_taper_bonus = centeredness * 0.4; // Up to 0.9 at center
+                        y_falloff * (base_taper + center_taper_bonus)
+                    } else {
+                        y_falloff
+                    };
+
+                    let threshold = 0.45 - (island_strength * 0.25) - (taper * 0.2);
+
+                    if island_noise > threshold && self.blocks[x][y][z] == BlockType::Air {
+                        // Check if this is a surface block
+                        let is_surface = y + 1 >= island_max_y || {
+                            let above_y = (y + 1) as f64;
+                            let above_noise = sky_island_perlin.get([
+                                world_x * island_scale,
+                                above_y * island_scale * 0.25,
+                                world_z * island_scale,
+                            ]);
+                            let above_y_dist = (above_y - effective_center_y).abs() / (effective_thickness / 2.0 + 1.0);
+                            let above_y_falloff = (1.0 - above_y_dist.powi(2)).max(0.0);
+                            let above_taper = if above_y < effective_center_y {
+                                let base_taper = 0.5;
+                                let center_taper_bonus = centeredness * 0.4;
+                                above_y_falloff * (base_taper + center_taper_bonus)
+                            } else {
+                                above_y_falloff
+                            };
+                            let above_threshold = 0.45 - (island_strength * 0.25) - (above_taper * 0.2);
+                            above_noise <= above_threshold
+                        };
+
+                        // Depth from surface for block type
+                        let mut depth_from_surface = 0;
+                        for check_y in (y + 1)..island_max_y.min(y + 5) {
+                            let check_world_y = check_y as f64;
+                            let check_noise = sky_island_perlin.get([
+                                world_x * island_scale,
+                                check_world_y * island_scale * 0.25,
+                                world_z * island_scale,
+                            ]);
+                            let check_y_dist = (check_world_y - effective_center_y).abs() / (effective_thickness / 2.0 + 1.0);
+                            let check_y_falloff = (1.0 - check_y_dist.powi(2)).max(0.0);
+                            let check_taper = if check_world_y < effective_center_y {
+                                let base_taper = 0.5;
+                                let center_taper_bonus = centeredness * 0.4;
+                                check_y_falloff * (base_taper + center_taper_bonus)
+                            } else {
+                                check_y_falloff
+                            };
+                            let check_threshold = 0.45 - (island_strength * 0.25) - (check_taper * 0.2);
+                            if check_noise > check_threshold {
+                                depth_from_surface += 1;
+                            } else {
+                                break;
+                            }
+                        }
+
+                        self.blocks[x][y][z] = if is_surface {
+                            BlockType::Grass
+                        } else if depth_from_surface < 3 {
+                            BlockType::Dirt
+                        } else {
+                            BlockType::Stone
+                        };
+                    }
+                }
+            }
+        }
+
+        // === Sky Island Trees ===
+        // Generate trees on sky island grass blocks
+        for x in 3..CHUNK_SIZE - 3 {
+            for z in 3..CHUNK_SIZE - 3 {
+                let world_x = (world_offset_x + x as i32) as f64;
+                let world_z = (world_offset_z + z as i32) as f64;
+
+                // Find grass blocks in the sky island range
+                for y in sky_island_base_y..CHUNK_HEIGHT - 12 {
+                    if self.blocks[x][y][z] != BlockType::Grass {
+                        continue;
+                    }
+
+                    // Make sure this is a sky island (above normal terrain)
+                    // Check that there's air below at some point (floating)
+                    let mut is_floating = false;
+                    for check_y in (sky_island_base_y - 10)..y {
+                        if self.blocks[x][check_y][z] == BlockType::Air {
+                            is_floating = true;
+                            break;
+                        }
+                    }
+                    if !is_floating {
+                        continue;
+                    }
+
+                    // Tree placement noise
+                    let tree_noise = perlin.get([world_x * 0.15, world_z * 0.15]);
+                    if tree_noise < 0.6 {
+                        continue;
+                    }
+
+                    // Check for nearby trees
+                    let mut too_close = false;
+                    'check: for check_x in x.saturating_sub(2)..=(x + 2).min(CHUNK_SIZE - 1) {
+                        for check_z in z.saturating_sub(2)..=(z + 2).min(CHUNK_SIZE - 1) {
+                            if check_x == x && check_z == z {
+                                continue;
+                            }
+                            if y + 1 < CHUNK_HEIGHT && self.blocks[check_x][y + 1][check_z] == BlockType::Wood {
+                                too_close = true;
+                                break 'check;
+                            }
+                        }
+                    }
+                    if too_close {
+                        continue;
+                    }
+
+                    // Generate a small tree (sky island trees are shorter)
+                    let tree_seed = ((world_x as i64).wrapping_mul(73856093) ^ (world_z as i64).wrapping_mul(19349663) ^ (y as i64 * 83492791)) as u64;
+                    let mut rng = StdRng::seed_from_u64(tree_seed);
+                    let trunk_height = rng.gen_range(3..=5);
+
+                    // Trunk
+                    for trunk_y in (y + 1)..=(y + trunk_height).min(CHUNK_HEIGHT - 1) {
+                        self.blocks[x][trunk_y][z] = BlockType::Wood;
+                    }
+
+                    // Leaves
+                    let leaf_radius = 2;
+                    let leaf_start_y = y + trunk_height - 1;
+                    let leaf_height = 3;
+
+                    for lx in x.saturating_sub(leaf_radius)..=(x + leaf_radius).min(CHUNK_SIZE - 1) {
+                        for lz in z.saturating_sub(leaf_radius)..=(z + leaf_radius).min(CHUNK_SIZE - 1) {
+                            for ly in leaf_start_y..(leaf_start_y + leaf_height).min(CHUNK_HEIGHT) {
+                                let dx = (lx as i32 - x as i32).abs();
+                                let dz = (lz as i32 - z as i32).abs();
+                                let dy = ly - leaf_start_y;
+
+                                // Skip corners
+                                let is_corner = dx == leaf_radius as i32 && dz == leaf_radius as i32;
+                                if is_corner {
+                                    continue;
+                                }
+
+                                // Taper top
+                                if dy >= leaf_height - 1 && (dx > 1 || dz > 1) {
+                                    continue;
+                                }
+
+                                if self.blocks[lx][ly][lz] == BlockType::Air {
+                                    self.blocks[lx][ly][lz] = BlockType::Leaves;
+                                }
+                            }
                         }
                     }
                 }

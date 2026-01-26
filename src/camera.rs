@@ -72,7 +72,7 @@ impl CameraController {
 
     pub fn update_camera(&mut self, camera: &mut Camera, dt: f32, world: &crate::world::World) {
         let gravity = -20.0;
-        let jump_velocity = 8.0;
+        let jump_velocity = 10.0;
 
         // Get movement direction (horizontal only for WASD)
         let forward = camera.get_horizontal_direction();
@@ -119,11 +119,46 @@ impl CameraController {
 
         // Simple collision detection - check feet position
         let player_height = 1.6; // Player is ~1.6 blocks tall, camera at eye level
-        let feet_y = new_pos.y - player_height;
         let old_feet_y = camera.position.y - player_height;
 
         // Check multiple positions for player width to prevent corner clipping
         let player_radius = 0.25;
+
+        // Horizontal collision FIRST - this prevents wall blocks from being detected as ground
+        // Check at multiple heights (feet, body, head)
+        let feet_check_y = new_pos.y - player_height + 0.1; // Just above feet
+        let body_y = new_pos.y - 1.0;
+        let head_y = new_pos.y - 0.1; // Just below eye level
+
+        // Check X collision
+        let check_x = if self.velocity.x > 0.0 {
+            new_pos.x + player_radius
+        } else {
+            new_pos.x - player_radius
+        };
+        let block_x1 = world.get_block_world(check_x.floor() as i32, head_y.floor() as i32, new_pos.z.floor() as i32);
+        let block_x2 = world.get_block_world(check_x.floor() as i32, body_y.floor() as i32, new_pos.z.floor() as i32);
+        let block_x3 = world.get_block_world(check_x.floor() as i32, feet_check_y.floor() as i32, new_pos.z.floor() as i32);
+        if block_x1.is_solid() || block_x2.is_solid() || block_x3.is_solid() {
+            new_pos.x = camera.position.x;
+            self.velocity.x = 0.0;
+        }
+
+        // Check Z collision
+        let check_z = if self.velocity.z > 0.0 {
+            new_pos.z + player_radius
+        } else {
+            new_pos.z - player_radius
+        };
+        let block_z1 = world.get_block_world(new_pos.x.floor() as i32, head_y.floor() as i32, check_z.floor() as i32);
+        let block_z2 = world.get_block_world(new_pos.x.floor() as i32, body_y.floor() as i32, check_z.floor() as i32);
+        let block_z3 = world.get_block_world(new_pos.x.floor() as i32, feet_check_y.floor() as i32, check_z.floor() as i32);
+        if block_z1.is_solid() || block_z2.is_solid() || block_z3.is_solid() {
+            new_pos.z = camera.position.z;
+            self.velocity.z = 0.0;
+        }
+
+        // Now calculate check_positions with the corrected horizontal position
         let check_positions = [
             (new_pos.x, new_pos.z),
             (new_pos.x + player_radius, new_pos.z),
@@ -189,58 +224,30 @@ impl CameraController {
             self.velocity.y = 0.0;
             self.on_ground = true;
         } else {
-            // Check if we're standing on ground (for when not moving vertically)
-            let standing_feet_y = new_pos.y - player_height - 0.05; // Small offset below feet
-            let mut standing_on_ground = false;
-            for (check_x, check_z) in check_positions.iter() {
-                let block = world.get_block_world(
-                    check_x.floor() as i32,
-                    standing_feet_y.floor() as i32,
-                    check_z.floor() as i32,
-                );
-                if block.is_solid() {
-                    let block_top = (standing_feet_y.floor() as i32 + 1) as f32;
-                    // Check if we're very close to standing on this block
-                    if (new_pos.y - player_height - block_top).abs() < 0.05 {
-                        standing_on_ground = true;
-                        break;
+            // Check if we're standing on ground (only when not moving upward)
+            // This prevents "gliding" up diagonal blocks by spam-jumping
+            if self.velocity.y <= 0.0 {
+                let standing_feet_y = new_pos.y - player_height - 0.05; // Small offset below feet
+                let mut standing_on_ground = false;
+                for (check_x, check_z) in check_positions.iter() {
+                    let block = world.get_block_world(
+                        check_x.floor() as i32,
+                        standing_feet_y.floor() as i32,
+                        check_z.floor() as i32,
+                    );
+                    if block.is_solid() {
+                        let block_top = (standing_feet_y.floor() as i32 + 1) as f32;
+                        // Check if we're very close to standing on this block
+                        if (new_pos.y - player_height - block_top).abs() < 0.05 {
+                            standing_on_ground = true;
+                            break;
+                        }
                     }
                 }
+                self.on_ground = standing_on_ground;
+            } else {
+                self.on_ground = false;
             }
-            self.on_ground = standing_on_ground;
-        }
-
-        // Horizontal collision - check at multiple heights (feet, body, head)
-        let feet_check_y = new_pos.y - player_height + 0.1; // Just above feet
-        let body_y = new_pos.y - 1.0;
-        let head_y = new_pos.y - 0.1; // Just below eye level
-
-        // Check X collision
-        let check_x = if self.velocity.x > 0.0 {
-            new_pos.x + player_radius
-        } else {
-            new_pos.x - player_radius
-        };
-        let block_x1 = world.get_block_world(check_x.floor() as i32, head_y.floor() as i32, new_pos.z.floor() as i32);
-        let block_x2 = world.get_block_world(check_x.floor() as i32, body_y.floor() as i32, new_pos.z.floor() as i32);
-        let block_x3 = world.get_block_world(check_x.floor() as i32, feet_check_y.floor() as i32, new_pos.z.floor() as i32);
-        if block_x1.is_solid() || block_x2.is_solid() || block_x3.is_solid() {
-            new_pos.x = camera.position.x;
-            self.velocity.x = 0.0;
-        }
-
-        // Check Z collision
-        let check_z = if self.velocity.z > 0.0 {
-            new_pos.z + player_radius
-        } else {
-            new_pos.z - player_radius
-        };
-        let block_z1 = world.get_block_world(new_pos.x.floor() as i32, head_y.floor() as i32, check_z.floor() as i32);
-        let block_z2 = world.get_block_world(new_pos.x.floor() as i32, body_y.floor() as i32, check_z.floor() as i32);
-        let block_z3 = world.get_block_world(new_pos.x.floor() as i32, feet_check_y.floor() as i32, check_z.floor() as i32);
-        if block_z1.is_solid() || block_z2.is_solid() || block_z3.is_solid() {
-            new_pos.z = camera.position.z;
-            self.velocity.z = 0.0;
         }
 
         camera.position = new_pos;
