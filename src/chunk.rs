@@ -16,8 +16,8 @@ pub const TREE_BRANCH_CHANCE: f64 = 0.4;   // Chance for trunk to branch near to
 pub const TREE_TALL_CHANCE: f64 = 0.3;     // Chance for a tree to be tall variant (0.0 - 1.0)
 
 pub struct Chunk {
-    pub blocks: [[[BlockType; CHUNK_SIZE]; CHUNK_HEIGHT]; CHUNK_SIZE],
-    pub light_levels: [[[u8; CHUNK_SIZE]; CHUNK_HEIGHT]; CHUNK_SIZE],
+    pub blocks: Box<[[[BlockType; CHUNK_SIZE]; CHUNK_HEIGHT]; CHUNK_SIZE]>,
+    pub light_levels: Box<[[[u8; CHUNK_SIZE]; CHUNK_HEIGHT]; CHUNK_SIZE]>,
     pub position: (i32, i32),
     pub vertices: Vec<Vertex>,
     pub indices: Vec<u16>,
@@ -25,6 +25,7 @@ pub struct Chunk {
     pub water_indices: Vec<u16>,           // Separate water indices for transparency pass
     pub dirty: bool,
     pub light_dirty: bool,
+    pub mesh_version: u32,                 // Incremented when mesh is rebuilt, used for GPU buffer caching
 }
 
 /// Helper struct to provide safe access to neighboring chunks during mesh generation
@@ -79,9 +80,20 @@ impl<'a> ChunkNeighbors<'a> {
 
 impl Chunk {
     pub fn new(chunk_x: i32, chunk_z: i32) -> Self {
+        // Allocate large arrays directly on heap to avoid stack overflow
+        // Using vec!().into_boxed_slice().try_into() ensures no stack intermediary
+        let blocks: Box<[[[BlockType; CHUNK_SIZE]; CHUNK_HEIGHT]; CHUNK_SIZE]> = vec![[[BlockType::Air; CHUNK_SIZE]; CHUNK_HEIGHT]; CHUNK_SIZE]
+            .into_boxed_slice()
+            .try_into()
+            .unwrap();
+        let light_levels: Box<[[[u8; CHUNK_SIZE]; CHUNK_HEIGHT]; CHUNK_SIZE]> = vec![[[0u8; CHUNK_SIZE]; CHUNK_HEIGHT]; CHUNK_SIZE]
+            .into_boxed_slice()
+            .try_into()
+            .unwrap();
+
         let mut chunk = Self {
-            blocks: [[[BlockType::Air; CHUNK_SIZE]; CHUNK_HEIGHT]; CHUNK_SIZE],
-            light_levels: [[[0u8; CHUNK_SIZE]; CHUNK_HEIGHT]; CHUNK_SIZE],
+            blocks,
+            light_levels,
             position: (chunk_x, chunk_z),
             vertices: Vec::new(),
             indices: Vec::new(),
@@ -89,6 +101,7 @@ impl Chunk {
             water_indices: Vec::new(),
             dirty: true,
             light_dirty: true,
+            mesh_version: 0,
         };
         chunk.generate_terrain();
         chunk

@@ -24,6 +24,10 @@ impl BlockType {
         !matches!(self, BlockType::Air | BlockType::Water | BlockType::Boundary)
     }
 
+    pub fn is_water(&self) -> bool {
+        matches!(self, BlockType::Water)
+    }
+
     pub fn is_transparent(&self) -> bool {
         matches!(self, BlockType::Air | BlockType::Water | BlockType::Leaves | BlockType::Boundary)
     }

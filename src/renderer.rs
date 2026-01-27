@@ -1,5 +1,5 @@
 use crate::block::{BlockType, Vertex, UiVertex, LineVertex, create_cube_vertices, create_block_outline, create_face_vertices, CUBE_INDICES};
-use crate::camera::{Camera, CameraController, CameraUniform, Projection};
+use crate::camera::{Camera, CameraController, CameraUniform, Projection, Frustum};
 use crate::chunk::{CHUNK_SIZE, CHUNK_HEIGHT};
 use crate::crafting::CraftingSystem;
 use crate::enemy::EnemyManager;
@@ -9,12 +9,24 @@ use crate::texture::{TextureAtlas, get_face_uvs, TEX_DESTROY_BASE};
 use crate::water::WaterSimulation;
 use crate::world::World;
 use cgmath::{Point3, Vector3};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 use wgpu::util::DeviceExt;
 use winit::event::*;
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::Window;
+
+/// Cached GPU buffers for a chunk - avoids recreating buffers every frame
+pub struct ChunkBuffers {
+    pub vertex_buffer: wgpu::Buffer,
+    pub index_buffer: wgpu::Buffer,
+    pub index_count: u32,
+    pub water_vertex_buffer: Option<wgpu::Buffer>,
+    pub water_index_buffer: Option<wgpu::Buffer>,
+    pub water_index_count: u32,
+    pub mesh_version: u32,
+}
 
 /// Tracks the state of an in-progress block break
 pub struct BreakingState {
@@ -56,6 +68,7 @@ pub struct State {
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
     projection: Projection,
+    frustum: Frustum,
     world: World,
     player: Player,
     water_simulation: WaterSimulation,
@@ -94,12 +107,28 @@ pub struct State {
     fps_timer: f32,
     // Debug mode
     show_chunk_outlines: bool,
+    noclip_mode: bool,
+    
+    // Underwater effect (Post-Processing)
+    camera_underwater: bool,
+    underwater_pipeline: wgpu::RenderPipeline,
+    underwater_bind_group_layout: wgpu::BindGroupLayout,
+    underwater_bind_group: wgpu::BindGroup,
+    underwater_uniform_buffer: wgpu::Buffer,
+    // Off-screen texture for post-processing
+    scene_texture: wgpu::Texture,
+    scene_texture_view: wgpu::TextureView,
+    scene_sampler: wgpu::Sampler,
+    start_time: Instant,
+    
     // Texture atlas
     texture_atlas: TextureAtlas,
     // Breaking mechanics
     breaking_pipeline: wgpu::RenderPipeline,
     breaking_state: Option<BreakingState>,
     left_mouse_held: bool,
+    // Cached GPU buffers for chunks - avoids recreating every frame
+    chunk_buffers: HashMap<(i32, i32), ChunkBuffers>,
 }
 
 impl State {
@@ -167,6 +196,9 @@ impl State {
 
         let mut camera_uniform = CameraUniform::new();
         camera_uniform.update_view_proj(&camera, &projection);
+
+        // Create initial frustum for culling
+        let frustum = Frustum::from_view_proj(&(projection.calc_matrix() * camera.get_view_matrix()));
 
         let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Camera Buffer"),
@@ -411,7 +443,7 @@ impl State {
             cache: None,
         });
 
-        let world = World::new(4); // Sets render distance - 4 seems like a good balance when chunk size is 32
+        let world = World::new(4); // Sets render distance
         let player = Player::new(Point3::new(0.0, 35.0, 0.0));
         let water_simulation = WaterSimulation::new(0.5);
         let enemy_manager = EnemyManager::new(10.0, 10);
@@ -704,6 +736,158 @@ impl State {
             cache: None,
         });
 
+        // === POST PROCESSING RESOURCES ===
+        
+        // 1. Create Scene Texture (the off-screen canvas)
+        let scene_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Scene Texture"),
+            size: wgpu::Extent3d {
+                width: config.width,
+                height: config.height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: config.format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let scene_texture_view = scene_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        // 2. Create Linear Sampler for waviness
+        let scene_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Scene Sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+
+        // 3. Time Uniform for animation
+        let start_time = Instant::now();
+        let underwater_uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Underwater Uniform Buffer"),
+            contents: bytemuck::cast_slice(&[0.0f32]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        // 4. Underwater Bind Group Layout
+        let underwater_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Underwater Bind Group Layout"),
+            entries: &[
+                // Binding 0: Time
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // Binding 1: Scene Texture
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                // Binding 2: Sampler
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+
+        // 5. Underwater Bind Group
+        let underwater_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Underwater Bind Group"),
+            layout: &underwater_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: underwater_uniform_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&scene_texture_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&scene_sampler),
+                },
+            ],
+        });
+
+        // Underwater effect pipeline
+        let underwater_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Underwater Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("underwater_shader.wgsl").into()),
+        });
+
+        let underwater_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Underwater Pipeline Layout"),
+            bind_group_layouts: &[&underwater_bind_group_layout], // Now uses the layout
+            push_constant_ranges: &[],
+        });
+
+        let underwater_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Underwater Pipeline"),
+            layout: Some(&underwater_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &underwater_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[], // No vertex buffers needed - generates full-screen triangle
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &underwater_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: Some(wgpu::BlendState {
+                        color: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::SrcAlpha,
+                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                        alpha: wgpu::BlendComponent::OVER,
+                    }),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: None, // No depth testing for post-process overlay
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            multiview: None,
+            cache: None,
+        });
+
         Self {
             surface,
             device,
@@ -718,6 +902,7 @@ impl State {
             camera_buffer,
             camera_bind_group,
             projection,
+            frustum,
             world,
             player,
             water_simulation,
@@ -751,12 +936,25 @@ impl State {
             fps_timer: 0.0,
             // Debug mode
             show_chunk_outlines: false,
+            noclip_mode: false,
+            // Underwater effect
+            camera_underwater: false,
+            underwater_pipeline,
+            underwater_bind_group_layout,
+            underwater_bind_group,
+            underwater_uniform_buffer,
+            scene_texture,
+            scene_texture_view,
+            scene_sampler,
+            start_time,
             // Texture atlas
             texture_atlas,
             // Breaking mechanics
             breaking_pipeline,
             breaking_state: None,
             left_mouse_held: false,
+            // Cached GPU buffers
+            chunk_buffers: HashMap::new(),
         }
     }
 
@@ -840,6 +1038,45 @@ impl State {
                     wgpu::BindGroupEntry {
                         binding: 1,
                         resource: wgpu::BindingResource::Sampler(&self.depth_sampler),
+                    },
+                ],
+            });
+            
+            // === RESIZE POST-PROCESSING TEXTURES ===
+            
+            // Recreate Scene Texture
+            self.scene_texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("Scene Texture"),
+                size: wgpu::Extent3d {
+                    width: new_size.width,
+                    height: new_size.height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: self.config.format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+            self.scene_texture_view = self.scene_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+            // Recreate Underwater Bind Group (points to new scene texture view)
+            self.underwater_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Underwater Bind Group"),
+                layout: &self.underwater_bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: self.underwater_uniform_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&self.scene_texture_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::Sampler(&self.scene_sampler),
                     },
                 ],
             });
@@ -976,6 +1213,37 @@ impl State {
             fps_scale,
             fps_scale,
             debug_color,
+            screen_w,
+            screen_h,
+        );
+
+        // === Noclip Toggle Indicator (below Chunk Outline) ===
+        let (noclip_text, noclip_color, noclip_bg_color) = if self.noclip_mode {
+            ("F2 - NOCLIP: ON", [0.5, 1.0, 0.5, 1.0], [0.0, 0.2, 0.0, 0.6])  // Light green when on
+        } else {
+            ("F2 - NOCLIP: OFF", [1.0, 1.0, 1.0, 0.9], [0.0, 0.0, 0.0, 0.5])  // White when off
+        };
+        let noclip_y = debug_y + fps_char_h + 8.0;
+        let noclip_text_width = noclip_text.len() as f32 * fps_char_w;
+        // Background
+        bitmap_font::push_rect_px(
+            &mut verts,
+            fps_x - 4.0,
+            noclip_y - 4.0,
+            noclip_text_width + 8.0,
+            fps_char_h + 8.0,
+            noclip_bg_color,
+            screen_w,
+            screen_h,
+        );
+        bitmap_font::draw_text_quads(
+            &mut verts,
+            noclip_text,
+            fps_x,
+            noclip_y,
+            fps_scale,
+            fps_scale,
+            noclip_color,
             screen_w,
             screen_h,
         );
@@ -1290,6 +1558,10 @@ impl State {
                         self.camera_controller.jump_held = is_pressed;
                         true
                     }
+                    KeyCode::ShiftLeft => {
+                        self.camera_controller.shift_held = is_pressed;
+                        true
+                    }
                     KeyCode::KeyE => {
                         if is_pressed {
                             self.show_inventory = !self.show_inventory;
@@ -1368,6 +1640,13 @@ impl State {
                         if is_pressed {
                             self.show_chunk_outlines = !self.show_chunk_outlines;
                             println!("Chunk outlines: {}", if self.show_chunk_outlines { "ON" } else { "OFF" });
+                        }
+                        true
+                    }
+                    KeyCode::F2 => {
+                        if is_pressed {
+                            self.noclip_mode = !self.noclip_mode;
+                            println!("Noclip: {}", if self.noclip_mode { "ON" } else { "OFF" });
                         }
                         true
                     }
@@ -1553,6 +1832,14 @@ impl State {
         let now = Instant::now();
         let dt = (now - self.last_frame).as_secs_f32();
         self.last_frame = now;
+        
+        // Update Underwater shader time
+        let total_time = (now - self.start_time).as_secs_f32();
+        self.queue.write_buffer(
+            &self.underwater_uniform_buffer,
+            0,
+            bytemuck::cast_slice(&[total_time]),
+        );
 
         // Update FPS counter
         self.fps_frame_count += 1;
@@ -1564,7 +1851,7 @@ impl State {
         }
 
         // Update camera
-        self.camera_controller.update_camera(&mut self.camera, dt, &self.world);
+        self.camera_underwater = self.camera_controller.update_camera(&mut self.camera, dt, &self.world, self.noclip_mode);
         self.player.position = self.camera.position;
 
         // Update world
@@ -1596,21 +1883,106 @@ impl State {
         // Update block breaking
         self.update_block_breaking(dt);
 
-        // Update camera uniform
+        // Update camera uniform and frustum
         self.camera_uniform
             .update_view_proj(&self.camera, &self.projection);
+        self.frustum = Frustum::from_view_proj(
+            &(self.projection.calc_matrix() * self.camera.get_view_matrix())
+        );
         self.queue.write_buffer(
             &self.camera_buffer,
             0,
             bytemuck::cast_slice(&[self.camera_uniform]),
         );
+
+        // Update chunk GPU buffer cache
+        self.update_chunk_buffers();
+    }
+
+    /// Updates the GPU buffer cache for chunks that have changed
+    fn update_chunk_buffers(&mut self) {
+        // Collect chunk positions that need buffer updates
+        let chunks_to_update: Vec<((i32, i32), u32, bool, bool)> = self.world.chunks.iter()
+            .filter_map(|(&pos, chunk)| {
+                let cached = self.chunk_buffers.get(&pos);
+                let needs_update = match cached {
+                    Some(cb) => cb.mesh_version != chunk.mesh_version,
+                    None => true,
+                };
+                if needs_update && !chunk.vertices.is_empty() {
+                    Some((pos, chunk.mesh_version, !chunk.vertices.is_empty(), !chunk.water_vertices.is_empty()))
+                } else if needs_update && chunk.vertices.is_empty() {
+                    // Remove empty chunks from cache
+                    Some((pos, chunk.mesh_version, false, false))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Update buffers for chunks that need it
+        for (pos, mesh_version, has_geometry, has_water) in chunks_to_update {
+            if !has_geometry {
+                // Remove from cache if chunk has no geometry
+                self.chunk_buffers.remove(&pos);
+                continue;
+            }
+
+            let chunk = match self.world.chunks.get(&pos) {
+                Some(c) => c,
+                None => continue,
+            };
+
+            let vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Chunk Vertex Buffer"),
+                contents: bytemuck::cast_slice(&chunk.vertices),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+
+            let index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Chunk Index Buffer"),
+                contents: bytemuck::cast_slice(&chunk.indices),
+                usage: wgpu::BufferUsages::INDEX,
+            });
+
+            let (water_vertex_buffer, water_index_buffer, water_index_count) = if has_water {
+                let wvb = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Water Vertex Buffer"),
+                    contents: bytemuck::cast_slice(&chunk.water_vertices),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+                let wib = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Water Index Buffer"),
+                    contents: bytemuck::cast_slice(&chunk.water_indices),
+                    usage: wgpu::BufferUsages::INDEX,
+                });
+                (Some(wvb), Some(wib), chunk.water_indices.len() as u32)
+            } else {
+                (None, None, 0)
+            };
+
+            self.chunk_buffers.insert(pos, ChunkBuffers {
+                vertex_buffer,
+                index_buffer,
+                index_count: chunk.indices.len() as u32,
+                water_vertex_buffer,
+                water_index_buffer,
+                water_index_count,
+                mesh_version,
+            });
+        }
+
+        // Remove cached buffers for chunks that no longer exist
+        let existing_chunks: std::collections::HashSet<(i32, i32)> =
+            self.world.chunks.keys().cloned().collect();
+        self.chunk_buffers.retain(|pos, _| existing_chunks.contains(pos));
     }
 
     pub fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
-    self.rebuild_hud_vertices();
+        self.rebuild_hud_vertices();
 
         let output = self.surface.get_current_texture()?;
-        let view = output
+        let swap_chain_view = output
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
 
@@ -1619,12 +1991,22 @@ impl State {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("Render Encoder"),
             });
+            
+        // LOGIC: If we are underwater, we render the world to `scene_texture_view` first,
+        // so we can distort it later. If we are NOT underwater, we render directly to
+        // `swap_chain_view` (the screen) to save performance.
+        let world_render_target = if self.camera_underwater {
+            &self.scene_texture_view
+        } else {
+            &swap_chain_view
+        };
 
+        // --- PASS 1: RENDER WORLD (Opaque chunks & enemies) ---
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Render Pass"),
+                label: Some("World Render Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
+                    view: world_render_target,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
@@ -1652,30 +2034,28 @@ impl State {
             render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
             render_pass.set_bind_group(1, &self.texture_atlas.bind_group, &[]);
 
-            // Render chunks
-            for chunk in self.world.chunks.values() {
-                if !chunk.vertices.is_empty() {
-                    let vertex_buffer =
-                        self.device
-                            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                                label: Some("Chunk Vertex Buffer"),
-                                contents: bytemuck::cast_slice(&chunk.vertices),
-                                usage: wgpu::BufferUsages::VERTEX,
-                            });
+            // Render chunks using cached GPU buffers with frustum culling
+            for (&(cx, cz), buffers) in self.chunk_buffers.iter() {
+                // Calculate chunk bounding box
+                let min = Vector3::new(
+                    (cx * CHUNK_SIZE as i32) as f32,
+                    0.0,
+                    (cz * CHUNK_SIZE as i32) as f32,
+                );
+                let max = Vector3::new(
+                    min.x + CHUNK_SIZE as f32,
+                    CHUNK_HEIGHT as f32,
+                    min.z + CHUNK_SIZE as f32,
+                );
 
-                    let index_buffer =
-                        self.device
-                            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                                label: Some("Chunk Index Buffer"),
-                                contents: bytemuck::cast_slice(&chunk.indices),
-                                usage: wgpu::BufferUsages::INDEX,
-                            });
-
-                    render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
-                    render_pass
-                        .set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint16);
-                    render_pass.draw_indexed(0..chunk.indices.len() as u32, 0, 0..1);
+                // Skip chunks outside the view frustum
+                if !self.frustum.is_box_visible(min, max) {
+                    continue;
                 }
+
+                render_pass.set_vertex_buffer(0, buffers.vertex_buffer.slice(..));
+                render_pass.set_index_buffer(buffers.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+                render_pass.draw_indexed(0..buffers.index_count, 0, 0..1);
             }
 
             // Render enemies
@@ -1723,7 +2103,6 @@ impl State {
                     render_pass.draw_indexed(0..CUBE_INDICES.len() as u32, 0, 0..1);
                 }
             }
-
         }
 
         // Copy depth buffer to the copy texture for water shader to sample
@@ -1747,12 +2126,12 @@ impl State {
             },
         );
 
-        // Render water in a separate pass (reads depth copy, writes to same depth for depth testing)
+        // --- PASS 2: RENDER WATER (Transparent) ---
         {
             let mut water_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Water Render Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
+                    view: world_render_target, // Target same buffer as world
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Load, // Keep existing color
@@ -1775,32 +2154,36 @@ impl State {
             water_pass.set_bind_group(0, &self.camera_bind_group, &[]);
             water_pass.set_bind_group(1, &self.water_bind_group, &[]);
 
-            for chunk in self.world.chunks.values() {
-                if !chunk.water_vertices.is_empty() {
-                    let water_vertex_buffer =
-                        self.device
-                            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                                label: Some("Water Vertex Buffer"),
-                                contents: bytemuck::cast_slice(&chunk.water_vertices),
-                                usage: wgpu::BufferUsages::VERTEX,
-                            });
+            // Render water using cached GPU buffers with frustum culling
+            for (&(cx, cz), buffers) in self.chunk_buffers.iter() {
+                if let (Some(wvb), Some(wib)) = (&buffers.water_vertex_buffer, &buffers.water_index_buffer) {
+                    if buffers.water_index_count > 0 {
+                        // Calculate chunk bounding box
+                        let min = Vector3::new(
+                            (cx * CHUNK_SIZE as i32) as f32,
+                            0.0,
+                            (cz * CHUNK_SIZE as i32) as f32,
+                        );
+                        let max = Vector3::new(
+                            min.x + CHUNK_SIZE as f32,
+                            CHUNK_HEIGHT as f32,
+                            min.z + CHUNK_SIZE as f32,
+                        );
 
-                    let water_index_buffer =
-                        self.device
-                            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                                label: Some("Water Index Buffer"),
-                                contents: bytemuck::cast_slice(&chunk.water_indices),
-                                usage: wgpu::BufferUsages::INDEX,
-                            });
+                        // Skip chunks outside the view frustum
+                        if !self.frustum.is_box_visible(min, max) {
+                            continue;
+                        }
 
-                    water_pass.set_vertex_buffer(0, water_vertex_buffer.slice(..));
-                    water_pass
-                        .set_index_buffer(water_index_buffer.slice(..), wgpu::IndexFormat::Uint16);
-                    water_pass.draw_indexed(0..chunk.water_indices.len() as u32, 0, 0..1);
+                        water_pass.set_vertex_buffer(0, wvb.slice(..));
+                        water_pass.set_index_buffer(wib.slice(..), wgpu::IndexFormat::Uint16);
+                        water_pass.draw_indexed(0..buffers.water_index_count, 0, 0..1);
+                    }
                 }
             }
         }
 
+        // --- PASS 3: OVERLAYS (Breaking, Outlines, Debug) ---
         // Render breaking overlay if actively breaking a block
         if let Some(ref breaking_state) = self.breaking_state {
             let (bx, by, bz) = breaking_state.block_pos;
@@ -1813,7 +2196,7 @@ impl State {
                 let mut breaking_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("Breaking Overlay Pass"),
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &view,
+                        view: world_render_target,
                         resolve_target: None,
                         ops: wgpu::Operations {
                             load: wgpu::LoadOp::Load,
@@ -1858,7 +2241,7 @@ impl State {
             let mut outline_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Outline Render Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
+                    view: world_render_target,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Load,
@@ -1897,7 +2280,7 @@ impl State {
             let mut chunk_outline_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Chunk Outline Render Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
+                    view: world_render_target,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Load,
@@ -1933,15 +2316,44 @@ impl State {
             }
         }
 
-        // Render UI (crosshair) - separate pass without depth
+        // --- PASS 4: POST-PROCESSING (Underwater Effect) ---
+        // Only run if camera is underwater.
+        // Input: scene_texture_view (bound in bind group)
+        // Output: swap_chain_view (Screen)
+        if self.camera_underwater {
+            let mut underwater_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Underwater Render Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &swap_chain_view, // Now writing to screen
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), // Replace screen content with processed image
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+
+            underwater_pass.set_pipeline(&self.underwater_pipeline);
+            // Bind the texture we just rendered to in passes 1-3
+            underwater_pass.set_bind_group(0, &self.underwater_bind_group, &[]);
+            underwater_pass.draw(0..3, 0..1); // Full-screen triangle
+        }
+
+        // --- PASS 5: UI (Crosshair & HUD) ---
+        // Always render UI directly to Swap Chain so it stays sharp and on top
         {
             let mut ui_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("UI Render Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
+                    view: &swap_chain_view, // Always Screen
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load, // Keep existing content
+                        // If underwater, we just drew the background in Pass 4, so Load. 
+                        // If NOT underwater, the World pass drew to this view in Pass 1, so Load.
+                        load: wgpu::LoadOp::Load, 
                         store: wgpu::StoreOp::Store,
                     },
                 })],

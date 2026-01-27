@@ -1,6 +1,7 @@
 use crate::chunk::{Chunk, ChunkNeighbors, CHUNK_SIZE, CHUNK_HEIGHT};
 use crate::block::BlockType;
 use crate::lighting;
+use rayon::prelude::*;
 use std::collections::HashMap;
 
 pub struct World {
@@ -19,37 +20,51 @@ impl World {
     }
 
     pub fn generate_chunks(&mut self, center_x: i32, center_z: i32) {
-        // Collect positions of newly created chunks
-        let mut new_chunks = Vec::new();
+        // Collect positions that need new chunks
+        let positions_to_generate: Vec<(i32, i32)> = (-self.render_distance..=self.render_distance)
+            .flat_map(|x| {
+                (-self.render_distance..=self.render_distance).map(move |z| (center_x + x, center_z + z))
+            })
+            .filter(|pos| !self.chunks.contains_key(pos))
+            .collect();
 
-        for x in -self.render_distance..=self.render_distance {
-            for z in -self.render_distance..=self.render_distance {
-                let chunk_pos = (center_x + x, center_z + z);
-                if !self.chunks.contains_key(&chunk_pos) {
-                    let mut chunk = Chunk::new(chunk_pos.0, chunk_pos.1);
-                    lighting::calculate_chunk_lighting(&mut chunk);
-                    self.chunks.insert(chunk_pos, chunk);
-                    new_chunks.push(chunk_pos);
+        if positions_to_generate.is_empty() {
+            return;
+        }
+
+        // Generate chunks in parallel using rayon
+        let generated_chunks: Vec<((i32, i32), Chunk)> = positions_to_generate
+            .par_iter()
+            .map(|&(cx, cz)| {
+                let mut chunk = Chunk::new(cx, cz);
+                lighting::calculate_chunk_lighting(&mut chunk);
+                ((cx, cz), chunk)
+            })
+            .collect();
+
+        // Insert generated chunks into the world (must be sequential due to HashMap)
+        let new_chunk_positions: Vec<(i32, i32)> = generated_chunks
+            .iter()
+            .map(|(pos, _)| *pos)
+            .collect();
+
+        for (pos, chunk) in generated_chunks {
+            self.chunks.insert(pos, chunk);
+        }
+
+        // Mark neighbors dirty so they re-mesh (stitch) with the new chunks
+        for (cx, cz) in &new_chunk_positions {
+            for (dx, dz) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+                let neighbor_pos = (cx + dx, cz + dz);
+                if let Some(neighbor) = self.chunks.get_mut(&neighbor_pos) {
+                    neighbor.dirty = true;
                 }
             }
         }
 
-        // Only perform updates if we actually generated something
-        if !new_chunks.is_empty() {
-            // Mark neighbors dirty so they re-mesh (stitch) with the new chunks
-            for (cx, cz) in &new_chunks {
-                for (dx, dz) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
-                    let neighbor_pos = (cx + dx, cz + dz);
-                    if let Some(neighbor) = self.chunks.get_mut(&neighbor_pos) {
-                        neighbor.dirty = true;
-                    }
-                }
-            }
-
-            // Propagate light between the new chunks and the existing world
-            // - This ensures sunlight or caves flow correctly across the new boundaries
-            self.propagate_cross_chunk_lighting(&new_chunks);
-        }
+        // Propagate light between the new chunks and the existing world
+        // - This ensures sunlight or caves flow correctly across the new boundaries
+        self.propagate_cross_chunk_lighting(&new_chunk_positions);
     }
 
     pub fn update_chunks(&mut self, camera_pos: (f32, f32)) {
@@ -177,6 +192,7 @@ impl World {
                     chunk.water_vertices = water_vertices;
                     chunk.water_indices = water_indices;
                     chunk.dirty = false;
+                    chunk.mesh_version = chunk.mesh_version.wrapping_add(1);
                 }
             }
         }

@@ -42,6 +42,7 @@ pub struct CameraController {
     pub left: bool,
     pub right: bool,
     pub jump_held: bool,
+    pub shift_held: bool,
     pub velocity: Vector3<f32>,
     pub on_ground: bool,
 }
@@ -56,6 +57,7 @@ impl CameraController {
             left: false,
             right: false,
             jump_held: false,
+            shift_held: false,
             velocity: Vector3::new(0.0, 0.0, 0.0),
             on_ground: false,
         }
@@ -70,7 +72,163 @@ impl CameraController {
         camera.pitch.0 = camera.pitch.0.clamp(-max_pitch, max_pitch);
     }
 
-    pub fn update_camera(&mut self, camera: &mut Camera, dt: f32, world: &crate::world::World) {
+    /// Updates camera position with physics. Returns true if camera is underwater.
+    pub fn update_camera(&mut self, camera: &mut Camera, dt: f32, world: &crate::world::World, noclip: bool) -> bool {
+        let player_height = 1.6; // Player is ~1.6 blocks tall, camera at eye level
+
+        // Check if camera (head) is underwater
+        let camera_block = world.get_block_world(
+            camera.position.x.floor() as i32,
+            camera.position.y.floor() as i32,
+            camera.position.z.floor() as i32,
+        );
+        let camera_underwater = camera_block.is_water();
+
+        // Check if player body is in water (check at body level, slightly below camera)
+        let body_y = camera.position.y - 0.8;
+        let body_block = world.get_block_world(
+            camera.position.x.floor() as i32,
+            body_y.floor() as i32,
+            camera.position.z.floor() as i32,
+        );
+        let in_water = body_block.is_water();
+
+        // Noclip mode: free flight with no collision, doubled speed
+        if noclip {
+            let fly_speed = self.speed * 2.0;
+
+            // Get movement direction (use camera direction for forward/backward)
+            let forward = camera.get_horizontal_direction();
+            let right = forward.cross(Vector3::unit_y()).normalize();
+
+            let mut move_dir = Vector3::new(0.0, 0.0, 0.0);
+            if self.forward {
+                move_dir += forward;
+            }
+            if self.backward {
+                move_dir -= forward;
+            }
+            if self.left {
+                move_dir -= right;
+            }
+            if self.right {
+                move_dir += right;
+            }
+
+            // Vertical movement: space to fly up, shift to fly down
+            if self.jump_held {
+                move_dir.y += 1.0;
+            }
+            if self.shift_held {
+                move_dir.y -= 1.0;
+            }
+
+            // Normalize and apply speed
+            if move_dir.magnitude2() > 0.0 {
+                move_dir = move_dir.normalize() * fly_speed;
+            }
+
+            // Apply movement directly (no collision)
+            camera.position.x += move_dir.x * dt;
+            camera.position.y += move_dir.y * dt;
+            camera.position.z += move_dir.z * dt;
+
+            // Reset velocity and on_ground state
+            self.velocity = Vector3::new(0.0, 0.0, 0.0);
+            self.on_ground = false;
+            return camera_underwater;
+        }
+
+        // Swimming mode: different physics when in water
+        if in_water {
+            let swim_speed = self.speed * 0.6; // Slower in water
+            let sink_speed = -2.0; // Slow sinking
+            let swim_up_speed = 6.0;
+            let swim_down_speed = -6.0;
+
+            // Get movement direction
+            let forward = camera.get_horizontal_direction();
+            let right = forward.cross(Vector3::unit_y()).normalize();
+
+            let mut move_dir = Vector3::new(0.0, 0.0, 0.0);
+            if self.forward {
+                move_dir += forward;
+            }
+            if self.backward {
+                move_dir -= forward;
+            }
+            if self.left {
+                move_dir -= right;
+            }
+            if self.right {
+                move_dir += right;
+            }
+
+            // Normalize horizontal movement
+            if move_dir.magnitude2() > 0.0 {
+                move_dir = move_dir.normalize() * swim_speed;
+            }
+
+            // Vertical swimming: space to swim up, shift to swim down
+            let mut vertical_velocity = sink_speed; // Default: slowly sink
+            if self.jump_held {
+                vertical_velocity = swim_up_speed;
+            } else if self.shift_held {
+                vertical_velocity = swim_down_speed;
+            }
+
+            // Apply water drag to existing velocity
+            self.velocity.x = move_dir.x;
+            self.velocity.z = move_dir.z;
+            self.velocity.y = vertical_velocity;
+
+            // Calculate new position
+            let mut new_pos = camera.position;
+            new_pos.x += self.velocity.x * dt;
+            new_pos.y += self.velocity.y * dt;
+            new_pos.z += self.velocity.z * dt;
+
+            // Simple collision (still collide with solid blocks underwater)
+            let player_radius = 0.25;
+            let feet_check_y = new_pos.y - player_height + 0.1;
+            let body_check_y = new_pos.y - 1.0;
+            let head_check_y = new_pos.y - 0.1;
+
+            // Check X collision
+            let check_x = if self.velocity.x > 0.0 { new_pos.x + player_radius } else { new_pos.x - player_radius };
+            if world.get_block_world(check_x.floor() as i32, head_check_y.floor() as i32, new_pos.z.floor() as i32).is_solid()
+                || world.get_block_world(check_x.floor() as i32, body_check_y.floor() as i32, new_pos.z.floor() as i32).is_solid()
+                || world.get_block_world(check_x.floor() as i32, feet_check_y.floor() as i32, new_pos.z.floor() as i32).is_solid()
+            {
+                new_pos.x = camera.position.x;
+            }
+
+            // Check Z collision
+            let check_z = if self.velocity.z > 0.0 { new_pos.z + player_radius } else { new_pos.z - player_radius };
+            if world.get_block_world(new_pos.x.floor() as i32, head_check_y.floor() as i32, check_z.floor() as i32).is_solid()
+                || world.get_block_world(new_pos.x.floor() as i32, body_check_y.floor() as i32, check_z.floor() as i32).is_solid()
+                || world.get_block_world(new_pos.x.floor() as i32, feet_check_y.floor() as i32, check_z.floor() as i32).is_solid()
+            {
+                new_pos.z = camera.position.z;
+            }
+
+            // Ground collision when swimming down
+            let feet_y = new_pos.y - player_height;
+            let ground_block = world.get_block_world(new_pos.x.floor() as i32, feet_y.floor() as i32, new_pos.z.floor() as i32);
+            if ground_block.is_solid() {
+                let block_top = (feet_y.floor() as i32 + 1) as f32;
+                if feet_y < block_top {
+                    new_pos.y = block_top + player_height;
+                    self.velocity.y = 0.0;
+                }
+            }
+
+            self.on_ground = false;
+            camera.position = new_pos;
+            return camera_underwater;
+        }
+
+        // Normal mode with gravity and collision
         let gravity = -20.0;
         let jump_velocity = 10.0;
 
@@ -251,6 +409,7 @@ impl CameraController {
         }
 
         camera.position = new_pos;
+        camera_underwater
     }
 }
 
@@ -306,5 +465,79 @@ impl Projection {
 
     pub fn calc_matrix(&self) -> Matrix4<f32> {
         perspective(self.fovy, self.aspect, self.znear, self.zfar)
+    }
+}
+
+/// A plane in 3D space represented as ax + by + cz + d = 0
+#[derive(Clone, Copy)]
+pub struct Plane {
+    pub normal: Vector3<f32>,
+    pub d: f32,
+}
+
+impl Plane {
+    /// Returns the signed distance from the plane to a point
+    pub fn distance_to_point(&self, point: Vector3<f32>) -> f32 {
+        self.normal.dot(point) + self.d
+    }
+}
+
+/// View frustum for culling chunks that are not visible
+pub struct Frustum {
+    planes: [Plane; 6], // left, right, bottom, top, near, far
+}
+
+impl Frustum {
+    /// Extract frustum planes from a view-projection matrix
+    pub fn from_view_proj(vp: &Matrix4<f32>) -> Self {
+        let m = vp;
+
+        // Extract rows
+        let row0 = Vector4::new(m[0][0], m[1][0], m[2][0], m[3][0]);
+        let row1 = Vector4::new(m[0][1], m[1][1], m[2][1], m[3][1]);
+        let row2 = Vector4::new(m[0][2], m[1][2], m[2][2], m[3][2]);
+        let row3 = Vector4::new(m[0][3], m[1][3], m[2][3], m[3][3]);
+
+        // Extract planes using Gribb/Hartmann method
+        let planes_raw = [
+            row3 + row0, // Left
+            row3 - row0, // Right
+            row3 + row1, // Bottom
+            row3 - row1, // Top
+            row3 + row2, // Near
+            row3 - row2, // Far
+        ];
+
+        let mut planes = [Plane { normal: Vector3::zero(), d: 0.0 }; 6];
+        for (i, p) in planes_raw.iter().enumerate() {
+            let len = Vector3::new(p.x, p.y, p.z).magnitude();
+            if len > 0.0001 {
+                planes[i] = Plane {
+                    normal: Vector3::new(p.x / len, p.y / len, p.z / len),
+                    d: p.w / len,
+                };
+            }
+        }
+
+        Frustum { planes }
+    }
+
+    /// Test if an axis-aligned bounding box is visible (intersects or is inside the frustum)
+    /// Returns true if the AABB should be rendered
+    pub fn is_box_visible(&self, min: Vector3<f32>, max: Vector3<f32>) -> bool {
+        for plane in &self.planes {
+            // Find the corner of the AABB most in the direction of the plane normal (p-vertex)
+            let p = Vector3::new(
+                if plane.normal.x >= 0.0 { max.x } else { min.x },
+                if plane.normal.y >= 0.0 { max.y } else { min.y },
+                if plane.normal.z >= 0.0 { max.z } else { min.z },
+            );
+
+            // If the p-vertex is outside, the box is completely outside
+            if plane.distance_to_point(p) < 0.0 {
+                return false;
+            }
+        }
+        true
     }
 }

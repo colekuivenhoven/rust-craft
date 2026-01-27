@@ -22,6 +22,13 @@ use winit::{
 };
 
 fn main() {
+    // Initialize rayon thread pool with larger stack size for chunk generation
+    // Chunks have ~256KB of stack-allocated arrays, so we need larger stacks
+    rayon::ThreadPoolBuilder::new()
+        .stack_size(4 * 1024 * 1024) // 4MB stack per thread
+        .build_global()
+        .expect("Failed to initialize rayon thread pool");
+
     // Initialize logging with info level by default
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info,wgpu=warn"))
         .format_timestamp_millis()

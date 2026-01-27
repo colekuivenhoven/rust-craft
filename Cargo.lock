@@ -431,6 +431,7 @@ dependencies = [
  "noise",
  "pollster",
  "rand",
+ "rayon",
  "wgpu",
  "winit",
 ]
