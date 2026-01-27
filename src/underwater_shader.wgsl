@@ -31,6 +31,14 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    const WAVE_AMPLITUDE: f32 = 0.0075;
+    const RIPPLE_AMPLITUDE: f32 = 0.003;
+    const VIGNETTE_STRENGTH: f32 = 0.6;
+    const ABERRATION_STRENGTH_BASE: f32 = 0.025;
+    const BRIGHTNESS_AMOUNT: f32 = 1.5; // 1.0 - 2.0 works best
+    const BRIGHTNESS_REDUCTION: f32 = 0.5;
+    const FOG_AMOUNT: f32 = 0.5;
+
     // 1. WAVINESS (Multi-layered distortion)
     // -----------------------------------------------------------
     let time = uniforms.time;
@@ -38,16 +46,15 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     // Layer 1: Large, slow "swell"
     // We disturb X based on Y, and Y based on X to create a swirling liquid feel
-    let swell_x = sin(uv.y * 3.0 + time * 0.5) * 0.005;
-    let swell_y = cos(uv.x * 3.0 + time * 0.5) * 0.005;
+    let swell_x = sin(uv.y * 3.0 + time * 0.5) * WAVE_AMPLITUDE;
+    let swell_y = cos(uv.x * 3.0 + time * 0.5) * WAVE_AMPLITUDE;
 
     // Layer 2: Faster, smaller "ripples"
-    let ripple_x = sin(uv.y * 15.0 + time * 1.5) * 0.004;
-    let ripple_y = cos(uv.x * 15.0 + time * 1.5) * 0.004;
+    let ripple_x = sin(uv.y * 15.0 + time * 1.5) * RIPPLE_AMPLITUDE;
+    let ripple_y = cos(uv.x * 15.0 + time * 1.5) * RIPPLE_AMPLITUDE;
 
     // Apply distortion to UVs
     let distorted_uv = uv + vec2<f32>(swell_x + ripple_x, swell_y + ripple_y);
-
 
     // 2. CHROMATIC ABERRATION
     // -----------------------------------------------------------
@@ -55,8 +62,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let center_dist = length(distorted_uv - vec2<f32>(0.5, 0.5));
     
     // Offset strength increases toward edges
-    let aber_strength = 0.015 * center_dist; 
-    
+    let aber_strength = ABERRATION_STRENGTH_BASE * center_dist;
+
     // Sample the color channels at slightly different positions
     // Red pulls in one direction, Blue in the opposite
     let r = textureSample(t_screen, s_screen, distorted_uv + vec2<f32>(aber_strength, 0.0)).r;
@@ -67,14 +74,14 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     // 3. UNDERWATER TINT & VIGNETTE (Your original logic)
     // -----------------------------------------------------------
-    let vignette = 1.0 - center_dist * 0.6; // Increased intensity slightly
+    let vignette = 1.0 - center_dist * VIGNETTE_STRENGTH; // Increased intensity slightly
     let tint_color = vec3<f32>(0.18, 0.4, 0.75); // Slightly deeper blue
     
     // Mix the scene color with the tint
     // We multiply scene by tint to simulate light absorption, 
     // then mix a bit of solid blue for "fog" density.
-    let absorbed_light = scene_color * tint_color * 1.1;
-    let final_color = mix(absorbed_light, tint_color * 0.5, 0.3);
+    let absorbed_light = scene_color * (tint_color * BRIGHTNESS_AMOUNT);
+    let final_color = mix(absorbed_light, tint_color * BRIGHTNESS_REDUCTION, FOG_AMOUNT); // absorbed light, tint, fog(?)
 
     // Apply vignette darkness
     return vec4<f32>(final_color * vignette, 1.0);

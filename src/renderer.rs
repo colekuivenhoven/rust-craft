@@ -1253,7 +1253,16 @@ impl State {
 
         let fill = [1.0, 1.0, 1.0, 0.10];
         let outline = [1.0, 1.0, 1.0, 0.85];
-        let outline_selected = [1.0, 1.0, 1.0, 1.0];
+        let outline_selected = [1.0, 1.0, 1.0, 1.0]; // white
+        //let outline_selected = [133.0 / 255.0, 216.0 / 255.0, 255.0 / 255.0, 1.0]; //133, 216, 255 (Light Blue)
+        // let outline_selected = [0.0, 157.0 / 255.0, 255.0 / 255.0, 1.0]; //0, 157, 255 (Baby Blue)
+
+        // Slot content layout
+        let slot_padding = 6.0;
+        let name_scale = 2.0;
+        let name_char_w = 6.0 * name_scale;
+        let name_char_h = 7.0 * name_scale;
+        let label_gap = 6.0;
 
         for i in 0..slots {
             let x = start_x + i as f32 * (slot_size + slot_gap);
@@ -1272,7 +1281,7 @@ impl State {
             );
 
             // Outline as 4 thin quads (thicker for selected)
-            let thick = if i == selected { 3.0 } else { 1.5 };
+            let thick = if i == selected { 5.0 } else { 1.5 };
             let c = if i == selected { outline_selected } else { outline };
             // top
             bitmap_font::push_rect_px(&mut verts, x, y, slot_size, thick, c, screen_w, screen_h);
@@ -1303,49 +1312,84 @@ impl State {
 
             // Slot content
             if let Some(stack) = self.player.inventory.get_slot(i) {
-                // Color square
+                // Block color fill (with padding)
                 let bc = stack.block_type.get_color();
                 let block_color = [bc[0], bc[1], bc[2], 1.0];
                 bitmap_font::push_rect_px(
                     &mut verts,
-                    x + 6.0,
-                    y + 6.0,
-                    24.0,
-                    24.0,
+                    x + slot_padding,
+                    y + slot_padding,
+                    slot_size - slot_padding * 2.0,
+                    slot_size - slot_padding * 2.0,
                     block_color,
                     screen_w,
                     screen_h,
                 );
 
-                // Block name (uppercased for font coverage)
-                let name = stack.block_type.display_name();
-                let name_color = [0.08, 0.08, 0.08, 0.95];
-                bitmap_font::draw_text_quads(
-                    &mut verts,
-                    name,
-                    x + 6.0,
-                    y + 36.0,
-                    2.0,
-                    2.0,
-                    name_color,
-                    screen_w,
-                    screen_h,
-                );
+                // Only show the name for the currently selected slot, positioned just above the slot.
+                if i == selected {
+                    let name = stack.block_type.display_name();
+                    let name_color = [1.0, 1.0, 1.0, 0.95];
+                    let name_w = (name.chars().count() as f32) * name_char_w;
+                    let name_x = x + (slot_size - name_w) * 0.5;
+                    let name_y = (y - name_char_h - label_gap).max(0.0);
+                    // Optional background for readability
+                    bitmap_font::push_rect_px(
+                        &mut verts,
+                        name_x - 4.0,
+                        name_y - 4.0,
+                        name_w + 8.0,
+                        name_char_h + 8.0,
+                        [0.0, 0.0, 0.0, 0.45],
+                        screen_w,
+                        screen_h,
+                    );
+                    bitmap_font::draw_text_quads(
+                        &mut verts,
+                        name,
+                        name_x,
+                        name_y,
+                        name_scale,
+                        name_scale,
+                        name_color,
+                        screen_w,
+                        screen_h,
+                    );
+                }
 
-                // Count "xN"
-                let count_text = format!("x{}", stack.count);
-                let count_color = [0.08, 0.08, 0.08, 0.9];
-                bitmap_font::draw_text_quads(
-                    &mut verts,
-                    &count_text,
-                    x + 6.0,
-                    y + slot_size - 16.0,
-                    2.0,
-                    2.0,
-                    count_color,
-                    screen_w,
-                    screen_h,
-                );
+                // Count: show in white over the block color in the bottom-left (with padding).
+                if stack.count > 1 {
+                    let count_text = format!("x{}", stack.count);
+                    let count_color = [1.0, 1.0, 1.0, 0.95];
+                    let count_scale = 2.0;
+                    let count_x = x + slot_padding + 7.0;
+                    let count_y = y + slot_size - (slot_padding + 6.0) - (7.0 * count_scale) - 1.0;
+                    let count_background_padding = 4.0;
+
+                    // Background for count text
+                    bitmap_font::push_rect_px(
+                        &mut verts,
+                        count_x - count_background_padding, // x
+                        count_y - count_background_padding, // y
+                        (count_text.len() as f32) * 6.0 * count_scale + (count_background_padding * 2.0), // width
+                        7.0 * count_scale + (count_background_padding * 2.0), // height
+                        [0.0, 0.0, 0.0, 0.55], // color
+                        screen_w,
+                        screen_h,
+                    );
+
+                    bitmap_font::draw_text_quads(
+                        &mut verts,
+                        &count_text,
+                        count_x,
+                        count_y,
+                        count_scale,
+                        count_scale,
+                        count_color,
+                        screen_w,
+                        screen_h,
+                    );
+                }
             }
         }
 

@@ -67,7 +67,7 @@ impl BlockType {
             BlockType::Water => "Water",
             BlockType::Cobblestone => "Cobblestone",
             BlockType::Planks => "Planks",
-            BlockType::GlowStone => "Glow",
+            BlockType::GlowStone => "Glowstone",
             BlockType::Boundary => "Boundary",
         }
     }
