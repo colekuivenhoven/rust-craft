@@ -9,8 +9,8 @@ use crate::texture::TEX_NONE;
 // ============================================================================
 
 // Spawning
-pub const BIRD_SPAWN_INTERVAL: f32 = 1.0;      // Seconds between spawn attempts
-pub const BIRD_MAX_COUNT: usize = 150;         // Maximum birds in world
+pub const BIRD_SPAWN_INTERVAL: f32 = 0.5;      // Seconds between spawn attempts
+pub const BIRD_MAX_COUNT: usize = 350;         // Maximum birds in world
 pub const BIRD_SPAWN_DISTANCE: f32 = 40.0;     // Distance from player to spawn
 pub const BIRD_DESPAWN_DISTANCE: f32 = 100.0;  // Distance at which birds despawn
 
@@ -698,7 +698,7 @@ pub fn create_bird_vertices(bird: &Bird) -> Vec<Vertex> {
     // === EYES (small black squares on each side of head) ===
     let eye_size = size * 0.05;
     // Left eye - on left side of head, slightly forward
-    let left_eye_local = rotate_point_full(size * 0.32, size * 0.26, size * 0.08, yaw, pitch, roll);
+    let left_eye_local = rotate_point_full(size * 0.32, size * 0.26, size * 0.10, yaw, pitch, roll);
     add_rotated_cube_full(
         &mut vertices,
         pos,
@@ -708,7 +708,7 @@ pub fn create_bird_vertices(bird: &Bird) -> Vec<Vertex> {
         yaw, pitch, roll,
     );
     // Right eye - on right side of head, slightly forward
-    let right_eye_local = rotate_point_full(size * 0.32, size * 0.26, -size * 0.08, yaw, pitch, roll);
+    let right_eye_local = rotate_point_full(size * 0.32, size * 0.26, -size * 0.10, yaw, pitch, roll);
     add_rotated_cube_full(
         &mut vertices,
         pos,
