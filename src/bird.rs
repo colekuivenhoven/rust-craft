@@ -9,10 +9,10 @@ use crate::texture::TEX_NONE;
 // ============================================================================
 
 // Spawning
-pub const BIRD_SPAWN_INTERVAL: f32 = 0.5;      // Seconds between spawn attempts
-pub const BIRD_MAX_COUNT: usize = 150;          // Maximum birds in world
+pub const BIRD_SPAWN_INTERVAL: f32 = 1.0;      // Seconds between spawn attempts
+pub const BIRD_MAX_COUNT: usize = 150;         // Maximum birds in world
 pub const BIRD_SPAWN_DISTANCE: f32 = 40.0;     // Distance from player to spawn
-pub const BIRD_DESPAWN_DISTANCE: f32 = 80.0;   // Distance at which birds despawn
+pub const BIRD_DESPAWN_DISTANCE: f32 = 100.0;  // Distance at which birds despawn
 
 // Flocking (Boids)
 pub const BOID_SEPARATION_RADIUS: f32 = 2.0;   // Avoid birds closer than this
@@ -27,8 +27,8 @@ pub const BOID_FLOCK_CHANCE: f32 = 0.7;        // Probability a bird will try to
 pub const BIRD_FLY_SPEED: f32 = 8.0;           // Base flight speed
 pub const BIRD_TURN_RATE: f32 = 2.0;           // Radians per second turning
 pub const BIRD_MIN_HEIGHT: f32 = 35.0;         // Minimum flight altitude
-pub const BIRD_MAX_HEIGHT: f32 = 90.0;         // Maximum flight altitude
-pub const BIRD_FLIGHT_RANDOMNESS: f32 = 0.3;   // Random direction change factor
+pub const BIRD_MAX_HEIGHT: f32 = 120.0;         // Maximum flight altitude
+pub const BIRD_FLIGHT_RANDOMNESS: f32 = 0.5;   // Random direction change factor
 pub const BIRD_HEIGHT_CHANGE_RATE: f32 = 3.0;  // Vertical movement speed
 
 // Landing
@@ -40,13 +40,13 @@ pub const BIRD_LANDING_SCAN_RADIUS: i32 = 15;     // Radius to search for trees
 pub const BIRD_SOLID_LANDING_CHANCE: f32 = 0.1;   // Chance to land on non-leaves solid blocks
 
 // Obstacle avoidance
-pub const BIRD_LOOK_AHEAD_DISTANCE: f32 = 4.0;    // How far ahead to check for obstacles
+pub const BIRD_LOOK_AHEAD_DISTANCE: f32 = 10.0;    // How far ahead to check for obstacles
 pub const BIRD_AVOIDANCE_STRENGTH: f32 = 4.0;     // How strongly to steer away from obstacles
 
 // Flight dynamics
 pub const BIRD_MAX_PITCH: f32 = 0.5;              // Maximum pitch angle (radians)
 pub const BIRD_MAX_ROLL: f32 = 0.6;               // Maximum roll angle when turning (radians)
-pub const BIRD_ROTATION_SMOOTHING: f32 = 4.0;    // Smoothing factor for pitch/roll changes (higher = faster)
+pub const BIRD_ROTATION_SMOOTHING: f32 = 4.0;     // Smoothing factor for pitch/roll changes (higher = faster)
 
 // Animation
 pub const WING_FLAP_SPEED: f32 = 12.0;         // Wing flaps per second while flying
@@ -55,7 +55,7 @@ pub const LEG_WALK_SPEED: f32 = 8.0;           // Leg movement cycles per second
 pub const LEG_WALK_AMPLITUDE: f32 = 0.2;       // Maximum leg swing distance
 
 // Bird size
-pub const BIRD_BASE_SIZE: f32 = 1.0;           // Base size multiplier
+pub const BIRD_BASE_SIZE: f32 = 0.65;          // Base size multiplier
 
 // ============================================================================
 // BirdState Enum
