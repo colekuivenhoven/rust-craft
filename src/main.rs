@@ -1,3 +1,4 @@
+mod bird;
 mod block;
 mod camera;
 mod chunk;

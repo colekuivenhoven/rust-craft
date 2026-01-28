@@ -1,3 +1,4 @@
+use crate::bird::{BirdManager, create_bird_vertices, generate_bird_indices};
 use crate::block::{BlockType, Vertex, UiVertex, LineVertex, create_cube_vertices, create_block_outline, create_face_vertices, CUBE_INDICES};
 use crate::camera::{Camera, CameraController, CameraUniform, Projection, Frustum};
 use crate::chunk::{CHUNK_SIZE, CHUNK_HEIGHT};
@@ -73,6 +74,7 @@ pub struct State {
     player: Player,
     water_simulation: WaterSimulation,
     enemy_manager: EnemyManager,
+    bird_manager: BirdManager,
     crafting_system: CraftingSystem,
     last_frame: Instant,
     mouse_pressed: bool,
@@ -447,6 +449,7 @@ impl State {
         let player = Player::new(Point3::new(0.0, 35.0, 0.0));
         let water_simulation = WaterSimulation::new(0.5);
         let enemy_manager = EnemyManager::new(10.0, 10);
+        let bird_manager = BirdManager::new();
         let crafting_system = CraftingSystem::new();
 
         // UI Pipeline for crosshair
@@ -907,6 +910,7 @@ impl State {
             player,
             water_simulation,
             enemy_manager,
+            bird_manager,
             crafting_system,
             last_frame: Instant::now(),
             mouse_pressed: false,
@@ -1910,6 +1914,9 @@ impl State {
         // TODO: Re-enable enemy spawning after testing
         // self.enemy_manager.update(dt, self.player.position);
 
+        // Update birds
+        self.bird_manager.update(dt, self.player.position, &self.world);
+
         // Check for enemy damage
         let damage = self.enemy_manager.check_player_damage(self.player.position);
         if damage > 0.0 {
@@ -2146,6 +2153,38 @@ impl State {
                         .set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint16);
                     render_pass.draw_indexed(0..CUBE_INDICES.len() as u32, 0, 0..1);
                 }
+            }
+
+            // Render birds
+            for bird in &self.bird_manager.birds {
+                let vertices = create_bird_vertices(bird);
+                if vertices.is_empty() {
+                    continue;
+                }
+
+                // Calculate number of cubes (each cube has 24 vertices)
+                let num_cubes = vertices.len() / 24;
+                let indices = generate_bird_indices(num_cubes);
+
+                let vertex_buffer =
+                    self.device
+                        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                            label: Some("Bird Vertex Buffer"),
+                            contents: bytemuck::cast_slice(&vertices),
+                            usage: wgpu::BufferUsages::VERTEX,
+                        });
+
+                let index_buffer =
+                    self.device
+                        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                            label: Some("Bird Index Buffer"),
+                            contents: bytemuck::cast_slice(&indices),
+                            usage: wgpu::BufferUsages::INDEX,
+                        });
+
+                render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+                render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+                render_pass.draw_indexed(0..indices.len() as u32, 0, 0..1);
             }
         }
 
