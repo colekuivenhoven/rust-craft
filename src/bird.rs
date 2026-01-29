@@ -862,45 +862,45 @@ fn add_rotated_cube(
 
     // Front face (+Z local, rotated)
     let front_normal = rotate_point(0.0, 0.0, 1.0, cos_dir, sin_dir);
-    vertices.push(Vertex { position: corners[4], color, normal: front_normal, light_level, alpha, uv, tex_index });
-    vertices.push(Vertex { position: corners[5], color, normal: front_normal, light_level, alpha, uv, tex_index });
-    vertices.push(Vertex { position: corners[6], color, normal: front_normal, light_level, alpha, uv, tex_index });
-    vertices.push(Vertex { position: corners[7], color, normal: front_normal, light_level, alpha, uv, tex_index });
+    vertices.push(Vertex { position: corners[4], color, normal: front_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
+    vertices.push(Vertex { position: corners[5], color, normal: front_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
+    vertices.push(Vertex { position: corners[6], color, normal: front_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
+    vertices.push(Vertex { position: corners[7], color, normal: front_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
 
     // Back face (-Z local, rotated)
     let back_normal = rotate_point(0.0, 0.0, -1.0, cos_dir, sin_dir);
-    vertices.push(Vertex { position: corners[1], color, normal: back_normal, light_level, alpha, uv, tex_index });
-    vertices.push(Vertex { position: corners[0], color, normal: back_normal, light_level, alpha, uv, tex_index });
-    vertices.push(Vertex { position: corners[3], color, normal: back_normal, light_level, alpha, uv, tex_index });
-    vertices.push(Vertex { position: corners[2], color, normal: back_normal, light_level, alpha, uv, tex_index });
+    vertices.push(Vertex { position: corners[1], color, normal: back_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
+    vertices.push(Vertex { position: corners[0], color, normal: back_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
+    vertices.push(Vertex { position: corners[3], color, normal: back_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
+    vertices.push(Vertex { position: corners[2], color, normal: back_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
 
     // Top face (+Y)
     let top_normal = [0.0, 1.0, 0.0];
-    vertices.push(Vertex { position: corners[7], color, normal: top_normal, light_level, alpha, uv, tex_index });
-    vertices.push(Vertex { position: corners[6], color, normal: top_normal, light_level, alpha, uv, tex_index });
-    vertices.push(Vertex { position: corners[2], color, normal: top_normal, light_level, alpha, uv, tex_index });
-    vertices.push(Vertex { position: corners[3], color, normal: top_normal, light_level, alpha, uv, tex_index });
+    vertices.push(Vertex { position: corners[7], color, normal: top_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
+    vertices.push(Vertex { position: corners[6], color, normal: top_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
+    vertices.push(Vertex { position: corners[2], color, normal: top_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
+    vertices.push(Vertex { position: corners[3], color, normal: top_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
 
     // Bottom face (-Y)
     let bottom_normal = [0.0, -1.0, 0.0];
-    vertices.push(Vertex { position: corners[0], color, normal: bottom_normal, light_level, alpha, uv, tex_index });
-    vertices.push(Vertex { position: corners[1], color, normal: bottom_normal, light_level, alpha, uv, tex_index });
-    vertices.push(Vertex { position: corners[5], color, normal: bottom_normal, light_level, alpha, uv, tex_index });
-    vertices.push(Vertex { position: corners[4], color, normal: bottom_normal, light_level, alpha, uv, tex_index });
+    vertices.push(Vertex { position: corners[0], color, normal: bottom_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
+    vertices.push(Vertex { position: corners[1], color, normal: bottom_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
+    vertices.push(Vertex { position: corners[5], color, normal: bottom_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
+    vertices.push(Vertex { position: corners[4], color, normal: bottom_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
 
     // Right face (+X local, rotated)
     let right_normal = rotate_point(1.0, 0.0, 0.0, cos_dir, sin_dir);
-    vertices.push(Vertex { position: corners[5], color, normal: right_normal, light_level, alpha, uv, tex_index });
-    vertices.push(Vertex { position: corners[1], color, normal: right_normal, light_level, alpha, uv, tex_index });
-    vertices.push(Vertex { position: corners[2], color, normal: right_normal, light_level, alpha, uv, tex_index });
-    vertices.push(Vertex { position: corners[6], color, normal: right_normal, light_level, alpha, uv, tex_index });
+    vertices.push(Vertex { position: corners[5], color, normal: right_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
+    vertices.push(Vertex { position: corners[1], color, normal: right_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
+    vertices.push(Vertex { position: corners[2], color, normal: right_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
+    vertices.push(Vertex { position: corners[6], color, normal: right_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
 
     // Left face (-X local, rotated)
     let left_normal = rotate_point(-1.0, 0.0, 0.0, cos_dir, sin_dir);
-    vertices.push(Vertex { position: corners[0], color, normal: left_normal, light_level, alpha, uv, tex_index });
-    vertices.push(Vertex { position: corners[4], color, normal: left_normal, light_level, alpha, uv, tex_index });
-    vertices.push(Vertex { position: corners[7], color, normal: left_normal, light_level, alpha, uv, tex_index });
-    vertices.push(Vertex { position: corners[3], color, normal: left_normal, light_level, alpha, uv, tex_index });
+    vertices.push(Vertex { position: corners[0], color, normal: left_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
+    vertices.push(Vertex { position: corners[4], color, normal: left_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
+    vertices.push(Vertex { position: corners[7], color, normal: left_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
+    vertices.push(Vertex { position: corners[3], color, normal: left_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
 }
 
 /// Rotate a point around Y axis only (for normals and simple rotation)
@@ -989,45 +989,45 @@ fn add_rotated_cube_full(
 
     // Front face (+Z local, rotated)
     let front_normal = rotate_point_full(0.0, 0.0, 1.0, yaw, pitch, roll);
-    vertices.push(Vertex { position: corners[4], color, normal: front_normal, light_level, alpha, uv, tex_index });
-    vertices.push(Vertex { position: corners[5], color, normal: front_normal, light_level, alpha, uv, tex_index });
-    vertices.push(Vertex { position: corners[6], color, normal: front_normal, light_level, alpha, uv, tex_index });
-    vertices.push(Vertex { position: corners[7], color, normal: front_normal, light_level, alpha, uv, tex_index });
+    vertices.push(Vertex { position: corners[4], color, normal: front_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
+    vertices.push(Vertex { position: corners[5], color, normal: front_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
+    vertices.push(Vertex { position: corners[6], color, normal: front_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
+    vertices.push(Vertex { position: corners[7], color, normal: front_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
 
     // Back face (-Z local, rotated)
     let back_normal = rotate_point_full(0.0, 0.0, -1.0, yaw, pitch, roll);
-    vertices.push(Vertex { position: corners[1], color, normal: back_normal, light_level, alpha, uv, tex_index });
-    vertices.push(Vertex { position: corners[0], color, normal: back_normal, light_level, alpha, uv, tex_index });
-    vertices.push(Vertex { position: corners[3], color, normal: back_normal, light_level, alpha, uv, tex_index });
-    vertices.push(Vertex { position: corners[2], color, normal: back_normal, light_level, alpha, uv, tex_index });
+    vertices.push(Vertex { position: corners[1], color, normal: back_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
+    vertices.push(Vertex { position: corners[0], color, normal: back_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
+    vertices.push(Vertex { position: corners[3], color, normal: back_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
+    vertices.push(Vertex { position: corners[2], color, normal: back_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
 
     // Top face (+Y)
     let top_normal = rotate_point_full(0.0, 1.0, 0.0, yaw, pitch, roll);
-    vertices.push(Vertex { position: corners[7], color, normal: top_normal, light_level, alpha, uv, tex_index });
-    vertices.push(Vertex { position: corners[6], color, normal: top_normal, light_level, alpha, uv, tex_index });
-    vertices.push(Vertex { position: corners[2], color, normal: top_normal, light_level, alpha, uv, tex_index });
-    vertices.push(Vertex { position: corners[3], color, normal: top_normal, light_level, alpha, uv, tex_index });
+    vertices.push(Vertex { position: corners[7], color, normal: top_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
+    vertices.push(Vertex { position: corners[6], color, normal: top_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
+    vertices.push(Vertex { position: corners[2], color, normal: top_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
+    vertices.push(Vertex { position: corners[3], color, normal: top_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
 
     // Bottom face (-Y)
     let bottom_normal = rotate_point_full(0.0, -1.0, 0.0, yaw, pitch, roll);
-    vertices.push(Vertex { position: corners[0], color, normal: bottom_normal, light_level, alpha, uv, tex_index });
-    vertices.push(Vertex { position: corners[1], color, normal: bottom_normal, light_level, alpha, uv, tex_index });
-    vertices.push(Vertex { position: corners[5], color, normal: bottom_normal, light_level, alpha, uv, tex_index });
-    vertices.push(Vertex { position: corners[4], color, normal: bottom_normal, light_level, alpha, uv, tex_index });
+    vertices.push(Vertex { position: corners[0], color, normal: bottom_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
+    vertices.push(Vertex { position: corners[1], color, normal: bottom_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
+    vertices.push(Vertex { position: corners[5], color, normal: bottom_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
+    vertices.push(Vertex { position: corners[4], color, normal: bottom_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
 
     // Right face (+X local, rotated)
     let right_normal = rotate_point_full(1.0, 0.0, 0.0, yaw, pitch, roll);
-    vertices.push(Vertex { position: corners[5], color, normal: right_normal, light_level, alpha, uv, tex_index });
-    vertices.push(Vertex { position: corners[1], color, normal: right_normal, light_level, alpha, uv, tex_index });
-    vertices.push(Vertex { position: corners[2], color, normal: right_normal, light_level, alpha, uv, tex_index });
-    vertices.push(Vertex { position: corners[6], color, normal: right_normal, light_level, alpha, uv, tex_index });
+    vertices.push(Vertex { position: corners[5], color, normal: right_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
+    vertices.push(Vertex { position: corners[1], color, normal: right_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
+    vertices.push(Vertex { position: corners[2], color, normal: right_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
+    vertices.push(Vertex { position: corners[6], color, normal: right_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
 
     // Left face (-X local, rotated)
     let left_normal = rotate_point_full(-1.0, 0.0, 0.0, yaw, pitch, roll);
-    vertices.push(Vertex { position: corners[0], color, normal: left_normal, light_level, alpha, uv, tex_index });
-    vertices.push(Vertex { position: corners[4], color, normal: left_normal, light_level, alpha, uv, tex_index });
-    vertices.push(Vertex { position: corners[7], color, normal: left_normal, light_level, alpha, uv, tex_index });
-    vertices.push(Vertex { position: corners[3], color, normal: left_normal, light_level, alpha, uv, tex_index });
+    vertices.push(Vertex { position: corners[0], color, normal: left_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
+    vertices.push(Vertex { position: corners[4], color, normal: left_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
+    vertices.push(Vertex { position: corners[7], color, normal: left_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
+    vertices.push(Vertex { position: corners[3], color, normal: left_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
 }
 
 /// Adds a wing cube with full yaw/pitch/roll rotation plus flapping animation
@@ -1101,45 +1101,45 @@ fn add_wing_cube_full(
 
     // Front face
     let front_normal = rotate_point_full(0.0, 0.0, 1.0, yaw, pitch, roll);
-    vertices.push(Vertex { position: corners[4], color, normal: front_normal, light_level, alpha, uv, tex_index });
-    vertices.push(Vertex { position: corners[5], color, normal: front_normal, light_level, alpha, uv, tex_index });
-    vertices.push(Vertex { position: corners[6], color, normal: front_normal, light_level, alpha, uv, tex_index });
-    vertices.push(Vertex { position: corners[7], color, normal: front_normal, light_level, alpha, uv, tex_index });
+    vertices.push(Vertex { position: corners[4], color, normal: front_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
+    vertices.push(Vertex { position: corners[5], color, normal: front_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
+    vertices.push(Vertex { position: corners[6], color, normal: front_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
+    vertices.push(Vertex { position: corners[7], color, normal: front_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
 
     // Back face
     let back_normal = rotate_point_full(0.0, 0.0, -1.0, yaw, pitch, roll);
-    vertices.push(Vertex { position: corners[1], color, normal: back_normal, light_level, alpha, uv, tex_index });
-    vertices.push(Vertex { position: corners[0], color, normal: back_normal, light_level, alpha, uv, tex_index });
-    vertices.push(Vertex { position: corners[3], color, normal: back_normal, light_level, alpha, uv, tex_index });
-    vertices.push(Vertex { position: corners[2], color, normal: back_normal, light_level, alpha, uv, tex_index });
+    vertices.push(Vertex { position: corners[1], color, normal: back_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
+    vertices.push(Vertex { position: corners[0], color, normal: back_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
+    vertices.push(Vertex { position: corners[3], color, normal: back_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
+    vertices.push(Vertex { position: corners[2], color, normal: back_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
 
     // Top face
     let top_normal = rotate_point_full(0.0, 1.0, 0.0, yaw, pitch, roll);
-    vertices.push(Vertex { position: corners[7], color, normal: top_normal, light_level, alpha, uv, tex_index });
-    vertices.push(Vertex { position: corners[6], color, normal: top_normal, light_level, alpha, uv, tex_index });
-    vertices.push(Vertex { position: corners[2], color, normal: top_normal, light_level, alpha, uv, tex_index });
-    vertices.push(Vertex { position: corners[3], color, normal: top_normal, light_level, alpha, uv, tex_index });
+    vertices.push(Vertex { position: corners[7], color, normal: top_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
+    vertices.push(Vertex { position: corners[6], color, normal: top_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
+    vertices.push(Vertex { position: corners[2], color, normal: top_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
+    vertices.push(Vertex { position: corners[3], color, normal: top_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
 
     // Bottom face
     let bottom_normal = rotate_point_full(0.0, -1.0, 0.0, yaw, pitch, roll);
-    vertices.push(Vertex { position: corners[0], color, normal: bottom_normal, light_level, alpha, uv, tex_index });
-    vertices.push(Vertex { position: corners[1], color, normal: bottom_normal, light_level, alpha, uv, tex_index });
-    vertices.push(Vertex { position: corners[5], color, normal: bottom_normal, light_level, alpha, uv, tex_index });
-    vertices.push(Vertex { position: corners[4], color, normal: bottom_normal, light_level, alpha, uv, tex_index });
+    vertices.push(Vertex { position: corners[0], color, normal: bottom_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
+    vertices.push(Vertex { position: corners[1], color, normal: bottom_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
+    vertices.push(Vertex { position: corners[5], color, normal: bottom_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
+    vertices.push(Vertex { position: corners[4], color, normal: bottom_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
 
     // Right face
     let right_normal = rotate_point_full(1.0, 0.0, 0.0, yaw, pitch, roll);
-    vertices.push(Vertex { position: corners[5], color, normal: right_normal, light_level, alpha, uv, tex_index });
-    vertices.push(Vertex { position: corners[1], color, normal: right_normal, light_level, alpha, uv, tex_index });
-    vertices.push(Vertex { position: corners[2], color, normal: right_normal, light_level, alpha, uv, tex_index });
-    vertices.push(Vertex { position: corners[6], color, normal: right_normal, light_level, alpha, uv, tex_index });
+    vertices.push(Vertex { position: corners[5], color, normal: right_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
+    vertices.push(Vertex { position: corners[1], color, normal: right_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
+    vertices.push(Vertex { position: corners[2], color, normal: right_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
+    vertices.push(Vertex { position: corners[6], color, normal: right_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
 
     // Left face
     let left_normal = rotate_point_full(-1.0, 0.0, 0.0, yaw, pitch, roll);
-    vertices.push(Vertex { position: corners[0], color, normal: left_normal, light_level, alpha, uv, tex_index });
-    vertices.push(Vertex { position: corners[4], color, normal: left_normal, light_level, alpha, uv, tex_index });
-    vertices.push(Vertex { position: corners[7], color, normal: left_normal, light_level, alpha, uv, tex_index });
-    vertices.push(Vertex { position: corners[3], color, normal: left_normal, light_level, alpha, uv, tex_index });
+    vertices.push(Vertex { position: corners[0], color, normal: left_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
+    vertices.push(Vertex { position: corners[4], color, normal: left_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
+    vertices.push(Vertex { position: corners[7], color, normal: left_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
+    vertices.push(Vertex { position: corners[3], color, normal: left_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
 }
 
 /// Adds a wing cube that rotates around the bird's forward axis (flapping motion)
@@ -1224,45 +1224,45 @@ fn add_wing_cube(
 
     // Front face (+Z local after rotation = wing tip side for left wing)
     let front_normal = rotate_point(0.0, 0.0, 1.0, cos_dir, sin_dir);
-    vertices.push(Vertex { position: corners[4], color, normal: front_normal, light_level, alpha, uv, tex_index });
-    vertices.push(Vertex { position: corners[5], color, normal: front_normal, light_level, alpha, uv, tex_index });
-    vertices.push(Vertex { position: corners[6], color, normal: front_normal, light_level, alpha, uv, tex_index });
-    vertices.push(Vertex { position: corners[7], color, normal: front_normal, light_level, alpha, uv, tex_index });
+    vertices.push(Vertex { position: corners[4], color, normal: front_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
+    vertices.push(Vertex { position: corners[5], color, normal: front_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
+    vertices.push(Vertex { position: corners[6], color, normal: front_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
+    vertices.push(Vertex { position: corners[7], color, normal: front_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
 
     // Back face (-Z local = body side for left wing)
     let back_normal = rotate_point(0.0, 0.0, -1.0, cos_dir, sin_dir);
-    vertices.push(Vertex { position: corners[1], color, normal: back_normal, light_level, alpha, uv, tex_index });
-    vertices.push(Vertex { position: corners[0], color, normal: back_normal, light_level, alpha, uv, tex_index });
-    vertices.push(Vertex { position: corners[3], color, normal: back_normal, light_level, alpha, uv, tex_index });
-    vertices.push(Vertex { position: corners[2], color, normal: back_normal, light_level, alpha, uv, tex_index });
+    vertices.push(Vertex { position: corners[1], color, normal: back_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
+    vertices.push(Vertex { position: corners[0], color, normal: back_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
+    vertices.push(Vertex { position: corners[3], color, normal: back_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
+    vertices.push(Vertex { position: corners[2], color, normal: back_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
 
     // Top face (+Y)
     let top_normal = [0.0, 1.0, 0.0];
-    vertices.push(Vertex { position: corners[7], color, normal: top_normal, light_level, alpha, uv, tex_index });
-    vertices.push(Vertex { position: corners[6], color, normal: top_normal, light_level, alpha, uv, tex_index });
-    vertices.push(Vertex { position: corners[2], color, normal: top_normal, light_level, alpha, uv, tex_index });
-    vertices.push(Vertex { position: corners[3], color, normal: top_normal, light_level, alpha, uv, tex_index });
+    vertices.push(Vertex { position: corners[7], color, normal: top_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
+    vertices.push(Vertex { position: corners[6], color, normal: top_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
+    vertices.push(Vertex { position: corners[2], color, normal: top_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
+    vertices.push(Vertex { position: corners[3], color, normal: top_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
 
     // Bottom face (-Y)
     let bottom_normal = [0.0, -1.0, 0.0];
-    vertices.push(Vertex { position: corners[0], color, normal: bottom_normal, light_level, alpha, uv, tex_index });
-    vertices.push(Vertex { position: corners[1], color, normal: bottom_normal, light_level, alpha, uv, tex_index });
-    vertices.push(Vertex { position: corners[5], color, normal: bottom_normal, light_level, alpha, uv, tex_index });
-    vertices.push(Vertex { position: corners[4], color, normal: bottom_normal, light_level, alpha, uv, tex_index });
+    vertices.push(Vertex { position: corners[0], color, normal: bottom_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
+    vertices.push(Vertex { position: corners[1], color, normal: bottom_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
+    vertices.push(Vertex { position: corners[5], color, normal: bottom_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
+    vertices.push(Vertex { position: corners[4], color, normal: bottom_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
 
     // Right face (+X local = bird's forward)
     let right_normal = rotate_point(1.0, 0.0, 0.0, cos_dir, sin_dir);
-    vertices.push(Vertex { position: corners[5], color, normal: right_normal, light_level, alpha, uv, tex_index });
-    vertices.push(Vertex { position: corners[1], color, normal: right_normal, light_level, alpha, uv, tex_index });
-    vertices.push(Vertex { position: corners[2], color, normal: right_normal, light_level, alpha, uv, tex_index });
-    vertices.push(Vertex { position: corners[6], color, normal: right_normal, light_level, alpha, uv, tex_index });
+    vertices.push(Vertex { position: corners[5], color, normal: right_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
+    vertices.push(Vertex { position: corners[1], color, normal: right_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
+    vertices.push(Vertex { position: corners[2], color, normal: right_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
+    vertices.push(Vertex { position: corners[6], color, normal: right_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
 
     // Left face (-X local = bird's backward)
     let left_normal = rotate_point(-1.0, 0.0, 0.0, cos_dir, sin_dir);
-    vertices.push(Vertex { position: corners[0], color, normal: left_normal, light_level, alpha, uv, tex_index });
-    vertices.push(Vertex { position: corners[4], color, normal: left_normal, light_level, alpha, uv, tex_index });
-    vertices.push(Vertex { position: corners[7], color, normal: left_normal, light_level, alpha, uv, tex_index });
-    vertices.push(Vertex { position: corners[3], color, normal: left_normal, light_level, alpha, uv, tex_index });
+    vertices.push(Vertex { position: corners[0], color, normal: left_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
+    vertices.push(Vertex { position: corners[4], color, normal: left_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
+    vertices.push(Vertex { position: corners[7], color, normal: left_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
+    vertices.push(Vertex { position: corners[3], color, normal: left_normal, light_level, alpha, uv, tex_index, ao: 1.0 });
 }
 
 /// Generate indices for N cubes (each cube has 24 vertices, 36 indices)

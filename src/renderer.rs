@@ -103,6 +103,7 @@ pub struct State {
     depth_sampler: wgpu::Sampler,
     water_bind_group_layout: wgpu::BindGroupLayout,
     water_bind_group: wgpu::BindGroup,
+    water_time_buffer: wgpu::Buffer,
     // FPS tracking
     fps: f32,
     fps_frame_count: u32,
@@ -341,7 +342,7 @@ impl State {
             ..Default::default()
         });
 
-        // Bind group layout for water shader depth sampling
+        // Bind group layout for water shader depth sampling and wave animation
         let water_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Water Bind Group Layout"),
             entries: &[
@@ -361,10 +362,39 @@ impl State {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                // Wave animation uniforms (time + wave parameters)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
-        // Bind group for water depth sampling (uses the copy texture)
+        // Wave animation uniform buffer (time + wave parameters)
+        use crate::block::{WAVE_AMPLITUDE, WAVE_FREQUENCY, WAVE_SPEED, WAVE_OCTAVES, WAVE_LACUNARITY, WAVE_PERSISTENCE};
+        let wave_uniforms: [f32; 8] = [
+            0.0,               // time (updated each frame)
+            WAVE_AMPLITUDE,
+            WAVE_FREQUENCY,
+            WAVE_SPEED,
+            WAVE_OCTAVES as f32,
+            WAVE_LACUNARITY,
+            WAVE_PERSISTENCE,
+            0.0,               // padding for alignment
+        ];
+        let water_time_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Water Wave Uniform Buffer"),
+            contents: bytemuck::cast_slice(&wave_uniforms),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        // Bind group for water depth sampling and wave animation (uses the copy texture)
         let water_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Water Bind Group"),
             layout: &water_bind_group_layout,
@@ -376,6 +406,10 @@ impl State {
                 wgpu::BindGroupEntry {
                     binding: 1,
                     resource: wgpu::BindingResource::Sampler(&depth_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: water_time_buffer.as_entire_binding(),
                 },
             ],
         });
@@ -934,6 +968,7 @@ impl State {
             depth_sampler,
             water_bind_group_layout,
             water_bind_group,
+            water_time_buffer,
             // FPS tracking
             fps: 0.0,
             fps_frame_count: 0,
@@ -1042,6 +1077,10 @@ impl State {
                     wgpu::BindGroupEntry {
                         binding: 1,
                         resource: wgpu::BindingResource::Sampler(&self.depth_sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: self.water_time_buffer.as_entire_binding(),
                     },
                 ],
             });
@@ -1789,7 +1828,7 @@ impl State {
                     world_pos.z + dz as f32 * offset,
                 );
 
-                let face_verts = create_face_vertices(offset_pos, block_type, face_idx, 1.0, tex_index, uvs);
+                let face_verts = create_face_vertices(offset_pos, block_type, face_idx, 1.0, tex_index, uvs, [1.0; 4]);
 
                 let base_index = vertices.len() as u16;
                 vertices.extend_from_slice(&face_verts);
@@ -1885,6 +1924,13 @@ impl State {
         let total_time = (now - self.start_time).as_secs_f32();
         self.queue.write_buffer(
             &self.underwater_uniform_buffer,
+            0,
+            bytemuck::cast_slice(&[total_time]),
+        );
+
+        // Update water wave animation time (only the time component, rest stays constant)
+        self.queue.write_buffer(
+            &self.water_time_buffer,
             0,
             bytemuck::cast_slice(&[total_time]),
         );

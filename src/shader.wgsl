@@ -24,6 +24,7 @@ struct VertexInput {
     @location(4) alpha: f32,
     @location(5) uv: vec2<f32>,
     @location(6) tex_index: u32,
+    @location(7) ao: f32,
 };
 
 struct VertexOutput {
@@ -35,6 +36,7 @@ struct VertexOutput {
     @location(4) alpha: f32,
     @location(5) uv: vec2<f32>,
     @location(6) @interpolate(flat) tex_index: u32,
+    @location(7) ao: f32,
 };
 
 @vertex
@@ -49,6 +51,7 @@ fn vs_main(model: VertexInput) -> VertexOutput {
     out.alpha = model.alpha;
     out.uv = model.uv;
     out.tex_index = model.tex_index;
+    out.ao = model.ao;
     return out;
 }
 
@@ -82,7 +85,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Combine lighting: voxel light is primary, directional adds depth
     let total_light = min_ambient + curved_light * 0.9 + directional * voxel_light;
 
-    let lit_color = base_color * total_light;
+    // Apply ambient occlusion
+    let final_light = total_light * in.ao;
+
+    let lit_color = base_color * final_light;
 
     return vec4<f32>(lit_color, in.alpha);
 }

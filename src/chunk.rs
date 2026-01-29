@@ -1,4 +1,4 @@
-use crate::block::{BlockType, Vertex, create_face_vertices};
+use crate::block::{BlockType, Vertex, create_face_vertices, create_water_face_vertices, AO_OFFSETS, calculate_ao};
 use crate::lighting;
 use crate::texture::{get_face_uvs, TEX_NONE};
 use cgmath::Vector3;
@@ -45,6 +45,11 @@ impl<'a> ChunkNeighbors<'a> {
 
         let (target_chunk, lx, lz) = self.resolve_coordinates(x, z);
 
+        // Handle diagonal out-of-bounds (corner neighbors crossing chunk boundaries)
+        if lx >= CHUNK_SIZE || lz >= CHUNK_SIZE {
+            return BlockType::Boundary;
+        }
+
         match target_chunk {
             Some(chunk) => chunk.blocks[lx][y as usize][lz],
             None => BlockType::Boundary, // Virtual block: transparent for solids, opaque for water
@@ -56,6 +61,11 @@ impl<'a> ChunkNeighbors<'a> {
         if y >= CHUNK_HEIGHT as i32 { return 15; }
 
         let (target_chunk, lx, lz) = self.resolve_coordinates(x, z);
+
+        // Handle diagonal out-of-bounds (corner neighbors crossing chunk boundaries)
+        if lx >= CHUNK_SIZE || lz >= CHUNK_SIZE {
+            return 15;
+        }
 
         match target_chunk {
             Some(chunk) => chunk.light_levels[lx][y as usize][lz],
@@ -797,25 +807,70 @@ impl Chunk {
                                 [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]
                             };
 
+                            // Calculate ambient occlusion for each vertex
+                            let ao_values: [f32; 4] = std::array::from_fn(|v| {
+                                let offsets = &AO_OFFSETS[face_idx][v];
+                                let s1 = neighbors.get_block(
+                                    x as i32 + offsets[0][0],
+                                    y as i32 + offsets[0][1],
+                                    z as i32 + offsets[0][2]
+                                ).is_solid();
+                                let s2 = neighbors.get_block(
+                                    x as i32 + offsets[1][0],
+                                    y as i32 + offsets[1][1],
+                                    z as i32 + offsets[1][2]
+                                ).is_solid();
+                                let corner = neighbors.get_block(
+                                    x as i32 + offsets[2][0],
+                                    y as i32 + offsets[2][1],
+                                    z as i32 + offsets[2][2]
+                                ).is_solid();
+                                calculate_ao(s1, s2, corner)
+                            });
+
                             if is_water {
-                                // Water uses separate mesh, alpha calculated in shader based on depth
-                                let face_verts = create_face_vertices(world_pos, block, face_idx, light_normalized, tex_index, uvs);
+                                // Check if this is surface water (no water above)
+                                let block_above = neighbors.get_block(x as i32, y as i32 + 1, z as i32);
+                                let is_surface_water = block_above != BlockType::Water;
+
+                                // Water uses separate mesh with wave factor encoded in alpha
+                                let face_verts = create_water_face_vertices(
+                                    world_pos, face_idx, light_normalized, tex_index, uvs, ao_values, is_surface_water
+                                );
 
                                 let base_index = water_vertices.len() as u16;
                                 water_vertices.extend_from_slice(&face_verts);
-                                water_indices.extend_from_slice(&[
-                                    base_index, base_index + 1, base_index + 2,
-                                    base_index + 2, base_index + 3, base_index,
-                                ]);
+
+                                // Anisotropy fix: flip diagonal if it reduces AO discontinuity
+                                if (ao_values[0] - ao_values[2]).abs() > (ao_values[1] - ao_values[3]).abs() {
+                                    water_indices.extend_from_slice(&[
+                                        base_index + 1, base_index + 2, base_index + 3,
+                                        base_index + 3, base_index, base_index + 1,
+                                    ]);
+                                } else {
+                                    water_indices.extend_from_slice(&[
+                                        base_index, base_index + 1, base_index + 2,
+                                        base_index + 2, base_index + 3, base_index,
+                                    ]);
+                                }
                             } else {
-                                let face_verts = create_face_vertices(world_pos, block, face_idx, light_normalized, tex_index, uvs);
+                                let face_verts = create_face_vertices(world_pos, block, face_idx, light_normalized, tex_index, uvs, ao_values);
 
                                 let base_index = vertices.len() as u16;
                                 vertices.extend_from_slice(&face_verts);
-                                indices.extend_from_slice(&[
-                                    base_index, base_index + 1, base_index + 2,
-                                    base_index + 2, base_index + 3, base_index,
-                                ]);
+
+                                // Anisotropy fix: flip diagonal if it reduces AO discontinuity
+                                if (ao_values[0] - ao_values[2]).abs() > (ao_values[1] - ao_values[3]).abs() {
+                                    indices.extend_from_slice(&[
+                                        base_index + 1, base_index + 2, base_index + 3,
+                                        base_index + 3, base_index, base_index + 1,
+                                    ]);
+                                } else {
+                                    indices.extend_from_slice(&[
+                                        base_index, base_index + 1, base_index + 2,
+                                        base_index + 2, base_index + 3, base_index,
+                                    ]);
+                                }
                             }
                         }
                     }

@@ -25,6 +25,7 @@ struct VertexInput {
     @location(4) alpha: f32,
     @location(5) uv: vec2<f32>,
     @location(6) tex_index: u32,
+    @location(7) ao: f32,  // Required for vertex format compatibility
 };
 
 struct VertexOutput {
