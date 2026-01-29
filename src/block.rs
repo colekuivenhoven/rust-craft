@@ -294,7 +294,7 @@ pub const AO_STRENGTH: f32 = 0.5;
 // ============================================================================
 
 /// Maximum wave height in blocks (vertical displacement)
-pub const WAVE_AMPLITUDE: f32 = 0.5;
+pub const WAVE_AMPLITUDE: f32 = 0.9;
 
 /// Base frequency of waves (lower = larger wavelength)
 pub const WAVE_FREQUENCY: f32 = 0.2;

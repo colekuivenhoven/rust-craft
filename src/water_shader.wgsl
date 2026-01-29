@@ -209,7 +209,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Water absorption parameters
     let absorption_coefficient = 0.25;  // How quickly light is absorbed (higher = more opaque faster)
     let min_alpha = 0.4;               // Minimum opacity (shallow water)
-    let max_alpha = 1.0;               // Maximum opacity (very deep water)
+    let max_alpha = 0.9;               // Maximum opacity (very deep water)
 
     // Exponential absorption: Beer-Lambert law - transmittance = e^(-coefficient * distance)
     let transmittance = exp(-absorption_coefficient * water_distance);
@@ -228,7 +228,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     // Apply X-axis directional shading for wave visualization
     // Tilt towards -X = darker, tilt towards +X = lighter
-    let tilt_shading = clamp(in.wave_tilt_x * 2.0, -0.5, 0.9);  // Scale and clamp the effect
+    let tilt_shading = clamp(in.wave_tilt_x * 2.0, -0.5, 2.9);  // Scale and clamp the effect
     let tilt_multiplier = 1.0 + tilt_shading;  // Range: 0.5 to 1.9
 
     let lit_color = in.color * final_light * tilt_multiplier;
