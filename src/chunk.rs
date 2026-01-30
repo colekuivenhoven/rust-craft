@@ -702,50 +702,44 @@ impl Chunk {
         }
 
         // === Sky Island Ponds ===
-        // Create proper circular/oval ponds on floating islands
-        // Step 1: Find pond center candidates
-        let pond_center_perlin = Perlin::new(205);
-        let pond_edge_perlin = Perlin::new(206);
+        // Create large ponds using flood-fill to ensure contiguous, properly-bounded water bodies
+        // Minimum size: 6x6 (36 blocks). Ponds are excavated basins filled with water at a flat level.
 
-        struct PondCenter {
-            x: usize,
-            z: usize,
-            y: usize,
-            radius: usize,
-        }
-        let mut pond_centers: Vec<PondCenter> = Vec::new();
+        let pond_noise = Perlin::new(205);
 
-        for x in 5..CHUNK_SIZE - 5 {
-            for z in 5..CHUNK_SIZE - 5 {
+        // Track which positions have been used for ponds (to avoid overlaps)
+        let mut used_for_pond = [[false; CHUNK_SIZE]; CHUNK_SIZE];
+
+        // Find pond seed points - locations where we'll try to create ponds
+        let mut pond_seeds: Vec<(usize, usize, usize)> = Vec::new(); // (x, z, surface_y)
+
+        for x in 6..CHUNK_SIZE - 6 {
+            for z in 6..CHUNK_SIZE - 6 {
                 let world_x = (world_offset_x + x as i32) as f64;
                 let world_z = (world_offset_z + z as i32) as f64;
 
-                // Check if this is on a large island
+                // Check if we're on a floating island using the island mask
                 let mask_scale = 0.005;
                 let island_mask = (sky_island_mask_perlin.get([world_x * mask_scale, world_z * mask_scale]) + 1.0) * 0.5;
-
                 if island_mask < 0.82 {
                     continue;
                 }
 
-                // Use noise to determine pond center locations (sparse)
-                let center_scale = 0.08;
-                let center_noise = (pond_center_perlin.get([world_x * center_scale, world_z * center_scale]) + 1.0) * 0.5;
-
-                // Only place pond centers where noise is very high (creates sparse centers)
-                if center_noise < 0.75 {
+                // Use noise to create sparse pond locations
+                let pond_chance = (pond_noise.get([world_x * 0.02, world_z * 0.02]) + 1.0) * 0.5;
+                if pond_chance < 0.70 {
                     continue;
                 }
 
-                // Find grass surface in sky island range
+                // Find the grass surface at this location
                 for y in (sky_island_base_y..CHUNK_HEIGHT - 5).rev() {
                     if self.blocks[x][y][z] != BlockType::Grass {
                         continue;
                     }
 
-                    // Verify this is floating
+                    // Verify this is on a floating island (has air below at some point)
                     let mut is_floating = false;
-                    for check_y in (sky_island_base_y - 10)..y {
+                    for check_y in (sky_island_base_y.saturating_sub(10))..y {
                         if self.blocks[x][check_y][z] == BlockType::Air {
                             is_floating = true;
                             break;
@@ -755,104 +749,183 @@ impl Chunk {
                         continue;
                     }
 
-                    // Check we're well inside the island (3-block buffer from air)
-                    let mut well_inside = true;
-                    'edge_check: for dx in -3i32..=3 {
-                        for dz in -3i32..=3 {
-                            let cx = (x as i32 + dx) as usize;
-                            let cz = (z as i32 + dz) as usize;
-                            if cx < CHUNK_SIZE && cz < CHUNK_SIZE {
-                                if self.blocks[cx][y][cz] == BlockType::Air {
-                                    well_inside = false;
-                                    break 'edge_check;
-                                }
-                            }
-                        }
-                    }
-                    if !well_inside {
+                    // Check not already used
+                    if used_for_pond[x][z] {
                         continue;
                     }
 
-                    // Check not too close to existing pond centers
-                    let mut too_close = false;
-                    for existing in &pond_centers {
-                        let dx = (existing.x as i32 - x as i32).abs();
-                        let dz = (existing.z as i32 - z as i32).abs();
-                        if dx < 6 && dz < 6 {
-                            too_close = true;
-                            break;
-                        }
-                    }
-                    if too_close {
-                        continue;
-                    }
-
-                    // Pond radius varies with noise (2-4 blocks)
-                    let radius = 2 + ((center_noise - 0.75) * 8.0) as usize;
-                    pond_centers.push(PondCenter { x, z, y, radius: radius.min(4) });
+                    pond_seeds.push((x, z, y));
                     break;
                 }
             }
         }
 
-        // Step 2: For each pond center, create a circular pond
-        for pond in &pond_centers {
-            let cx = pond.x as i32;
-            let cz = pond.z as i32;
-            let cy = pond.y;
-            let radius = pond.radius as i32;
+        // For each seed, try to create a pond using flood-fill
+        for (seed_x, seed_z, seed_y) in pond_seeds {
+            if used_for_pond[seed_x][seed_z] {
+                continue;
+            }
 
-            // Create pond by iterating over a square and checking distance
-            for dx in -radius..=radius {
-                for dz in -radius..=radius {
-                    let px = (cx + dx) as usize;
-                    let pz = (cz + dz) as usize;
+            // Flood-fill to find contiguous solid region
+            // We'll find all positions that:
+            // 1. Are within chunk bounds (with buffer)
+            // 2. Have solid surface (grass/dirt) within a few Y levels of the seed
+            // 3. Have solid ground below (at least 5 blocks deep for excavation)
+            // 4. Are connected to the seed position
 
-                    if px >= CHUNK_SIZE || pz >= CHUNK_SIZE || px < 2 || pz < 2 {
-                        continue;
-                    }
+            let mut queue: Vec<(usize, usize)> = Vec::new();
+            let mut visited = [[false; CHUNK_SIZE]; CHUNK_SIZE];
+            let mut region: Vec<(usize, usize, usize)> = Vec::new(); // (x, z, surface_y)
 
-                    // Circular distance check with noise for organic edges
-                    let dist_sq = dx * dx + dz * dz;
-                    let world_px = (world_offset_x + px as i32) as f64;
-                    let world_pz = (world_offset_z + pz as i32) as f64;
-                    let edge_noise = (pond_edge_perlin.get([world_px * 0.3, world_pz * 0.3]) + 1.0) * 0.5;
-                    let effective_radius = radius as f64 + (edge_noise - 0.5) * 1.5;
+            queue.push((seed_x, seed_z));
+            visited[seed_x][seed_z] = true;
 
-                    if (dist_sq as f64) > effective_radius * effective_radius {
-                        continue;
-                    }
+            let max_pond_radius = 12; // Maximum distance from seed
 
-                    // Find the surface at this position
-                    let mut surface_y = None;
-                    for sy in (cy.saturating_sub(2)..=cy + 2).rev() {
-                        if sy < CHUNK_HEIGHT && (self.blocks[px][sy][pz] == BlockType::Grass ||
-                            self.blocks[px][sy][pz] == BlockType::Dirt) {
-                            surface_y = Some(sy);
+            while let Some((x, z)) = queue.pop() {
+                // Check distance from seed (limit pond size for performance and aesthetics)
+                let dx = (x as i32 - seed_x as i32).abs();
+                let dz = (z as i32 - seed_z as i32).abs();
+                if dx > max_pond_radius || dz > max_pond_radius {
+                    continue;
+                }
+
+                // Check chunk bounds with buffer
+                if x < 3 || x >= CHUNK_SIZE - 3 || z < 3 || z >= CHUNK_SIZE - 3 {
+                    continue;
+                }
+
+                // Find surface at this position (within a few Y levels of seed)
+                let mut surface_y = None;
+                for y in (seed_y.saturating_sub(4)..=seed_y + 4).rev() {
+                    if y < CHUNK_HEIGHT {
+                        let block = self.blocks[x][y][z];
+                        if block == BlockType::Grass || block == BlockType::Dirt {
+                            surface_y = Some(y);
                             break;
                         }
                     }
+                }
 
-                    if let Some(sy) = surface_y {
-                        // Check neighbors aren't air (don't break through island edge)
-                        if self.blocks[px.saturating_sub(1)][sy][pz] == BlockType::Air ||
-                           self.blocks[(px + 1).min(CHUNK_SIZE - 1)][sy][pz] == BlockType::Air ||
-                           self.blocks[px][sy][pz.saturating_sub(1)] == BlockType::Air ||
-                           self.blocks[px][sy][(pz + 1).min(CHUNK_SIZE - 1)] == BlockType::Air {
-                            continue;
+                let sy = match surface_y {
+                    Some(y) => y,
+                    None => continue, // No solid surface here
+                };
+
+                // Check we have solid ground below for excavation (5 blocks minimum)
+                let mut solid_below = true;
+                for depth in 1..=5 {
+                    if sy < depth {
+                        solid_below = false;
+                        break;
+                    }
+                    let block = self.blocks[x][sy - depth][z];
+                    if block == BlockType::Air {
+                        solid_below = false;
+                        break;
+                    }
+                }
+                if !solid_below {
+                    continue;
+                }
+
+                // Check immediate neighbors for air at surface level (edge detection)
+                // If any direct neighbor is air, we're at the island edge - don't include
+                let mut at_edge = false;
+                for (nx, nz) in [(x.wrapping_sub(1), z), (x + 1, z), (x, z.wrapping_sub(1)), (x, z + 1)] {
+                    if nx < CHUNK_SIZE && nz < CHUNK_SIZE {
+                        if self.blocks[nx][sy][nz] == BlockType::Air {
+                            at_edge = true;
+                            break;
                         }
+                    }
+                }
+                if at_edge {
+                    continue;
+                }
 
-                        // Dig down 1 block for the pond basin and place water
-                        // The grass/dirt surface becomes water
-                        self.blocks[px][sy][pz] = BlockType::Water;
+                // This position is valid - add to region
+                region.push((x, z, sy));
 
-                        // Optionally make center deeper
-                        if dist_sq <= 1 && sy > 1 {
-                            if self.blocks[px][sy - 1][pz] != BlockType::Stone &&
-                               self.blocks[px][sy - 1][pz] != BlockType::Air {
-                                self.blocks[px][sy - 1][pz] = BlockType::Water;
-                            }
-                        }
+                // Add unvisited neighbors to queue
+                for (nx, nz) in [(x.wrapping_sub(1), z), (x + 1, z), (x, z.wrapping_sub(1)), (x, z + 1)] {
+                    if nx < CHUNK_SIZE && nz < CHUNK_SIZE && !visited[nx][nz] && !used_for_pond[nx][nz] {
+                        visited[nx][nz] = true;
+                        queue.push((nx, nz));
+                    }
+                }
+            }
+
+            // Check if region is large enough (minimum 36 = 6x6)
+            if region.len() < 36 {
+                continue;
+            }
+
+            // Find the bounding box and check it's not too elongated
+            let min_x = region.iter().map(|(x, _, _)| *x).min().unwrap();
+            let max_x = region.iter().map(|(x, _, _)| *x).max().unwrap();
+            let min_z = region.iter().map(|(_, z, _)| *z).min().unwrap();
+            let max_z = region.iter().map(|(_, z, _)| *z).max().unwrap();
+            let width = max_x - min_x + 1;
+            let depth = max_z - min_z + 1;
+
+            // Skip if too narrow in either dimension (want at least 6 in both)
+            if width < 6 || depth < 6 {
+                continue;
+            }
+
+            // Find water surface level (use the highest surface Y in the region)
+            let water_level = region.iter().map(|(_, _, y)| *y).max().unwrap();
+
+            // Calculate center of the region for depth calculations
+            let center_x = (min_x + max_x) / 2;
+            let center_z = (min_z + max_z) / 2;
+            let max_dist = ((width.max(depth) / 2) as f64).max(1.0);
+
+            // Mark all positions as used
+            for (x, z, _) in &region {
+                used_for_pond[*x][*z] = true;
+            }
+
+            // Excavate basin and fill with water
+            for (x, z, _) in &region {
+                // Calculate depth based on distance from center (deeper in middle)
+                let dist_x = (*x as f64 - center_x as f64).abs();
+                let dist_z = (*z as f64 - center_z as f64).abs();
+                let dist = (dist_x * dist_x + dist_z * dist_z).sqrt();
+                let normalized_dist = (dist / max_dist).min(1.0);
+
+                let pond_depth = if normalized_dist < 0.3 {
+                    4 // Center: 4 blocks deep
+                } else if normalized_dist < 0.5 {
+                    3 // Inner ring: 3 blocks deep
+                } else if normalized_dist < 0.7 {
+                    2 // Middle: 2 blocks deep
+                } else {
+                    1 // Edge: 1 block deep
+                };
+
+                // Excavate from water_level down to water_level - pond_depth + 1
+                // Then fill with water
+                let bottom_y = water_level.saturating_sub(pond_depth - 1);
+
+                for y in bottom_y..=water_level {
+                    if y >= CHUNK_HEIGHT {
+                        continue;
+                    }
+                    let block = self.blocks[*x][y][*z];
+                    // Don't break through air or stone
+                    if block != BlockType::Air && block != BlockType::Stone {
+                        self.blocks[*x][y][*z] = BlockType::Water;
+                    }
+                }
+
+                // Place dirt floor under the water
+                if bottom_y > 0 {
+                    let floor_y = bottom_y - 1;
+                    let floor_block = self.blocks[*x][floor_y][*z];
+                    if floor_block != BlockType::Air && floor_block != BlockType::Stone && floor_block != BlockType::Water {
+                        self.blocks[*x][floor_y][*z] = BlockType::Dirt;
                     }
                 }
             }
