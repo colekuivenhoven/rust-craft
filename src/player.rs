@@ -20,6 +20,7 @@ impl Player {
         inventory.add_item(BlockType::Stone, 64);
         inventory.add_item(BlockType::Dirt, 64);
         inventory.add_item(BlockType::GlowStone, 64);
+        inventory.add_item(BlockType::Water, 64);
 
         Self {
             position,

@@ -47,8 +47,10 @@ struct VertexOutput {
     @location(1) normal: vec3<f32>,
     @location(2) frag_pos: vec3<f32>,
     @location(3) light_level: f32,
-    @location(4) ao: f32,
-    @location(5) wave_tilt_x: f32,  // X component of wave normal for directional shading
+    @location(4) edge_factor: f32,      // Edge proximity for shore foam (0.0 = interior, 1.0 = touching solid)
+    @location(5) wave_tilt_x: f32,      // X component of wave normal for directional shading
+    @location(6) wave_height: f32,      // Current wave displacement for foam on crests
+    @location(7) world_pos_xz: vec2<f32>, // World XZ position for foam noise sampling
 };
 
 // ============================================================================
@@ -98,6 +100,26 @@ fn fbm_noise(p: vec2<f32>, octaves: i32, lacunarity: f32, persistence: f32) -> f
     }
 
     return value / total_amplitude;
+}
+
+// ============================================================================
+// Foam and Specular Constants
+// ============================================================================
+
+const FOAM_COLOR: vec3<f32> = vec3<f32>(1.0, 1.0, 1.0);  // Slightly blue-white foam
+const FOAM_PIXEL_SIZE: f32 = 0.125;                      // Pixelation size for foam (1/8 of a block = 8 pixels per block)
+const FOAM_LINE_COUNT: i32 = 4;                          // Number of foam lines from the edge
+const FOAM_BASE_DENSITY: f32 = 0.85;                      // Density of first line (1.0 = solid, 0.0 = empty)
+const FOAM_DENSITY_FALLOFF: f32 = 0.50;                  // Multiplier per line (0.5 = each line has half the density of previous)
+
+// Pixelated noise - snaps position to grid before sampling
+fn pixel_noise(pos: vec2<f32>, pixel_size: f32, time: f32) -> f32 {
+    // Snap to pixel grid
+    let snapped = floor(pos / pixel_size) * pixel_size;
+    // Add time-based animation (also snapped for consistent pixelation)
+    let time_step = floor(time * 3.0) * 0.33;  // Step every ~0.33 seconds
+    let animated_pos = snapped + vec2<f32>(time_step * 0.5, time_step * 0.3);
+    return hash_int(i32(animated_pos.x * 100.0), i32(animated_pos.y * 100.0));
 }
 
 // Calculate wave height at a given world position
@@ -174,7 +196,9 @@ fn vs_main(model: VertexInput) -> VertexOutput {
     out.wave_tilt_x = tilt_x;
     out.frag_pos = displaced_position;
     out.light_level = model.light_level;
-    out.ao = model.ao;
+    out.edge_factor = model.ao;  // ao field repurposed as edge factor for water
+    out.wave_height = wave_height;
+    out.world_pos_xz = model.position.xz;
     return out;
 }
 
@@ -223,15 +247,102 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let directional = max(dot(in.normal, light_dir), 0.0) * 0.15;
     let total_light = min_ambient + curved_light * 0.9 + directional * voxel_light;
 
-    // Apply ambient occlusion
-    let final_light = total_light * in.ao;
-
     // Apply X-axis directional shading for wave visualization
     // Tilt towards -X = darker, tilt towards +X = lighter
     let tilt_shading = clamp(in.wave_tilt_x * 2.0, -0.5, 2.9);  // Scale and clamp the effect
     let tilt_multiplier = 1.0 + tilt_shading;  // Range: 0.5 to 1.9
 
-    let lit_color = in.color * final_light * tilt_multiplier;
+    var lit_color = in.color * total_light * tilt_multiplier;
 
-    return vec4<f32>(lit_color, alpha);
+    // ========================================================================
+    // FOAM CALCULATION (Pixelated)
+    // ========================================================================
+
+    // Get fractional position within the block (0.0 to 1.0)
+    let frac_pos = fract(in.world_pos_xz);
+
+    // Pixelated noise for foam pattern
+    let foam_noise_val = pixel_noise(in.world_pos_xz, FOAM_PIXEL_SIZE, wave.time);
+
+    // ---- EDGE FOAM: Pixelated lines along coastline edges ----
+    // edge_factor encodes which edges have solid neighbors as a bitmask:
+    // bit 0 (1): neg_x (-X edge), bit 1 (2): pos_x (+X edge)
+    // bit 2 (4): neg_z (-Z edge), bit 3 (8): pos_z (+Z edge)
+    var edge_foam = 0.0;
+
+    if (in.edge_factor > 0.001) {
+        // Decode bitmask (multiply by 16 to get original 0-15 value)
+        let flags = i32(in.edge_factor * 16.0 + 0.5);  // +0.5 for rounding
+        let has_neg_x = (flags & 1) != 0;
+        let has_pos_x = (flags & 2) != 0;
+        let has_neg_z = (flags & 4) != 0;
+        let has_pos_z = (flags & 8) != 0;
+
+        // Distance from each edge (in blocks, 0.0 = at edge)
+        let dist_neg_x = frac_pos.x;           // Distance from -X edge (left)
+        let dist_pos_x = 1.0 - frac_pos.x;     // Distance from +X edge (right)
+        let dist_neg_z = frac_pos.y;           // Distance from -Z edge (back)
+        let dist_pos_z = 1.0 - frac_pos.y;     // Distance from +Z edge (front)
+
+        // Calculate foam for each edge that has a solid neighbor
+        // For each edge: determine which "line" we're in based on distance
+        let line_width = FOAM_PIXEL_SIZE;
+        let max_foam_dist = line_width * f32(FOAM_LINE_COUNT);
+
+        // Check each edge and calculate foam contribution
+        var min_dist_to_solid_edge = 999.0;
+
+        if (has_neg_x && dist_neg_x < max_foam_dist) {
+            min_dist_to_solid_edge = min(min_dist_to_solid_edge, dist_neg_x);
+        }
+        if (has_pos_x && dist_pos_x < max_foam_dist) {
+            min_dist_to_solid_edge = min(min_dist_to_solid_edge, dist_pos_x);
+        }
+        if (has_neg_z && dist_neg_z < max_foam_dist) {
+            min_dist_to_solid_edge = min(min_dist_to_solid_edge, dist_neg_z);
+        }
+        if (has_pos_z && dist_pos_z < max_foam_dist) {
+            min_dist_to_solid_edge = min(min_dist_to_solid_edge, dist_pos_z);
+        }
+
+        // If we're within foam range of a solid edge
+        if (min_dist_to_solid_edge < max_foam_dist) {
+            // Determine which line we're in (0 = closest to edge)
+            let line_index = i32(min_dist_to_solid_edge / line_width);
+
+            // Calculate density for this line (decreases with each line)
+            let line_density = FOAM_BASE_DENSITY * pow(FOAM_DENSITY_FALLOFF, f32(line_index));
+
+            // Threshold for this pixel: lower density = higher threshold = fewer pixels
+            let noise_threshold = 1.0 - line_density;
+
+            // Pixel is foam if noise exceeds threshold
+            edge_foam = step(noise_threshold, foam_noise_val);
+        }
+    }
+
+    // ---- WAVE FOAM: Appears in FRONT of waves (rising slope) ----
+    // wave_tilt_x > 0 means wave is rising in +X direction (front of wave)
+    // We want foam on the rising front, plus a bit on the crest
+    let wave_slope = in.wave_tilt_x;  // Positive = rising, negative = falling
+    let rising_front = max(wave_slope * 2.0, 0.0);  // Only positive slopes
+    let on_crest = smoothstep(0.15, 0.25, in.wave_height);  // Small amount on crests
+
+    // Combine front and crest, weighted toward front
+    let wave_foam_factor = min(rising_front * 0.8 + on_crest * 0.3, 1.0);
+
+    // Pixelated wave foam
+    let wave_noise_threshold = 0.5 - wave_foam_factor * 0.3;
+    let wave_foam = step(wave_noise_threshold, foam_noise_val) * wave_foam_factor;
+
+    // Combine foam types (max to avoid over-brightening)
+    let total_foam = max(wave_foam, edge_foam);
+
+    // Apply foam to color - foam is bright white overlay
+    lit_color = mix(lit_color, FOAM_COLOR * total_light, total_foam * 0.9);
+
+    // Increase alpha slightly where there's foam for better visibility
+    let foam_alpha_boost = total_foam * 0.15;
+
+    return vec4<f32>(lit_color, min(alpha + foam_alpha_boost, 0.95));
 }

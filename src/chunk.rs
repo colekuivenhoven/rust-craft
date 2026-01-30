@@ -194,21 +194,103 @@ impl Chunk {
                 let height = height_i
                     .clamp(0, (CHUNK_HEIGHT as isize) - 1) as usize;
 
-                // Surface palette
+                // Surface palette with biome-based block selection
                 let sea = sea_level as usize;
+
+                // Jagged transition noise for clumpy block type boundaries
+                let transition_scale = 0.15;
+                let transition_noise = (detail_perlin.get([world_x * transition_scale, world_z * transition_scale]) + 1.0) * 0.5;
+                let transition_noise_2 = (jagged_perlin.get([world_x * transition_scale * 1.5, world_z * transition_scale * 1.5]) + 1.0) * 0.5;
+                let jagged_offset = ((transition_noise * 8.0) + (transition_noise_2 * 4.0)) as isize - 6; // -6 to +6 block variation
+
+                // Narrow sand band right at coast edge (3-6 blocks from water)
+                // inland 0.0-0.15 is the immediate coast edge
+                let is_beach = inland > 0.0 && inland < 0.15;
+
+                // Mountain stone threshold with jagged variation - raised to allow grass higher
+                let mountain_stone_threshold = sea_level + 18 + jagged_offset;
+                let is_mountain_zone = mountains > 0.15;
+
+                // Extra noise for grass patches above stone threshold
+                let grass_patch_noise = transition_noise * 0.7 + transition_noise_2 * 0.3;
+
                 for y in 0..=height {
-                    self.blocks[x][y][z] = if y == height && y > sea {
-                        BlockType::Grass
-                    } 
-                    else if y > height.saturating_sub(3) && y > sea {
-                        BlockType::Dirt
-                    } 
-                    else if y > (sea.saturating_sub(3)) {
-                        BlockType::Stone // Slightly more stone above sea floor.
-                    } 
+                    let y_i = y as isize;
+
+                    // Underwater blocks - mostly sand with sparse deep stone
+                    if y <= sea {
+                        // Very deep underwater = sparse stone patches, otherwise sand
+                        let deep_threshold = (sea_level - 15) as usize; // Deeper threshold
+                        // Use noise to make stone sparse (only ~20% of deep areas)
+                        let stone_noise = transition_noise * transition_noise_2;
+                        let is_deep_stone = y < deep_threshold && stone_noise > 0.4;
+                        self.blocks[x][y][z] = if is_deep_stone {
+                            BlockType::Stone
+                        } else {
+                            BlockType::Sand
+                        };
+                    }
+                    // Above water surface blocks
+                    else if y == height {
+                        // Mountains: stone surface with jagged grass patches
+                        if is_mountain_zone && y_i > mountain_stone_threshold {
+                            // How far above threshold determines grass chance
+                            let blocks_above = (y_i - mountain_stone_threshold) as f64;
+                            // Grass can appear up to 8 blocks above threshold with decreasing probability
+                            let grass_chance_threshold = 0.3 + (blocks_above * 0.1); // 0.3 at threshold, 1.1 at +8
+                            if grass_patch_noise > grass_chance_threshold && blocks_above < 8.0 {
+                                self.blocks[x][y][z] = BlockType::Grass;
+                            } else {
+                                self.blocks[x][y][z] = BlockType::Stone;
+                            }
+                        }
+                        // Beach: narrow sand band at coast edge with jagged grass patches
+                        else if is_beach {
+                            // Grass can intrude into beach with decreasing probability toward water
+                            // inland 0.0 = water edge, 0.15 = beach/grass boundary
+                            let beach_depth = inland / 0.15; // 0.0 at water, 1.0 at grass
+                            // More aggressive thresholds: grass intrudes significantly
+                            // Near grass boundary: 90% grass, near water: 35% grass
+                            let grass_intrusion_threshold = 0.65 - (beach_depth * 0.55);
+                            if grass_patch_noise > grass_intrusion_threshold {
+                                self.blocks[x][y][z] = BlockType::Grass;
+                            } else {
+                                self.blocks[x][y][z] = BlockType::Sand;
+                            }
+                        }
+                        // Default: grass everywhere else
+                        else {
+                            self.blocks[x][y][z] = BlockType::Grass;
+                        }
+                    }
+                    // Below surface blocks
                     else {
-                        BlockType::Sand // Sand near/below sea level (beaches/sea floor).
-                    };
+                        let depth_below_surface = height - y;
+
+                        // Mountains: mostly stone with jagged transition
+                        if is_mountain_zone && y_i > mountain_stone_threshold - 4 {
+                            self.blocks[x][y][z] = BlockType::Stone;
+                        }
+                        // Near surface (1-3 blocks down)
+                        else if depth_below_surface <= 3 {
+                            // Beach areas get sand underneath, unless grass intruded
+                            if is_beach {
+                                let beach_depth = inland / 0.15;
+                                let grass_intrusion_threshold = 0.65 - (beach_depth * 0.55);
+                                if grass_patch_noise > grass_intrusion_threshold {
+                                    self.blocks[x][y][z] = BlockType::Dirt; // Under grass
+                                } else {
+                                    self.blocks[x][y][z] = BlockType::Sand; // Under sand
+                                }
+                            } else {
+                                self.blocks[x][y][z] = BlockType::Dirt;
+                            }
+                        }
+                        // Deeper underground
+                        else {
+                            self.blocks[x][y][z] = BlockType::Stone;
+                        }
+                    }
                 }
 
                 // Fill oceans/lakes.
@@ -619,6 +701,163 @@ impl Chunk {
             }
         }
 
+        // === Sky Island Ponds ===
+        // Create proper circular/oval ponds on floating islands
+        // Step 1: Find pond center candidates
+        let pond_center_perlin = Perlin::new(205);
+        let pond_edge_perlin = Perlin::new(206);
+
+        struct PondCenter {
+            x: usize,
+            z: usize,
+            y: usize,
+            radius: usize,
+        }
+        let mut pond_centers: Vec<PondCenter> = Vec::new();
+
+        for x in 5..CHUNK_SIZE - 5 {
+            for z in 5..CHUNK_SIZE - 5 {
+                let world_x = (world_offset_x + x as i32) as f64;
+                let world_z = (world_offset_z + z as i32) as f64;
+
+                // Check if this is on a large island
+                let mask_scale = 0.005;
+                let island_mask = (sky_island_mask_perlin.get([world_x * mask_scale, world_z * mask_scale]) + 1.0) * 0.5;
+
+                if island_mask < 0.82 {
+                    continue;
+                }
+
+                // Use noise to determine pond center locations (sparse)
+                let center_scale = 0.08;
+                let center_noise = (pond_center_perlin.get([world_x * center_scale, world_z * center_scale]) + 1.0) * 0.5;
+
+                // Only place pond centers where noise is very high (creates sparse centers)
+                if center_noise < 0.75 {
+                    continue;
+                }
+
+                // Find grass surface in sky island range
+                for y in (sky_island_base_y..CHUNK_HEIGHT - 5).rev() {
+                    if self.blocks[x][y][z] != BlockType::Grass {
+                        continue;
+                    }
+
+                    // Verify this is floating
+                    let mut is_floating = false;
+                    for check_y in (sky_island_base_y - 10)..y {
+                        if self.blocks[x][check_y][z] == BlockType::Air {
+                            is_floating = true;
+                            break;
+                        }
+                    }
+                    if !is_floating {
+                        continue;
+                    }
+
+                    // Check we're well inside the island (3-block buffer from air)
+                    let mut well_inside = true;
+                    'edge_check: for dx in -3i32..=3 {
+                        for dz in -3i32..=3 {
+                            let cx = (x as i32 + dx) as usize;
+                            let cz = (z as i32 + dz) as usize;
+                            if cx < CHUNK_SIZE && cz < CHUNK_SIZE {
+                                if self.blocks[cx][y][cz] == BlockType::Air {
+                                    well_inside = false;
+                                    break 'edge_check;
+                                }
+                            }
+                        }
+                    }
+                    if !well_inside {
+                        continue;
+                    }
+
+                    // Check not too close to existing pond centers
+                    let mut too_close = false;
+                    for existing in &pond_centers {
+                        let dx = (existing.x as i32 - x as i32).abs();
+                        let dz = (existing.z as i32 - z as i32).abs();
+                        if dx < 6 && dz < 6 {
+                            too_close = true;
+                            break;
+                        }
+                    }
+                    if too_close {
+                        continue;
+                    }
+
+                    // Pond radius varies with noise (2-4 blocks)
+                    let radius = 2 + ((center_noise - 0.75) * 8.0) as usize;
+                    pond_centers.push(PondCenter { x, z, y, radius: radius.min(4) });
+                    break;
+                }
+            }
+        }
+
+        // Step 2: For each pond center, create a circular pond
+        for pond in &pond_centers {
+            let cx = pond.x as i32;
+            let cz = pond.z as i32;
+            let cy = pond.y;
+            let radius = pond.radius as i32;
+
+            // Create pond by iterating over a square and checking distance
+            for dx in -radius..=radius {
+                for dz in -radius..=radius {
+                    let px = (cx + dx) as usize;
+                    let pz = (cz + dz) as usize;
+
+                    if px >= CHUNK_SIZE || pz >= CHUNK_SIZE || px < 2 || pz < 2 {
+                        continue;
+                    }
+
+                    // Circular distance check with noise for organic edges
+                    let dist_sq = dx * dx + dz * dz;
+                    let world_px = (world_offset_x + px as i32) as f64;
+                    let world_pz = (world_offset_z + pz as i32) as f64;
+                    let edge_noise = (pond_edge_perlin.get([world_px * 0.3, world_pz * 0.3]) + 1.0) * 0.5;
+                    let effective_radius = radius as f64 + (edge_noise - 0.5) * 1.5;
+
+                    if (dist_sq as f64) > effective_radius * effective_radius {
+                        continue;
+                    }
+
+                    // Find the surface at this position
+                    let mut surface_y = None;
+                    for sy in (cy.saturating_sub(2)..=cy + 2).rev() {
+                        if sy < CHUNK_HEIGHT && (self.blocks[px][sy][pz] == BlockType::Grass ||
+                            self.blocks[px][sy][pz] == BlockType::Dirt) {
+                            surface_y = Some(sy);
+                            break;
+                        }
+                    }
+
+                    if let Some(sy) = surface_y {
+                        // Check neighbors aren't air (don't break through island edge)
+                        if self.blocks[px.saturating_sub(1)][sy][pz] == BlockType::Air ||
+                           self.blocks[(px + 1).min(CHUNK_SIZE - 1)][sy][pz] == BlockType::Air ||
+                           self.blocks[px][sy][pz.saturating_sub(1)] == BlockType::Air ||
+                           self.blocks[px][sy][(pz + 1).min(CHUNK_SIZE - 1)] == BlockType::Air {
+                            continue;
+                        }
+
+                        // Dig down 1 block for the pond basin and place water
+                        // The grass/dirt surface becomes water
+                        self.blocks[px][sy][pz] = BlockType::Water;
+
+                        // Optionally make center deeper
+                        if dist_sq <= 1 && sy > 1 {
+                            if self.blocks[px][sy - 1][pz] != BlockType::Stone &&
+                               self.blocks[px][sy - 1][pz] != BlockType::Air {
+                                self.blocks[px][sy - 1][pz] = BlockType::Water;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // === Sky Island Trees ===
         // Generate trees on sky island grass blocks
         for x in 3..CHUNK_SIZE - 3 {
@@ -833,9 +1072,32 @@ impl Chunk {
                                 let block_above = neighbors.get_block(x as i32, y as i32 + 1, z as i32);
                                 let is_surface_water = block_above != BlockType::Water;
 
+                                // Calculate edge flags for foam rendering as a bitmask
+                                // Encodes which edges have solid neighbors (same value for all vertices to avoid interpolation)
+                                // Bitmask: neg_x=1, pos_x=2, neg_z=4, pos_z=8 (divided by 16 to fit in 0-1)
+                                let edge_flags: f32 = if face_idx == 2 {
+                                    // Top face - check horizontal neighbors for shore foam
+                                    let solid_neg_x = neighbors.get_block(x as i32 - 1, y as i32, z as i32).is_solid();
+                                    let solid_pos_x = neighbors.get_block(x as i32 + 1, y as i32, z as i32).is_solid();
+                                    let solid_neg_z = neighbors.get_block(x as i32, y as i32, z as i32 - 1).is_solid();
+                                    let solid_pos_z = neighbors.get_block(x as i32, y as i32, z as i32 + 1).is_solid();
+
+                                    // Encode as bitmask (all vertices get same value - no interpolation issues)
+                                    let mut flags: u32 = 0;
+                                    if solid_neg_x { flags |= 1; }  // bit 0
+                                    if solid_pos_x { flags |= 2; }  // bit 1
+                                    if solid_neg_z { flags |= 4; }  // bit 2
+                                    if solid_pos_z { flags |= 8; }  // bit 3
+                                    flags as f32 / 16.0  // Normalize to 0-1 range (max value is 15)
+                                } else {
+                                    0.0
+                                };
+                                // All 4 vertices get the same edge_flags value
+                                let edge_factors: [f32; 4] = [edge_flags, edge_flags, edge_flags, edge_flags];
+
                                 // Water uses separate mesh with wave factor encoded in alpha
                                 let face_verts = create_water_face_vertices(
-                                    world_pos, face_idx, light_normalized, tex_index, uvs, ao_values, is_surface_water
+                                    world_pos, face_idx, light_normalized, tex_index, uvs, edge_factors, is_surface_water
                                 );
 
                                 let base_index = water_vertices.len() as u16;

@@ -363,9 +363,10 @@ impl State {
                     count: None,
                 },
                 // Wave animation uniforms (time + wave parameters)
+                // Needs VERTEX for wave displacement and FRAGMENT for foam animation
                 wgpu::BindGroupLayoutEntry {
                     binding: 2,
-                    visibility: wgpu::ShaderStages::VERTEX,
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
