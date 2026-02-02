@@ -6,7 +6,7 @@ use noise::{NoiseFn, Perlin};
 use rand::{Rng, SeedableRng};
 use rand::rngs::StdRng;
 
-pub const CHUNK_SIZE: usize = 32;
+pub const CHUNK_SIZE: usize = 16;
 pub const CHUNK_HEIGHT: usize = 128;
 
 // Tree generation configuration
@@ -23,6 +23,8 @@ pub struct Chunk {
     pub indices: Vec<u16>,
     pub water_vertices: Vec<Vertex>,       // Separate water vertices for transparency pass
     pub water_indices: Vec<u16>,           // Separate water indices for transparency pass
+    pub transparent_vertices: Vec<Vertex>, // Semi-transparent blocks (ice) rendered after opaque
+    pub transparent_indices: Vec<u16>,     // Semi-transparent block indices
     pub dirty: bool,
     pub light_dirty: bool,
     pub mesh_version: u32,                 // Incremented when mesh is rebuilt, used for GPU buffer caching
@@ -109,6 +111,8 @@ impl Chunk {
             indices: Vec::new(),
             water_vertices: Vec::new(),
             water_indices: Vec::new(),
+            transparent_vertices: Vec::new(),
+            transparent_indices: Vec::new(),
             dirty: true,
             light_dirty: true,
             mesh_version: 0,
@@ -1054,11 +1058,13 @@ impl Chunk {
         }
     }
 
-    pub fn generate_mesh(neighbors: &ChunkNeighbors) -> (Vec<Vertex>, Vec<u16>, Vec<Vertex>, Vec<u16>) {
+    pub fn generate_mesh(neighbors: &ChunkNeighbors) -> (Vec<Vertex>, Vec<u16>, Vec<Vertex>, Vec<u16>, Vec<Vertex>, Vec<u16>) {
         let mut vertices = Vec::new();
         let mut indices = Vec::new();
         let mut water_vertices = Vec::new();
         let mut water_indices = Vec::new();
+        let mut transparent_vertices = Vec::new();
+        let mut transparent_indices = Vec::new();
         let chunk = neighbors.center;
 
         let world_offset_x = chunk.position.0 * CHUNK_SIZE as i32;
@@ -1094,11 +1100,16 @@ impl Chunk {
 
                         // Check if we should draw this face
                         // For water, use special transparency check that treats Boundary as opaque
-                        // For transparent blocks (like Ice), draw faces against any different block type
+                        // For semi-transparent blocks (ice), always draw faces against any different block
+                        // For transparent blocks (leaves), draw faces against any different block type
+                        let is_semi_transparent = block.is_semi_transparent();
                         let should_draw = if is_water {
                             neighbor_block.is_transparent_for_water() && neighbor_block != block
+                        } else if is_semi_transparent {
+                            // Semi-transparent blocks always draw all faces (except against same block type)
+                            neighbor_block != block
                         } else {
-                            (block.is_transparent() || neighbor_block.is_transparent()) && neighbor_block != block
+                            (block.is_transparent() || neighbor_block.is_transparent() || neighbor_block.is_semi_transparent()) && neighbor_block != block
                         };
 
                         if should_draw {
@@ -1189,6 +1200,29 @@ impl Chunk {
                                         base_index + 2, base_index + 3, base_index,
                                     ]);
                                 }
+                            } else if is_semi_transparent {
+                                // Semi-transparent blocks (ice) go to separate mesh rendered after opaque
+                                use crate::block::create_face_vertices_with_alpha;
+                                let alpha = block.get_alpha();
+                                let face_verts = create_face_vertices_with_alpha(
+                                    world_pos, block, face_idx, light_normalized, alpha, tex_index, uvs, ao_values
+                                );
+
+                                let base_index = transparent_vertices.len() as u16;
+                                transparent_vertices.extend_from_slice(&face_verts);
+
+                                // Anisotropy fix: flip diagonal if it reduces AO discontinuity
+                                if (ao_values[0] - ao_values[2]).abs() > (ao_values[1] - ao_values[3]).abs() {
+                                    transparent_indices.extend_from_slice(&[
+                                        base_index + 1, base_index + 2, base_index + 3,
+                                        base_index + 3, base_index, base_index + 1,
+                                    ]);
+                                } else {
+                                    transparent_indices.extend_from_slice(&[
+                                        base_index, base_index + 1, base_index + 2,
+                                        base_index + 2, base_index + 3, base_index,
+                                    ]);
+                                }
                             } else {
                                 let face_verts = create_face_vertices(world_pos, block, face_idx, light_normalized, tex_index, uvs, ao_values);
 
@@ -1201,7 +1235,7 @@ impl Chunk {
                                         base_index + 1, base_index + 2, base_index + 3,
                                         base_index + 3, base_index, base_index + 1,
                                     ]);
-                                    // For transparent blocks, also add back face (reversed winding)
+                                    // For transparent blocks (leaves), also add back face (reversed winding)
                                     if block.is_transparent() {
                                         indices.extend_from_slice(&[
                                             base_index + 3, base_index + 2, base_index + 1,
@@ -1213,7 +1247,7 @@ impl Chunk {
                                         base_index, base_index + 1, base_index + 2,
                                         base_index + 2, base_index + 3, base_index,
                                     ]);
-                                    // For transparent blocks, also add back face (reversed winding)
+                                    // For transparent blocks (leaves), also add back face (reversed winding)
                                     if block.is_transparent() {
                                         indices.extend_from_slice(&[
                                             base_index + 2, base_index + 1, base_index,
@@ -1227,6 +1261,6 @@ impl Chunk {
                 }
             }
         }
-        (vertices, indices, water_vertices, water_indices)
+        (vertices, indices, water_vertices, water_indices, transparent_vertices, transparent_indices)
     }
 }

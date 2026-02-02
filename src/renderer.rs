@@ -27,6 +27,9 @@ pub struct ChunkBuffers {
     pub water_vertex_buffer: Option<wgpu::Buffer>,
     pub water_index_buffer: Option<wgpu::Buffer>,
     pub water_index_count: u32,
+    pub transparent_vertex_buffer: Option<wgpu::Buffer>,
+    pub transparent_index_buffer: Option<wgpu::Buffer>,
+    pub transparent_index_count: u32,
     pub mesh_version: u32,
 }
 
@@ -64,6 +67,7 @@ pub struct State {
     pub size: winit::dpi::PhysicalSize<u32>,
     render_pipeline: wgpu::RenderPipeline,
     water_pipeline: wgpu::RenderPipeline,  // Separate pipeline for transparent water with depth sampling
+    transparent_pipeline: wgpu::RenderPipeline,  // Separate pipeline for semi-transparent blocks (ice) with no depth write
     camera: Camera,
     camera_controller: CameraController,
     camera_uniform: CameraUniform,
@@ -305,6 +309,62 @@ impl State {
             cache: None,
         });
 
+        // Transparent blocks pipeline (same as main but no depth write for proper alpha blending)
+        let transparent_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Transparent Pipeline"),
+            layout: Some(&render_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[Vertex::desc()],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: Some(wgpu::BlendState {
+                        color: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::SrcAlpha,
+                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                        alpha: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::One,
+                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                    }),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: Some(wgpu::Face::Back),
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: false,  // Key difference: don't write depth for transparent blocks
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            multiview: None,
+            cache: None,
+        });
+
         // Depth texture for rendering (write target)
         let depth_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Depth Texture"),
@@ -490,7 +550,7 @@ impl State {
             cache: None,
         });
 
-        let world = World::new(8); // Sets render_distance
+        let world = World::new(12); // Sets render_distance
         let player = Player::new(Point3::new(0.0, 35.0, 0.0));
         let water_simulation = WaterSimulation::new(0.5);
         let enemy_manager = EnemyManager::new(10.0, 10);
@@ -945,6 +1005,7 @@ impl State {
             size,
             render_pipeline,
             water_pipeline,
+            transparent_pipeline,
             camera,
             camera_controller,
             camera_uniform,
@@ -2015,7 +2076,7 @@ impl State {
     /// Updates the GPU buffer cache for chunks that have changed
     fn update_chunk_buffers(&mut self) {
         // Collect chunk positions that need buffer updates
-        let chunks_to_update: Vec<((i32, i32), u32, bool, bool)> = self.world.chunks.iter()
+        let chunks_to_update: Vec<((i32, i32), u32, bool, bool, bool)> = self.world.chunks.iter()
             .filter_map(|(&pos, chunk)| {
                 let cached = self.chunk_buffers.get(&pos);
                 let needs_update = match cached {
@@ -2023,10 +2084,10 @@ impl State {
                     None => true,
                 };
                 if needs_update && !chunk.vertices.is_empty() {
-                    Some((pos, chunk.mesh_version, !chunk.vertices.is_empty(), !chunk.water_vertices.is_empty()))
+                    Some((pos, chunk.mesh_version, !chunk.vertices.is_empty(), !chunk.water_vertices.is_empty(), !chunk.transparent_vertices.is_empty()))
                 } else if needs_update && chunk.vertices.is_empty() {
                     // Remove empty chunks from cache
-                    Some((pos, chunk.mesh_version, false, false))
+                    Some((pos, chunk.mesh_version, false, false, false))
                 } else {
                     None
                 }
@@ -2034,7 +2095,7 @@ impl State {
             .collect();
 
         // Update buffers for chunks that need it
-        for (pos, mesh_version, has_geometry, has_water) in chunks_to_update {
+        for (pos, mesh_version, has_geometry, has_water, has_transparent) in chunks_to_update {
             if !has_geometry {
                 // Remove from cache if chunk has no geometry
                 self.chunk_buffers.remove(&pos);
@@ -2074,6 +2135,22 @@ impl State {
                 (None, None, 0)
             };
 
+            let (transparent_vertex_buffer, transparent_index_buffer, transparent_index_count) = if has_transparent {
+                let tvb = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Transparent Vertex Buffer"),
+                    contents: bytemuck::cast_slice(&chunk.transparent_vertices),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+                let tib = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Transparent Index Buffer"),
+                    contents: bytemuck::cast_slice(&chunk.transparent_indices),
+                    usage: wgpu::BufferUsages::INDEX,
+                });
+                (Some(tvb), Some(tib), chunk.transparent_indices.len() as u32)
+            } else {
+                (None, None, 0)
+            };
+
             self.chunk_buffers.insert(pos, ChunkBuffers {
                 vertex_buffer,
                 index_buffer,
@@ -2081,6 +2158,9 @@ impl State {
                 water_vertex_buffer,
                 water_index_buffer,
                 water_index_count,
+                transparent_vertex_buffer,
+                transparent_index_buffer,
+                transparent_index_count,
                 mesh_version,
             });
         }
@@ -2360,7 +2440,64 @@ impl State {
             }
         }
 
-        // --- PASS 3: OVERLAYS (Breaking, Outlines, Debug) ---
+        // --- PASS 3: RENDER SEMI-TRANSPARENT BLOCKS (Ice) ---
+        {
+            let mut transparent_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Transparent Render Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: world_render_target,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load, // Keep existing color
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Load, // Keep existing depth
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+
+            transparent_pass.set_pipeline(&self.transparent_pipeline);
+            transparent_pass.set_bind_group(0, &self.camera_bind_group, &[]);
+            transparent_pass.set_bind_group(1, &self.texture_atlas.bind_group, &[]);
+
+            // Render semi-transparent blocks using cached GPU buffers with frustum culling
+            for (&(cx, cz), buffers) in self.chunk_buffers.iter() {
+                if let (Some(tvb), Some(tib)) = (&buffers.transparent_vertex_buffer, &buffers.transparent_index_buffer) {
+                    if buffers.transparent_index_count > 0 {
+                        // Calculate chunk bounding box
+                        let min = Vector3::new(
+                            (cx * CHUNK_SIZE as i32) as f32,
+                            0.0,
+                            (cz * CHUNK_SIZE as i32) as f32,
+                        );
+                        let max = Vector3::new(
+                            min.x + CHUNK_SIZE as f32,
+                            CHUNK_HEIGHT as f32,
+                            min.z + CHUNK_SIZE as f32,
+                        );
+
+                        // Skip chunks outside the view frustum
+                        if !self.frustum.is_box_visible(min, max) {
+                            continue;
+                        }
+
+                        transparent_pass.set_vertex_buffer(0, tvb.slice(..));
+                        transparent_pass.set_index_buffer(tib.slice(..), wgpu::IndexFormat::Uint16);
+                        transparent_pass.draw_indexed(0..buffers.transparent_index_count, 0, 0..1);
+                    }
+                }
+            }
+        }
+
+        // --- PASS 4: OVERLAYS (Breaking, Outlines, Debug) ---
         // Render breaking overlay if actively breaking a block
         if let Some(ref breaking_state) = self.breaking_state {
             let (bx, by, bz) = breaking_state.block_pos;
@@ -2493,7 +2630,7 @@ impl State {
             }
         }
 
-        // --- PASS 4: POST-PROCESSING (Underwater Effect) ---
+        // --- PASS 5: POST-PROCESSING (Underwater Effect) ---
         // Only run if camera is underwater.
         // Input: scene_texture_view (bound in bind group)
         // Output: swap_chain_view (Screen)
@@ -2519,7 +2656,7 @@ impl State {
             underwater_pass.draw(0..3, 0..1); // Full-screen triangle
         }
 
-        // --- PASS 5: UI (Crosshair & HUD) ---
+        // --- PASS 6: UI (Crosshair & HUD) ---
         // Always render UI directly to Swap Chain so it stays sharp and on top
         {
             let mut ui_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {

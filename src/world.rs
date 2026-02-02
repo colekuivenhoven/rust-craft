@@ -185,12 +185,14 @@ impl World {
             };
 
             // Apply mesh data mutably (write access to self.chunks)
-            if let Some((vertices, indices, water_vertices, water_indices)) = mesh_data {
+            if let Some((vertices, indices, water_vertices, water_indices, transparent_vertices, transparent_indices)) = mesh_data {
                 if let Some(chunk) = self.chunks.get_mut(&pos) {
                     chunk.vertices = vertices;
                     chunk.indices = indices;
                     chunk.water_vertices = water_vertices;
                     chunk.water_indices = water_indices;
+                    chunk.transparent_vertices = transparent_vertices;
+                    chunk.transparent_indices = transparent_indices;
                     chunk.dirty = false;
                     chunk.mesh_version = chunk.mesh_version.wrapping_add(1);
                 }

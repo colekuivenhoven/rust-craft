@@ -29,7 +29,21 @@ impl BlockType {
     }
 
     pub fn is_transparent(&self) -> bool {
-        matches!(self, BlockType::Air | BlockType::Water | BlockType::Leaves | BlockType::Ice | BlockType::Boundary)
+        matches!(self, BlockType::Air | BlockType::Water | BlockType::Leaves | BlockType::Boundary)
+    }
+
+    /// Returns true if this block is semi-transparent (rendered with alpha blending after opaque blocks).
+    /// These blocks are NOT transparent for face culling - all neighboring faces are always rendered.
+    pub fn is_semi_transparent(&self) -> bool {
+        matches!(self, BlockType::Ice)
+    }
+
+    /// Returns the alpha value for this block (1.0 = fully opaque, 0.0 = fully transparent)
+    pub fn get_alpha(&self) -> f32 {
+        match self {
+            BlockType::Ice => 1.0,
+            _ => 1.0,
+        }
     }
 
     /// Returns true if this block is transparent specifically for water face culling.
