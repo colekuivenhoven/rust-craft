@@ -8,6 +8,8 @@ pub const TILES_PER_ROW: u32 = ATLAS_SIZE / TILE_SIZE; // 16
 pub const TEX_DIRT: u32 = 0;
 pub const TEX_GRASS_TOP: u32 = 1;
 pub const TEX_GRASS_SIDE: u32 = 2;
+pub const TEX_SAND: u32 = 3;
+pub const TEX_ICE: u32 = 4;
 pub const TEX_NONE: u32 = 255; // Sentinel for "use color fallback"
 
 // Breaking textures start at row 1 (index 16)
@@ -85,6 +87,8 @@ impl TextureAtlas {
         Self::load_texture_into_atlas(&mut atlas, "assets/textures/blocks/dirt.png", TEX_DIRT);
         Self::load_texture_into_atlas(&mut atlas, "assets/textures/blocks/grass_top.png", TEX_GRASS_TOP);
         Self::load_texture_into_atlas(&mut atlas, "assets/textures/blocks/grass_side.png", TEX_GRASS_SIDE);
+        Self::load_texture_into_atlas(&mut atlas, "assets/textures/blocks/sand.png", TEX_SAND);
+        Self::load_texture_into_atlas(&mut atlas, "assets/textures/blocks/ice.png", TEX_ICE);
 
         // Load breaking textures (row 1, starting at index 16)
         for i in 0..10 {

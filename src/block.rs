@@ -1,5 +1,5 @@
 use cgmath::Vector3;
-use crate::texture::{FaceTextures, TEX_DIRT, TEX_GRASS_TOP, TEX_GRASS_SIDE, TEX_NONE};
+use crate::texture::{FaceTextures, TEX_DIRT, TEX_GRASS_TOP, TEX_GRASS_SIDE, TEX_SAND, TEX_ICE, TEX_NONE};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BlockType {
@@ -14,6 +14,8 @@ pub enum BlockType {
     Cobblestone,
     Planks,
     GlowStone,
+    Ice,
+    Snow,
     Boundary, // Virtual block type for unloaded chunk boundaries.
 }
 
@@ -27,7 +29,7 @@ impl BlockType {
     }
 
     pub fn is_transparent(&self) -> bool {
-        matches!(self, BlockType::Air | BlockType::Water | BlockType::Leaves | BlockType::Boundary)
+        matches!(self, BlockType::Air | BlockType::Water | BlockType::Leaves | BlockType::Ice | BlockType::Boundary)
     }
 
     /// Returns true if this block is transparent specifically for water face culling.
@@ -49,6 +51,8 @@ impl BlockType {
             BlockType::Cobblestone => [0.4, 0.4, 0.4],
             BlockType::Planks => [0.7, 0.5, 0.3],
             BlockType::GlowStone => [1.0, 0.9, 0.5],
+            BlockType::Ice => [0.6, 0.8, 0.95],  // Light blue tint
+            BlockType::Snow => [0.95, 0.95, 0.98],  // Nearly white
             BlockType::Boundary => [0.0, 0.0, 0.0], // Never rendered
         }
     }
@@ -66,6 +70,8 @@ impl BlockType {
             BlockType::Cobblestone => "Cobblestone",
             BlockType::Planks => "Planks",
             BlockType::GlowStone => "Glowstone",
+            BlockType::Ice => "Ice",
+            BlockType::Snow => "Snow",
             BlockType::Boundary => "Boundary",
         }
     }
@@ -83,7 +89,9 @@ impl BlockType {
             BlockType::Cobblestone => 8,
             BlockType::Planks => 9,
             BlockType::GlowStone => 10,
-            BlockType::Boundary => 11,
+            BlockType::Ice => 11,
+            BlockType::Snow => 12,
+            BlockType::Boundary => 13,
         }
     }
 
@@ -100,7 +108,9 @@ impl BlockType {
             8 => BlockType::Cobblestone,
             9 => BlockType::Planks,
             10 => BlockType::GlowStone,
-            11 => BlockType::Boundary,
+            11 => BlockType::Ice,
+            12 => BlockType::Snow,
+            13 => BlockType::Boundary,
             _ => BlockType::Air,
         }
     }
@@ -118,6 +128,7 @@ impl BlockType {
     /// `has_block_above`: true if there's a solid block directly above this one
     pub fn get_face_textures(&self, has_block_above: bool) -> FaceTextures {
         match self {
+            // Dirt
             BlockType::Dirt | BlockType::Grass => {
                 if has_block_above {
                     // Covered dirt: all faces use dirt texture
@@ -131,6 +142,13 @@ impl BlockType {
                     }
                 }
             }
+
+            // Sand
+            BlockType::Sand => FaceTextures::all(TEX_SAND),
+
+            // Ice
+            BlockType::Ice => FaceTextures::all(TEX_ICE),
+
             // All other blocks use color fallback
             _ => FaceTextures::all(TEX_NONE),
         }
@@ -150,6 +168,8 @@ impl BlockType {
             BlockType::Cobblestone => 2.0,
             BlockType::Planks => 1.5,
             BlockType::GlowStone => 0.8,
+            BlockType::Ice => 0.5,
+            BlockType::Snow => 0.2,
             BlockType::Boundary => 0.0,
         }
     }

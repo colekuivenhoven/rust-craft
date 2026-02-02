@@ -1094,10 +1094,11 @@ impl Chunk {
 
                         // Check if we should draw this face
                         // For water, use special transparency check that treats Boundary as opaque
+                        // For transparent blocks (like Ice), draw faces against any different block type
                         let should_draw = if is_water {
                             neighbor_block.is_transparent_for_water() && neighbor_block != block
                         } else {
-                            neighbor_block.is_transparent() && neighbor_block != block
+                            (block.is_transparent() || neighbor_block.is_transparent()) && neighbor_block != block
                         };
 
                         if should_draw {
@@ -1200,11 +1201,25 @@ impl Chunk {
                                         base_index + 1, base_index + 2, base_index + 3,
                                         base_index + 3, base_index, base_index + 1,
                                     ]);
+                                    // For transparent blocks, also add back face (reversed winding)
+                                    if block.is_transparent() {
+                                        indices.extend_from_slice(&[
+                                            base_index + 3, base_index + 2, base_index + 1,
+                                            base_index + 1, base_index, base_index + 3,
+                                        ]);
+                                    }
                                 } else {
                                     indices.extend_from_slice(&[
                                         base_index, base_index + 1, base_index + 2,
                                         base_index + 2, base_index + 3, base_index,
                                     ]);
+                                    // For transparent blocks, also add back face (reversed winding)
+                                    if block.is_transparent() {
+                                        indices.extend_from_slice(&[
+                                            base_index + 2, base_index + 1, base_index,
+                                            base_index, base_index + 3, base_index + 2,
+                                        ]);
+                                    }
                                 }
                             }
                         }

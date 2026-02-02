@@ -57,16 +57,19 @@ fn vs_main(model: VertexInput) -> VertexOutput {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    // Determine base color: texture or vertex color
+    // Determine base color and alpha: texture or vertex color
     var base_color: vec3<f32>;
+    var alpha: f32 = in.alpha;
 
     if (in.tex_index == 255u) {
         // No texture - use vertex color (fallback for untextured blocks)
         base_color = in.color;
     } else {
-        // Sample from texture atlas
+        // Sample from texture atlas (includes alpha channel)
         let tex_color = textureSample(texture_atlas, texture_sampler, in.uv);
         base_color = tex_color.rgb;
+        // Use texture alpha for transparency (e.g., ice blocks)
+        alpha = tex_color.a * in.alpha;
     }
 
     // Minimum ambient light (visibility even in complete darkness)
@@ -90,5 +93,5 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     let lit_color = base_color * final_light;
 
-    return vec4<f32>(lit_color, in.alpha);
+    return vec4<f32>(lit_color, alpha);
 }

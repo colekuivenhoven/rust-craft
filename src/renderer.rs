@@ -1,4 +1,5 @@
 use crate::bird::{BirdManager, create_bird_vertices, generate_bird_indices};
+use crate::fish::{FishManager, create_fish_vertices, generate_fish_indices};
 use crate::block::{BlockType, Vertex, UiVertex, LineVertex, create_cube_vertices, create_block_outline, create_face_vertices, CUBE_INDICES};
 use crate::camera::{Camera, CameraController, CameraUniform, Projection, Frustum};
 use crate::chunk::{CHUNK_SIZE, CHUNK_HEIGHT};
@@ -75,6 +76,7 @@ pub struct State {
     water_simulation: WaterSimulation,
     enemy_manager: EnemyManager,
     bird_manager: BirdManager,
+    fish_manager: FishManager,
     crafting_system: CraftingSystem,
     last_frame: Instant,
     mouse_pressed: bool,
@@ -235,7 +237,7 @@ impl State {
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/shader.wgsl").into()),
         });
 
         // Create texture atlas
@@ -263,8 +265,16 @@ impl State {
                 targets: &[Some(wgpu::ColorTargetState {
                     format: config.format,
                     blend: Some(wgpu::BlendState {
-                        color: wgpu::BlendComponent::REPLACE,
-                        alpha: wgpu::BlendComponent::REPLACE,
+                        color: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::SrcAlpha,
+                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                        alpha: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::One,
+                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                            operation: wgpu::BlendOperation::Add,
+                        },
                     }),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -418,7 +428,7 @@ impl State {
         // Water shader with depth-based transparency
         let water_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Water Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("water_shader.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/water_shader.wgsl").into()),
         });
 
         // Water pipeline layout includes camera bind group and depth texture bind group
@@ -485,12 +495,13 @@ impl State {
         let water_simulation = WaterSimulation::new(0.5);
         let enemy_manager = EnemyManager::new(10.0, 10);
         let bird_manager = BirdManager::new();
+        let fish_manager = FishManager::new();
         let crafting_system = CraftingSystem::new();
 
         // UI Pipeline for crosshair
         let ui_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("UI Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("ui_shader.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/ui_shader.wgsl").into()),
         });
 
         #[repr(C)]
@@ -606,7 +617,7 @@ impl State {
         // Outline Pipeline for block highlighting
         let outline_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Outline Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("outline_shader.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/outline_shader.wgsl").into()),
         });
 
         let outline_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -666,7 +677,7 @@ impl State {
         // Chunk Outline Pipeline for debug visualization
         let chunk_outline_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Chunk Outline Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("chunk_outline_shader.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/chunk_outline_shader.wgsl").into()),
         });
 
         let chunk_outline_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -716,7 +727,7 @@ impl State {
         // Breaking overlay pipeline
         let breaking_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Breaking Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("breaking_shader.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/breaking_shader.wgsl").into()),
         });
 
         let breaking_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -872,7 +883,7 @@ impl State {
         // Underwater effect pipeline
         let underwater_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Underwater Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("underwater_shader.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/underwater_shader.wgsl").into()),
         });
 
         let underwater_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -946,6 +957,7 @@ impl State {
             water_simulation,
             enemy_manager,
             bird_manager,
+            fish_manager,
             crafting_system,
             last_frame: Instant::now(),
             mouse_pressed: false,
@@ -1964,6 +1976,9 @@ impl State {
         // Update birds
         self.bird_manager.update(dt, self.player.position, &self.world);
 
+        // Update fish
+        self.fish_manager.update(dt, self.player.position, &self.world);
+
         // Check for enemy damage
         let damage = self.enemy_manager.check_player_damage(self.player.position);
         if damage > 0.0 {
@@ -2225,6 +2240,38 @@ impl State {
                     self.device
                         .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                             label: Some("Bird Index Buffer"),
+                            contents: bytemuck::cast_slice(&indices),
+                            usage: wgpu::BufferUsages::INDEX,
+                        });
+
+                render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+                render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+                render_pass.draw_indexed(0..indices.len() as u32, 0, 0..1);
+            }
+
+            // Render fish
+            for fish in &self.fish_manager.fish {
+                let vertices = create_fish_vertices(fish);
+                if vertices.is_empty() {
+                    continue;
+                }
+
+                // Calculate number of cubes (each cube has 24 vertices)
+                let num_cubes = vertices.len() / 24;
+                let indices = generate_fish_indices(num_cubes);
+
+                let vertex_buffer =
+                    self.device
+                        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                            label: Some("Fish Vertex Buffer"),
+                            contents: bytemuck::cast_slice(&vertices),
+                            usage: wgpu::BufferUsages::VERTEX,
+                        });
+
+                let index_buffer =
+                    self.device
+                        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                            label: Some("Fish Index Buffer"),
                             contents: bytemuck::cast_slice(&indices),
                             usage: wgpu::BufferUsages::INDEX,
                         });

@@ -4,6 +4,7 @@ mod camera;
 mod chunk;
 mod crafting;
 mod enemy;
+mod fish;
 mod bitmap_font;
 mod inventory;
 mod lighting;
