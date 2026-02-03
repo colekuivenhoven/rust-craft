@@ -3,11 +3,11 @@ use crate::block::BlockType;
 #[derive(Debug, Clone)]
 pub struct ItemStack {
     pub block_type: BlockType,
-    pub count: u32,
+    pub count: f32,
 }
 
 impl ItemStack {
-    pub fn new(block_type: BlockType, count: u32) -> Self {
+    pub fn new(block_type: BlockType, count: f32) -> Self {
         Self { block_type, count }
     }
 }
@@ -27,42 +27,47 @@ impl Inventory {
         }
     }
 
-    pub fn add_item(&mut self, block_type: BlockType, count: u32) -> bool {
+    pub fn add_item(&mut self, block_type: BlockType, amount: f32) -> bool {
+        let mut remaining = amount;
+
         // Try to stack with existing items
         for slot in &mut self.slots {
             if let Some(stack) = slot {
-                if stack.block_type == block_type && stack.count < 64 {
-                    let add_count = (64 - stack.count).min(count);
-                    stack.count += add_count;
-                    if add_count == count {
+                if stack.block_type == block_type && stack.count < 64.0 {
+                    let add_amount = (64.0 - stack.count).min(remaining);
+                    stack.count += add_amount;
+                    remaining -= add_amount;
+                    if remaining <= 0.0 {
                         return true;
                     }
                 }
             }
         }
 
-        // Find empty slot
-        for slot in &mut self.slots {
-            if slot.is_none() {
-                *slot = Some(ItemStack::new(block_type, count));
-                return true;
+        // Find empty slot for remaining amount
+        if remaining > 0.0 {
+            for slot in &mut self.slots {
+                if slot.is_none() {
+                    *slot = Some(ItemStack::new(block_type, remaining));
+                    return true;
+                }
             }
         }
 
-        false
+        remaining <= 0.0
     }
 
-    pub fn remove_item(&mut self, slot_index: usize, count: u32) -> Option<ItemStack> {
+    pub fn remove_item(&mut self, slot_index: usize, amount: f32) -> Option<ItemStack> {
         if slot_index >= self.size {
             return None;
         }
 
         if let Some(stack) = &mut self.slots[slot_index] {
-            if stack.count <= count {
+            if stack.count <= amount {
                 self.slots[slot_index].take()
             } else {
-                stack.count -= count;
-                Some(ItemStack::new(stack.block_type, count))
+                stack.count -= amount;
+                Some(ItemStack::new(stack.block_type, amount))
             }
         } else {
             None

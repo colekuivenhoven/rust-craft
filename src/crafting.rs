@@ -3,8 +3,8 @@ use crate::inventory::Inventory;
 
 #[derive(Debug, Clone)]
 pub struct Recipe {
-    pub inputs: Vec<(BlockType, u32)>,
-    pub output: (BlockType, u32),
+    pub inputs: Vec<(BlockType, f32)>,
+    pub output: (BlockType, f32),
 }
 
 pub struct CraftingSystem {
@@ -23,38 +23,38 @@ impl CraftingSystem {
     fn register_default_recipes(&mut self) {
         // Wood -> Planks (1 wood = 4 planks)
         self.recipes.push(Recipe {
-            inputs: vec![(BlockType::Wood, 1)],
-            output: (BlockType::Planks, 4),
+            inputs: vec![(BlockType::Wood, 1.0)],
+            output: (BlockType::Planks, 4.0),
         });
 
         // Planks -> Wood (4 planks = 1 wood)
         self.recipes.push(Recipe {
-            inputs: vec![(BlockType::Planks, 4)],
-            output: (BlockType::Wood, 1),
+            inputs: vec![(BlockType::Planks, 4.0)],
+            output: (BlockType::Wood, 1.0),
         });
 
         // Stone -> Cobblestone
         self.recipes.push(Recipe {
-            inputs: vec![(BlockType::Stone, 1)],
-            output: (BlockType::Cobblestone, 1),
+            inputs: vec![(BlockType::Stone, 1.0)],
+            output: (BlockType::Cobblestone, 1.0),
         });
 
         // Cobblestone -> Stone
         self.recipes.push(Recipe {
-            inputs: vec![(BlockType::Cobblestone, 1)],
-            output: (BlockType::Stone, 1),
+            inputs: vec![(BlockType::Cobblestone, 1.0)],
+            output: (BlockType::Stone, 1.0),
         });
 
         // Dirt + Grass -> More Grass
         self.recipes.push(Recipe {
-            inputs: vec![(BlockType::Dirt, 2), (BlockType::Grass, 1)],
-            output: (BlockType::Grass, 3),
+            inputs: vec![(BlockType::Dirt, 2.0), (BlockType::Grass, 1.0)],
+            output: (BlockType::Grass, 3.0),
         });
 
         // Sand -> Stone (smelting)
         self.recipes.push(Recipe {
-            inputs: vec![(BlockType::Sand, 4)],
-            output: (BlockType::Stone, 1),
+            inputs: vec![(BlockType::Sand, 4.0)],
+            output: (BlockType::Stone, 1.0),
         });
     }
 
@@ -67,9 +67,9 @@ impl CraftingSystem {
         self.has_ingredients(inventory, &recipe.inputs)
     }
 
-    fn has_ingredients(&self, inventory: &Inventory, ingredients: &[(BlockType, u32)]) -> bool {
+    fn has_ingredients(&self, inventory: &Inventory, ingredients: &[(BlockType, f32)]) -> bool {
         for &(block_type, required_count) in ingredients {
-            let mut total = 0;
+            let mut total = 0.0;
             for slot in &inventory.slots {
                 if let Some(stack) = slot {
                     if stack.block_type == block_type {
@@ -95,7 +95,7 @@ impl CraftingSystem {
         for &(block_type, required_count) in &recipe.inputs {
             let mut remaining = required_count;
             for i in 0..inventory.size {
-                if remaining == 0 {
+                if remaining <= 0.0 {
                     break;
                 }
                 if let Some(stack) = &inventory.slots[i] {

@@ -1,11 +1,13 @@
 use crate::bird::{BirdManager, create_bird_vertices, generate_bird_indices};
 use crate::fish::{FishManager, create_fish_vertices, generate_fish_indices};
-use crate::block::{BlockType, Vertex, UiVertex, LineVertex, create_cube_vertices, create_block_outline, create_face_vertices, CUBE_INDICES};
+use crate::block::{BlockType, Vertex, UiVertex, LineVertex, create_cube_vertices, create_block_outline, create_face_vertices, create_scaled_cube_vertices, create_particle_vertices, create_shadow_vertices, CUBE_INDICES};
 use crate::camera::{Camera, CameraController, CameraUniform, Projection, Frustum};
 use crate::chunk::{CHUNK_SIZE, CHUNK_HEIGHT};
 use crate::crafting::CraftingSystem;
+use crate::dropped_item::DroppedItemManager;
 use crate::enemy::EnemyManager;
 use crate::bitmap_font;
+use crate::particle::ParticleManager;
 use crate::player::Player;
 use crate::texture::{TextureAtlas, get_face_uvs, TEX_DESTROY_BASE};
 use crate::water::WaterSimulation;
@@ -81,6 +83,8 @@ pub struct State {
     enemy_manager: EnemyManager,
     bird_manager: BirdManager,
     fish_manager: FishManager,
+    dropped_item_manager: DroppedItemManager,
+    particle_manager: ParticleManager,
     crafting_system: CraftingSystem,
     last_frame: Instant,
     mouse_pressed: bool,
@@ -556,6 +560,8 @@ impl State {
         let enemy_manager = EnemyManager::new(10.0, 10);
         let bird_manager = BirdManager::new();
         let fish_manager = FishManager::new();
+        let dropped_item_manager = DroppedItemManager::new();
+        let particle_manager = ParticleManager::new();
         let crafting_system = CraftingSystem::new();
 
         // UI Pipeline for crosshair
@@ -1019,6 +1025,8 @@ impl State {
             enemy_manager,
             bird_manager,
             fish_manager,
+            dropped_item_manager,
+            particle_manager,
             crafting_system,
             last_frame: Instant::now(),
             mouse_pressed: false,
@@ -1261,7 +1269,7 @@ impl State {
         let selected = self.player.inventory.selected_slot.min(slots - 1);
 
         // Layout in pixels
-        let slot_size = 70.0;
+        let slot_size = 80.0;
         let slot_gap = 8.0;
         let margin_bottom = 18.0;
         let total_w = (slots as f32) * slot_size + (slots as f32 - 1.0) * slot_gap;
@@ -1370,9 +1378,7 @@ impl State {
 
         let fill = [1.0, 1.0, 1.0, 0.10];
         let outline = [1.0, 1.0, 1.0, 0.85];
-        let outline_selected = [1.0, 1.0, 1.0, 1.0]; // white
-        //let outline_selected = [133.0 / 255.0, 216.0 / 255.0, 255.0 / 255.0, 1.0]; //133, 216, 255 (Light Blue)
-        // let outline_selected = [0.0, 157.0 / 255.0, 255.0 / 255.0, 1.0]; //0, 157, 255 (Baby Blue)
+        let outline_selected = [1.0, 1.0, 1.0, 1.0];
 
         // Slot content layout
         let slot_padding = 6.0;
@@ -1475,11 +1481,14 @@ impl State {
                 }
 
                 // Count: show in white over the block color in the bottom-left (with padding).
-                if stack.count > 1 {
-                    let count_text = format!("x{}", stack.count);
+                // Show count if > 0.0
+                if stack.count > 0.0 {
+                    let count_text = format!("{:.2}", stack.count);
                     let count_color = [1.0, 1.0, 1.0, 0.95];
                     let count_scale = 2.0;
-                    let count_x = x + slot_padding + 7.0;
+                    let count_w = (count_text.chars().count() as f32) * 6.0 * count_scale;
+                    let count_x = x + (slot_size - count_w) * 0.5;
+                    //let count_x = x + slot_padding + 7.0;
                     let count_y = y + slot_size - (slot_padding + 6.0) - (7.0 * count_scale) - 1.0;
                     let count_background_padding = 4.0;
 
@@ -1866,7 +1875,14 @@ impl State {
     }
 
     fn complete_block_break(&mut self, x: i32, y: i32, z: i32, block_type: BlockType) {
-        self.player.inventory.add_item(block_type, 1);
+        // Spawn dropped items (4 mini-blocks)
+        let block_pos = Point3::new(x as f32, y as f32, z as f32);
+        self.dropped_item_manager.spawn_drops(block_pos, block_type);
+
+        // Spawn break particles
+        self.particle_manager.spawn_block_break(block_pos, block_type);
+
+        // Remove the block from the world
         self.world.set_block_world(x, y, z, BlockType::Air);
         println!("Broke block: {:?}", block_type);
     }
@@ -1969,6 +1985,11 @@ impl State {
 
     fn handle_block_place(&mut self) {
         if let Some(selected) = self.player.inventory.get_selected_item() {
+            // Only allow placement if player has at least 1.0 of the block
+            if selected.count < 1.0 {
+                return;
+            }
+
             let block_type = selected.block_type;
             let direction = self.camera.get_direction();
 
@@ -1982,7 +2003,7 @@ impl State {
                         .set_block_world(place_x, place_y, place_z, block_type);
                     self.player
                         .inventory
-                        .remove_item(self.player.inventory.selected_slot, 1);
+                        .remove_item(self.player.inventory.selected_slot, 1.0);
                     println!("Placed block: {:?}", block_type);
                 }
             }
@@ -2039,6 +2060,15 @@ impl State {
 
         // Update fish
         self.fish_manager.update(dt, self.player.position, &self.world);
+
+        // Update dropped items and collect any that touch the player
+        let collected_items = self.dropped_item_manager.update(dt, self.player.position, &self.world);
+        for item in collected_items {
+            self.player.inventory.add_item(item.block_type, item.value);
+        }
+
+        // Update particles
+        self.particle_manager.update(dt);
 
         // Check for enemy damage
         let damage = self.enemy_manager.check_player_damage(self.player.position);
@@ -2295,6 +2325,121 @@ impl State {
                         .set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint16);
                     render_pass.draw_indexed(0..CUBE_INDICES.len() as u32, 0, 0..1);
                 }
+            }
+
+            // Render dropped item shadows first (so they appear behind items)
+            for item in &self.dropped_item_manager.items {
+                // Find the ground below the item (search up to 10 blocks down)
+                let mut ground_y = None;
+                let item_x = item.position.x.floor() as i32;
+                let item_z = item.position.z.floor() as i32;
+                for check_y in (0..=(item.position.y.floor() as i32)).rev() {
+                    if self.world.get_block_world(item_x, check_y, item_z).is_solid() {
+                        ground_y = Some(check_y as f32 + 1.0); // Top of the solid block
+                        break;
+                    }
+                }
+
+                if let Some(gy) = ground_y {
+                    let height_above_ground = item.position.y - gy;
+                    // Only show shadow if within reasonable height (< 5 blocks)
+                    if height_above_ground >= 0.0 && height_above_ground < 5.0 {
+                        // Alpha decreases with height (0.5 at ground, 0 at 5 blocks up)
+                        let alpha = 0.5 * (1.0 - height_above_ground / 5.0);
+                        // Shadow radius is slightly larger than item (item is 0.25, shadow is 0.35)
+                        let shadow_radius = 0.35;
+                        let shadow_center = Point3::new(
+                            item.position.x,
+                            gy + 0.01, // Just above ground to avoid z-fighting
+                            item.position.z,
+                        );
+
+                        let (vertices, indices) = create_shadow_vertices(shadow_center, shadow_radius, alpha);
+
+                        let vertex_buffer =
+                            self.device
+                                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                                    label: Some("Shadow Vertex Buffer"),
+                                    contents: bytemuck::cast_slice(&vertices),
+                                    usage: wgpu::BufferUsages::VERTEX,
+                                });
+
+                        let index_buffer =
+                            self.device
+                                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                                    label: Some("Shadow Index Buffer"),
+                                    contents: bytemuck::cast_slice(&indices),
+                                    usage: wgpu::BufferUsages::INDEX,
+                                });
+
+                        render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+                        render_pass
+                            .set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+                        render_pass.draw_indexed(0..indices.len() as u32, 0, 0..1);
+                    }
+                }
+            }
+
+            // Render dropped items (mini-blocks)
+            for item in &self.dropped_item_manager.items {
+                let vertices = create_scaled_cube_vertices(
+                    item.position,
+                    item.block_type,
+                    item.get_size(),
+                    1.0, // Full brightness
+                );
+
+                let vertex_buffer =
+                    self.device
+                        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                            label: Some("Dropped Item Vertex Buffer"),
+                            contents: bytemuck::cast_slice(&vertices),
+                            usage: wgpu::BufferUsages::VERTEX,
+                        });
+
+                let index_buffer =
+                    self.device
+                        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                            label: Some("Dropped Item Index Buffer"),
+                            contents: bytemuck::cast_slice(CUBE_INDICES),
+                            usage: wgpu::BufferUsages::INDEX,
+                        });
+
+                render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+                render_pass
+                    .set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+                render_pass.draw_indexed(0..CUBE_INDICES.len() as u32, 0, 0..1);
+            }
+
+            // Render particles
+            for particle in &self.particle_manager.particles {
+                let vertices = create_particle_vertices(
+                    particle.position,
+                    particle.color,
+                    particle.size,
+                    particle.get_alpha(),
+                );
+
+                let vertex_buffer =
+                    self.device
+                        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                            label: Some("Particle Vertex Buffer"),
+                            contents: bytemuck::cast_slice(&vertices),
+                            usage: wgpu::BufferUsages::VERTEX,
+                        });
+
+                let index_buffer =
+                    self.device
+                        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                            label: Some("Particle Index Buffer"),
+                            contents: bytemuck::cast_slice(CUBE_INDICES),
+                            usage: wgpu::BufferUsages::INDEX,
+                        });
+
+                render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+                render_pass
+                    .set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+                render_pass.draw_indexed(0..CUBE_INDICES.len() as u32, 0, 0..1);
             }
 
             // Render birds

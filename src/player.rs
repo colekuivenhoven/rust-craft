@@ -16,13 +16,13 @@ impl Player {
         let mut inventory = Inventory::new(9);
 
         // Give player starting items
-        inventory.add_item(BlockType::Wood, 64);
-        inventory.add_item(BlockType::Stone, 64);
-        inventory.add_item(BlockType::Dirt, 64);
-        inventory.add_item(BlockType::GlowStone, 64);
-        inventory.add_item(BlockType::Water, 64);
-        inventory.add_item(BlockType::Ice, 64);
-        inventory.add_item(BlockType::Snow, 64);
+        inventory.add_item(BlockType::Wood, 64.0);
+        inventory.add_item(BlockType::Stone, 64.0);
+        inventory.add_item(BlockType::Dirt, 64.0);
+        inventory.add_item(BlockType::GlowStone, 64.0);
+        inventory.add_item(BlockType::Water, 64.0);
+        inventory.add_item(BlockType::Ice, 64.0);
+        inventory.add_item(BlockType::Snow, 64.0);
 
         Self {
             position,
