@@ -1,4 +1,5 @@
 use crate::chunk::{Chunk, ChunkNeighbors, CHUNK_SIZE, CHUNK_HEIGHT};
+use crate::chunk_storage;
 use crate::block::BlockType;
 use crate::lighting;
 use rayon::prelude::*;
@@ -21,18 +22,31 @@ impl World {
 
     pub fn generate_chunks(&mut self, center_x: i32, center_z: i32) {
         // Collect positions that need new chunks
-        let positions_to_generate: Vec<(i32, i32)> = (-self.render_distance..=self.render_distance)
+        let positions_needed: Vec<(i32, i32)> = (-self.render_distance..=self.render_distance)
             .flat_map(|x| {
                 (-self.render_distance..=self.render_distance).map(move |z| (center_x + x, center_z + z))
             })
             .filter(|pos| !self.chunks.contains_key(pos))
             .collect();
 
-        if positions_to_generate.is_empty() {
+        if positions_needed.is_empty() {
             return;
         }
 
-        // Generate chunks in parallel using rayon
+        // First, try to load saved chunks
+        let mut loaded_chunks: Vec<((i32, i32), Chunk)> = Vec::new();
+        let mut positions_to_generate: Vec<(i32, i32)> = Vec::new();
+
+        for &(cx, cz) in &positions_needed {
+            if let Some(mut chunk) = chunk_storage::load_chunk(cx, cz) {
+                lighting::calculate_chunk_lighting(&mut chunk);
+                loaded_chunks.push(((cx, cz), chunk));
+            } else {
+                positions_to_generate.push((cx, cz));
+            }
+        }
+
+        // Generate new chunks in parallel using rayon
         let generated_chunks: Vec<((i32, i32), Chunk)> = positions_to_generate
             .par_iter()
             .map(|&(cx, cz)| {
@@ -42,13 +56,19 @@ impl World {
             })
             .collect();
 
-        // Insert generated chunks into the world (must be sequential due to HashMap)
-        let new_chunk_positions: Vec<(i32, i32)> = generated_chunks
+        // Combine loaded and generated chunks
+        let all_new_chunks: Vec<((i32, i32), Chunk)> = loaded_chunks
+            .into_iter()
+            .chain(generated_chunks.into_iter())
+            .collect();
+
+        // Insert chunks into the world (must be sequential due to HashMap)
+        let new_chunk_positions: Vec<(i32, i32)> = all_new_chunks
             .iter()
             .map(|(pos, _)| *pos)
             .collect();
 
-        for (pos, chunk) in generated_chunks {
+        for (pos, chunk) in all_new_chunks {
             self.chunks.insert(pos, chunk);
         }
 
@@ -71,10 +91,26 @@ impl World {
         let chunk_x = (camera_pos.0 / CHUNK_SIZE as f32).floor() as i32;
         let chunk_z = (camera_pos.1 / CHUNK_SIZE as f32).floor() as i32;
 
-        self.chunks.retain(|&(cx, cz), _| {
-            (cx - chunk_x).abs() <= self.render_distance
-                && (cz - chunk_z).abs() <= self.render_distance
-        });
+        // Save modified chunks before unloading
+        let chunks_to_unload: Vec<(i32, i32)> = self.chunks
+            .iter()
+            .filter(|(&(cx, cz), _)| {
+                (cx - chunk_x).abs() > self.render_distance
+                    || (cz - chunk_z).abs() > self.render_distance
+            })
+            .map(|(&pos, _)| pos)
+            .collect();
+
+        for pos in chunks_to_unload {
+            if let Some(chunk) = self.chunks.get(&pos) {
+                if chunk.modified {
+                    if let Err(e) = chunk_storage::save_chunk(chunk) {
+                        eprintln!("Failed to save chunk {:?}: {}", pos, e);
+                    }
+                }
+            }
+            self.chunks.remove(&pos);
+        }
 
         self.generate_chunks(chunk_x, chunk_z);
     }
@@ -331,6 +367,23 @@ impl World {
             if !any_changes {
                 break;
             }
+        }
+    }
+
+    /// Saves all modified chunks to disk (call on game exit)
+    pub fn save_all_modified_chunks(&self) {
+        let mut saved_count = 0;
+        for (pos, chunk) in &self.chunks {
+            if chunk.modified {
+                if let Err(e) = chunk_storage::save_chunk(chunk) {
+                    eprintln!("Failed to save chunk {:?}: {}", pos, e);
+                } else {
+                    saved_count += 1;
+                }
+            }
+        }
+        if saved_count > 0 {
+            log::info!("Saved {} modified chunks", saved_count);
         }
     }
 }

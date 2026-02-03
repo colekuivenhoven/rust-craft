@@ -1099,6 +1099,11 @@ impl State {
         self.mouse_captured
     }
 
+    /// Saves all modified chunks to disk (call before exiting)
+    pub fn save_world(&self) {
+        self.world.save_all_modified_chunks();
+    }
+
     pub fn process_mouse(&mut self, dx: f64, dy: f64) {
         if self.mouse_captured {
             self.camera_controller.process_mouse(&mut self.camera, dx as f32, dy as f32);

@@ -28,6 +28,7 @@ pub struct Chunk {
     pub dirty: bool,
     pub light_dirty: bool,
     pub mesh_version: u32,                 // Incremented when mesh is rebuilt, used for GPU buffer caching
+    pub modified: bool,                    // True if chunk has player modifications (needs saving)
 }
 
 /// Helper struct to provide safe access to neighboring chunks during mesh generation
@@ -116,9 +117,34 @@ impl Chunk {
             dirty: true,
             light_dirty: true,
             mesh_version: 0,
+            modified: false,
         };
         chunk.generate_terrain();
         chunk
+    }
+
+    /// Creates a chunk with pre-loaded block data (from saved file)
+    pub fn from_saved_data(chunk_x: i32, chunk_z: i32, blocks: Box<[[[BlockType; CHUNK_SIZE]; CHUNK_HEIGHT]; CHUNK_SIZE]>) -> Self {
+        let light_levels: Box<[[[u8; CHUNK_SIZE]; CHUNK_HEIGHT]; CHUNK_SIZE]> = vec![[[0u8; CHUNK_SIZE]; CHUNK_HEIGHT]; CHUNK_SIZE]
+            .into_boxed_slice()
+            .try_into()
+            .unwrap();
+
+        Self {
+            blocks,
+            light_levels,
+            position: (chunk_x, chunk_z),
+            vertices: Vec::new(),
+            indices: Vec::new(),
+            water_vertices: Vec::new(),
+            water_indices: Vec::new(),
+            transparent_vertices: Vec::new(),
+            transparent_indices: Vec::new(),
+            dirty: true,
+            light_dirty: true,
+            mesh_version: 0,
+            modified: true, // Loaded chunks are considered modified (already saved once)
+        }
     }
 
     fn generate_terrain(&mut self) {
@@ -1041,6 +1067,7 @@ impl Chunk {
             let old_block = self.blocks[x][y][z];
             self.blocks[x][y][z] = block_type;
             self.dirty = true;
+            self.modified = true; // Mark chunk as needing to be saved
 
             if old_block != BlockType::Air && block_type == BlockType::Air {
                 lighting::on_block_removed(self, x, y, z);
