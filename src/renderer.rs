@@ -554,7 +554,7 @@ impl State {
             cache: None,
         });
 
-        let world = World::new(12); // Sets render_distance
+        let world = World::new(18); // Sets render_distance
         let player = Player::new(Point3::new(0.0, 35.0, 0.0));
         let water_simulation = WaterSimulation::new(0.5);
         let enemy_manager = EnemyManager::new(10.0, 10);

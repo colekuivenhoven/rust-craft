@@ -29,7 +29,7 @@ impl Player {
             inventory,
             health: 100.0,
             max_health: 100.0,
-            reach_distance: 5.0,
+            reach_distance: 8.0,
         }
     }
 

@@ -11,8 +11,8 @@ pub const CHUNK_HEIGHT: usize = 128;
 
 // Tree generation configuration
 pub const TREE_MIN_HEIGHT: usize = 4;      // Minimum trunk height (current average)
-pub const TREE_MAX_HEIGHT: usize = 10;     // Maximum trunk height (tall trees)
-pub const TREE_BRANCH_CHANCE: f64 = 0.4;   // Chance for trunk to branch near top (0.0 - 1.0)
+pub const TREE_MAX_HEIGHT: usize = 12;     // Maximum trunk height (tall trees)
+pub const TREE_BRANCH_CHANCE: f64 = 0.6;   // Chance for trunk to branch near top (0.0 - 1.0)
 pub const TREE_TALL_CHANCE: f64 = 0.3;     // Chance for a tree to be tall variant (0.0 - 1.0)
 
 pub struct Chunk {
@@ -186,37 +186,37 @@ impl Chunk {
 
                 // --- Large-scale biome masks ---
                 // Ocean mask: 0 = deep ocean, 1 = inland.
-                let biome_scale = 0.0035;
+                let biome_scale = 0.0012; // Reduced from 0.0035 for ~3x larger oceans/continents
                 let biome_raw = (biome_perlin.get([world_x * biome_scale, world_z * biome_scale]) + 1.0) * 0.5;
                 let inland = smoothstep(0.35, 0.55, biome_raw); // Push more area into ocean while keeping smooth shores.
 
                 // Mountain mask: 0 = no mountains, 1 = mountains.
-                let mountain_scale = 0.006;
+                let mountain_scale = 0.002; // Reduced from 0.006 for ~3x larger mountain ranges
                 let mountain_raw = (mountain_perlin.get([world_x * mountain_scale, world_z * mountain_scale]) + 1.0) * 0.5;
                 let mountains = smoothstep(0.60, 0.80, mountain_raw) * inland; // Only allow strong mountains well inland.
 
                 // --- Base terrain (plains) + local detail ---
-                let base_scale = 0.02;
+                let base_scale = 0.007; // Reduced from 0.02 for ~3x larger terrain features
                 let base_n = (perlin.get([world_x * base_scale, world_z * base_scale]) + 1.0) * 0.5;
                 let base_height = 18.0 + base_n * 18.0; // ~18..36
 
-                let detail_scale = 0.06;
+                let detail_scale = 0.02; // Reduced from 0.06 for smoother terrain
                 let detail = detail_perlin.get([world_x * detail_scale, world_z * detail_scale]) * 2.5;
 
                 // --- Ocean shaping ---
                 let ocean_drop = (1.0 - inland) * 16.0; // Pull terrain down near coasts/ocean.
 
                 // --- Mountain shaping (jagged peaks) ---
-                // Use higher frequency noise for sharper, more jagged peaks (but same height)
-                let ridge_scale = 0.04; // Higher frequency for sharper ridges
-                let ridge = (perlin.get([world_x * ridge_scale, world_z * ridge_scale]).abs()) * 10.0;
+                // Use higher frequency noise for sharper, more jagged peaks
+                let ridge_scale = 0.015; // Reduced from 0.04 for wider mountain ridges
+                let ridge = (perlin.get([world_x * ridge_scale, world_z * ridge_scale]).abs()) * 15.0;
 
                 // Add extra high-frequency jagged detail for sharp, craggy look
-                let jagged_scale = 0.12;
-                let jagged = (jagged_perlin.get([world_x * jagged_scale, world_z * jagged_scale]).abs()) * 4.0;
+                let jagged_scale = 0.04; // Reduced from 0.12 for larger jagged features
+                let jagged = (jagged_perlin.get([world_x * jagged_scale, world_z * jagged_scale]).abs()) * 8.0;
 
-                // Keep total mountain height similar to before (~22 + 12 = 34 max)
-                let mountain_lift = mountains * (20.0 + ridge + jagged);
+                // Taller mountains: base 35 + up to 23 from noise = max ~58 blocks above base
+                let mountain_lift = mountains * (35.0 + ridge + jagged);
 
                 let height_f = base_height + detail + mountain_lift - ocean_drop;
                 let height_i = height_f.round() as isize;
@@ -228,7 +228,7 @@ impl Chunk {
                 let sea = sea_level as usize;
 
                 // Jagged transition noise for clumpy block type boundaries
-                let transition_scale = 0.15;
+                let transition_scale = 0.05; // Reduced from 0.15 for larger block type patches
                 let transition_noise = (detail_perlin.get([world_x * transition_scale, world_z * transition_scale]) + 1.0) * 0.5;
                 let transition_noise_2 = (jagged_perlin.get([world_x * transition_scale * 1.5, world_z * transition_scale * 1.5]) + 1.0) * 0.5;
                 let jagged_offset = ((transition_noise * 8.0) + (transition_noise_2 * 4.0)) as isize - 6; // -6 to +6 block variation
@@ -240,6 +240,9 @@ impl Chunk {
                 // Mountain stone threshold with jagged variation - raised to allow grass higher
                 let mountain_stone_threshold = sea_level + 18 + jagged_offset;
                 let is_mountain_zone = mountains > 0.15;
+
+                // Snow threshold - snow appears on the highest mountain peaks
+                let snow_threshold = sea_level + 45 + jagged_offset; // Snow at very high elevations
 
                 // Extra noise for grass patches above stone threshold
                 let grass_patch_noise = transition_noise * 0.7 + transition_noise_2 * 0.3;
@@ -262,8 +265,12 @@ impl Chunk {
                     }
                     // Above water surface blocks
                     else if y == height {
+                        // Snow-capped mountain peaks
+                        if is_mountain_zone && y_i > snow_threshold {
+                            self.blocks[x][y][z] = BlockType::Snow;
+                        }
                         // Mountains: stone surface with jagged grass patches
-                        if is_mountain_zone && y_i > mountain_stone_threshold {
+                        else if is_mountain_zone && y_i > mountain_stone_threshold {
                             // How far above threshold determines grass chance
                             let blocks_above = (y_i - mountain_stone_threshold) as f64;
                             // Grass can appear up to 8 blocks above threshold with decreasing probability
@@ -333,12 +340,13 @@ impl Chunk {
         }
 
         // === Cave Generation ===
-        // Carve caves using 3D noise after terrain is generated
-        // This creates both "spaghetti" tunnels and "cheese" caverns
+        // Carve caves using 3D ridged noise for natural, connected tunnel networks
+        // Uses multiple layers: winding tunnels, large caverns, and vertical shafts
 
         let cave_floor = 3;  // Don't carve below this (bedrock layer)
-        let base_surface_depth = 4;  // Base minimum depth below surface
         let surface_opening_perlin = Perlin::new(104);  // Controls where caves can reach surface
+        let cave_worm_perlin = Perlin::new(105);  // Additional worm-like cave layer
+        let vertical_shaft_perlin = Perlin::new(106);  // Vertical shafts connecting caves
 
         for x in 0..CHUNK_SIZE {
             for z in 0..CHUNK_SIZE {
@@ -355,13 +363,12 @@ impl Chunk {
                 }
 
                 // Regional cave density mask - some areas have more caves than others
-                let cave_density = (cave_mask_perlin.get([world_x * 0.008, world_z * 0.008]) + 1.0) * 0.5;
+                let cave_density = (cave_mask_perlin.get([world_x * 0.002, world_z * 0.002]) + 1.0) * 0.5;
 
-                // Surface opening chance - occasional spots where caves can reach surface
-                // Uses low frequency noise so openings cluster into natural-looking sinkholes
-                let surface_opening_noise = surface_opening_perlin.get([world_x * 0.02, world_z * 0.02]);
-                let allow_surface_opening = surface_opening_noise > 0.7;  // ~15% of terrain can have openings
-                let min_surface_depth = if allow_surface_opening { 0 } else { base_surface_depth };
+                // Surface opening chance - very rare spots where caves can reach surface
+                let surface_opening_noise = surface_opening_perlin.get([world_x * 0.003, world_z * 0.003]);
+                let allow_surface_opening = surface_opening_noise > 0.95; // Only ~2.5% of terrain can have openings
+                let min_surface_depth = if allow_surface_opening { 2 } else { 8 }; // Even openings stay 2 blocks down, normal caves 8 blocks
 
                 for y in cave_floor..CHUNK_HEIGHT {
                     // Skip air and water blocks
@@ -378,39 +385,67 @@ impl Chunk {
 
                     let world_y = y as f64;
 
-                    // === Spaghetti Caves ===
-                    // Two perpendicular noise fields that create winding tunnels where they intersect
-                    let spaghetti_scale = 0.04;
-                    let spaghetti_1 = cave_perlin_1.get([
-                        world_x * spaghetti_scale,
-                        world_y * spaghetti_scale * 0.5,  // Stretch vertically for horizontal tunnels
-                        world_z * spaghetti_scale
+                    // === Primary Cave Network (Ridged Noise) ===
+                    // Using ridged noise creates more natural, connected tunnel networks
+                    let cave_scale_1 = 0.025;
+                    let cave_noise_1 = cave_perlin_1.get([
+                        world_x * cave_scale_1,
+                        world_y * cave_scale_1 * 0.4,  // Stretch vertically for horizontal bias
+                        world_z * cave_scale_1
                     ]);
-                    let spaghetti_2 = cave_perlin_2.get([
-                        world_x * spaghetti_scale,
-                        world_y * spaghetti_scale * 0.5,
-                        world_z * spaghetti_scale
-                    ]);
+                    // Ridged noise: invert the absolute value to create ridges (tunnels along ridges)
+                    let ridged_1 = 1.0 - cave_noise_1.abs() * 2.0;
 
-                    // Tunnel forms where both noise values are near zero (narrow band)
-                    let tunnel_threshold = 0.12 + (1.0 - cave_density) * 0.08;  // Varies with density
-                    let is_spaghetti = spaghetti_1.abs() < tunnel_threshold && spaghetti_2.abs() < tunnel_threshold;
+                    // Second layer at different scale for variety
+                    let cave_scale_2 = 0.04;
+                    let cave_noise_2 = cave_perlin_2.get([
+                        world_x * cave_scale_2 + 100.0,  // Offset to decorrelate
+                        world_y * cave_scale_2 * 0.5,
+                        world_z * cave_scale_2 + 100.0
+                    ]);
+                    let ridged_2 = 1.0 - cave_noise_2.abs() * 2.0;
+
+                    // Combine ridged noise layers - tunnel forms where ridged value is high
+                    let combined_ridged = (ridged_1 * 0.6 + ridged_2 * 0.4).max(ridged_1.max(ridged_2) * 0.8);
+                    let tunnel_threshold = 0.75 + (1.0 - cave_density) * 0.12; // Increased from 0.65 for fewer caves
+                    let is_tunnel = combined_ridged > tunnel_threshold && cave_density > 0.3;
+
+                    // === Worm Caves (meandering tunnels) ===
+                    // Creates longer, more connected cave systems
+                    let worm_scale = 0.018;
+                    let worm_noise = cave_worm_perlin.get([
+                        world_x * worm_scale,
+                        world_y * worm_scale * 0.3,  // Very horizontal bias
+                        world_z * worm_scale
+                    ]);
+                    let worm_ridged = 1.0 - worm_noise.abs() * 1.8;
+                    let worm_threshold = 0.80 + (1.0 - cave_density) * 0.08; // Increased from 0.72 for fewer caves
+                    let is_worm = worm_ridged > worm_threshold && cave_density > 0.4;
 
                     // === Cheese Caves (larger caverns) ===
-                    let cheese_scale = 0.025;
+                    let cheese_scale = 0.012;
                     let cheese_value = cheese_perlin.get([
                         world_x * cheese_scale,
-                        world_y * cheese_scale * 0.6,  // Slightly squashed vertically
+                        world_y * cheese_scale * 0.5,
                         world_z * cheese_scale
                     ]);
 
-                    // Cheese caves only appear at lower elevations and where density allows
-                    let cheese_y_factor = (1.0 - (world_y / 40.0).min(1.0)).max(0.0);  // Stronger at lower Y
-                    let cheese_threshold = 0.55 + (1.0 - cave_density) * 0.2 - cheese_y_factor * 0.15;
-                    let is_cheese = cheese_value > cheese_threshold && cave_density > 0.3;
+                    // Cheese caves stronger at lower elevations
+                    let cheese_y_factor = (1.0 - (world_y / 35.0).min(1.0)).max(0.0);
+                    let cheese_threshold = 0.60 + (1.0 - cave_density) * 0.12 - cheese_y_factor * 0.10; // Increased from 0.50 for fewer caves
+                    let is_cheese = cheese_value > cheese_threshold && cave_density > 0.45;
+
+                    // === Vertical Shafts (connect cave levels) ===
+                    let shaft_scale = 0.05;
+                    let shaft_noise = vertical_shaft_perlin.get([
+                        world_x * shaft_scale,
+                        world_z * shaft_scale
+                    ]);
+                    // Shafts are rare but connect caves vertically - must be deep underground
+                    let is_shaft = shaft_noise > 0.90 && y < surface_y.saturating_sub(15); // Increased threshold, deeper requirement
 
                     // Carve the cave
-                    if is_spaghetti || is_cheese {
+                    if is_tunnel || is_worm || is_cheese || is_shaft {
                         // Don't carve through sand underwater (prevents ocean flooding caves)
                         if block == BlockType::Sand && y < sea_level as usize {
                             continue;
@@ -422,7 +457,6 @@ impl Chunk {
         }
 
         // === Tree Generation ===
-        // (Now separate loop after caves are carved)
         for x in 0..CHUNK_SIZE {
             for z in 0..CHUNK_SIZE {
                 let world_x = (world_offset_x + x as i32) as f64;
@@ -459,8 +493,8 @@ impl Chunk {
                 if height > sea && height < CHUNK_HEIGHT - max_tree_space && x > 3 && x < CHUNK_SIZE - 3 && z > 3 && z < CHUNK_SIZE - 3 {
                     // Reduce trees near coasts.
                     if inland > 0.55 {
-                        let tree_noise = perlin.get([world_x * 0.1, world_z * 0.1]);
-                        if tree_noise > 0.7 {
+                        let tree_noise = perlin.get([world_x * 0.02, world_z * 0.02]); // Reduced from 0.1 for larger forest patches
+                        if tree_noise > 0.25 { // Lowered from 0.7 for more frequent trees
                             // Check if there's already a tree trunk within 2 blocks (prevents adjacent trees)
                             let mut too_close_to_tree = false;
                             'check: for check_x in x.saturating_sub(2)..=(x + 2).min(CHUNK_SIZE - 1) {
@@ -565,7 +599,7 @@ impl Chunk {
                 let world_z = (world_offset_z + z as i32) as f64;
                 for y in 5..25 {
                     if self.blocks[x][y][z] == BlockType::Stone {
-                        let noise_val = glow_perlin.get([world_x * 0.15, y as f64 * 0.15, world_z * 0.15]);
+                        let noise_val = glow_perlin.get([world_x * 0.05, y as f64 * 0.05, world_z * 0.05]); // Reduced from 0.15 for larger clusters
                         if noise_val > 0.85 {
                             self.blocks[x][y][z] = BlockType::GlowStone;
                         }
@@ -577,7 +611,7 @@ impl Chunk {
         // === Floating Sky Islands ===
         // Generate sparse, hilly islands at various heights with stalactites
         let sky_island_base_y = 60;          // Lower base height
-        let sky_island_height_range = 50;    // More height variation (60-110)
+        let sky_island_height_range = 40;    // More height variation (60-100)
         let stalactite_perlin = Perlin::new(203); // For bottom stalactites
         let hill_perlin = Perlin::new(204);       // For top hills
 
@@ -587,7 +621,7 @@ impl Chunk {
                 let world_z = (world_offset_z + z as i32) as f64;
 
                 // 2D mask for very sparse island placement
-                let mask_scale = 0.005;
+                let mask_scale = 0.0017; // Reduced from 0.005 for ~3x larger island spacing
                 let island_mask = (sky_island_mask_perlin.get([world_x * mask_scale, world_z * mask_scale]) + 1.0) * 0.5;
 
                 if island_mask < 0.78 {
@@ -595,17 +629,17 @@ impl Chunk {
                 }
 
                 // Height of this island cluster
-                let height_noise = (sky_island_detail.get([world_x * 0.003, world_z * 0.003]) + 1.0) * 0.5;
+                let height_noise = (sky_island_detail.get([world_x * 0.001, world_z * 0.001]) + 1.0) * 0.5; // Reduced from 0.003
                 let island_center_y = sky_island_base_y + (height_noise * sky_island_height_range as f64) as usize;
 
                 // Hills on top - adds 0-4 blocks of height variation
-                let hill_scale = 0.08;
+                let hill_scale = 0.025; // Reduced from 0.08 for larger hills
                 let hill_noise = (hill_perlin.get([world_x * hill_scale, world_z * hill_scale]) + 1.0) * 0.5;
                 let hill_height = (hill_noise * 4.0) as usize;
 
                 // Calculate "centeredness" - how close this point is to the core of the island
                 // Use horizontal slice of island noise to determine center
-                let island_scale = 0.025;
+                let island_scale = 0.008; // Reduced from 0.025 for ~3x larger islands
                 let horizontal_island_noise = (sky_island_perlin.get([
                     world_x * island_scale,
                     island_center_y as f64 * island_scale * 0.25, // Sample at island center height
@@ -616,7 +650,7 @@ impl Chunk {
                 let centeredness = smoothstep(0.5, 0.8, horizontal_island_noise);
 
                 // Stalactites - longer in general, and much longer/thicker toward center
-                let stalactite_scale = 0.15;
+                let stalactite_scale = 0.05; // Reduced from 0.15 for larger stalactite patterns
                 let stalactite_noise = (stalactite_perlin.get([world_x * stalactite_scale, world_z * stalactite_scale]) + 1.0) * 0.5;
 
                 // Base stalactite depth (longer in general: 2-8 blocks at edges)
@@ -719,7 +753,10 @@ impl Chunk {
                             }
                         }
 
-                        self.blocks[x][y][z] = if is_surface {
+                        // Stalactites (below center) are always stone, top surface gets grass/dirt
+                        self.blocks[x][y][z] = if is_below_center {
+                            BlockType::Stone // Stalactites are always stone
+                        } else if is_surface {
                             BlockType::Grass
                         } else if depth_from_surface < 3 {
                             BlockType::Dirt
@@ -756,8 +793,8 @@ impl Chunk {
                 }
 
                 // Use noise to create sparse pond locations
-                let pond_chance = (pond_noise.get([world_x * 0.02, world_z * 0.02]) + 1.0) * 0.5;
-                if pond_chance < 0.70 {
+                let pond_chance = (pond_noise.get([world_x * 0.009, world_z * 0.009]) + 1.0) * 0.5; // Reduced from 0.02
+                if pond_chance < 0.50 {
                     continue;
                 }
 
@@ -988,8 +1025,8 @@ impl Chunk {
                     }
 
                     // Tree placement noise
-                    let tree_noise = perlin.get([world_x * 0.15, world_z * 0.15]);
-                    if tree_noise < 0.6 {
+                    let tree_noise = perlin.get([world_x * 0.05, world_z * 0.05]); // Reduced from 0.15 for larger forest patches
+                    if tree_noise < 0.4 { // Lowered from 0.6 for more trees on sky islands
                         continue;
                     }
 
