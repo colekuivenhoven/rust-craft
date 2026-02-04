@@ -1,4 +1,5 @@
 use crate::chunk::{Chunk, ChunkNeighbors, CHUNK_SIZE, CHUNK_HEIGHT};
+use crate::chunk_loader::ChunkLoader;
 use crate::chunk_storage;
 use crate::block::BlockType;
 use crate::lighting;
@@ -8,6 +9,8 @@ use std::collections::HashMap;
 pub struct World {
     pub chunks: HashMap<(i32, i32), Chunk>,
     render_distance: i32,
+    chunk_loader: ChunkLoader,
+    last_center: (i32, i32),
 }
 
 impl World {
@@ -15,64 +18,49 @@ impl World {
         let mut world = Self {
             chunks: HashMap::new(),
             render_distance,
+            chunk_loader: ChunkLoader::new(),
+            last_center: (0, 0),
         };
-        world.generate_chunks(0, 0);
+        // Generate initial chunks synchronously for immediate spawn
+        world.generate_initial_chunks(0, 0);
         world
     }
 
-    pub fn generate_chunks(&mut self, center_x: i32, center_z: i32) {
-        // Collect positions that need new chunks
-        let positions_needed: Vec<(i32, i32)> = (-self.render_distance..=self.render_distance)
+    /// Generate initial chunks synchronously (only used at startup for immediate spawn)
+    fn generate_initial_chunks(&mut self, center_x: i32, center_z: i32) {
+        // Only generate a small area synchronously for immediate playability
+        let initial_radius = 2.min(self.render_distance);
+
+        let positions: Vec<(i32, i32)> = (-initial_radius..=initial_radius)
             .flat_map(|x| {
-                (-self.render_distance..=self.render_distance).map(move |z| (center_x + x, center_z + z))
+                (-initial_radius..=initial_radius).map(move |z| (center_x + x, center_z + z))
             })
-            .filter(|pos| !self.chunks.contains_key(pos))
             .collect();
 
-        if positions_needed.is_empty() {
-            return;
-        }
-
-        // First, try to load saved chunks
-        let mut loaded_chunks: Vec<((i32, i32), Chunk)> = Vec::new();
-        let mut positions_to_generate: Vec<(i32, i32)> = Vec::new();
-
-        for &(cx, cz) in &positions_needed {
-            if let Some(mut chunk) = chunk_storage::load_chunk(cx, cz) {
-                lighting::calculate_chunk_lighting(&mut chunk);
-                loaded_chunks.push(((cx, cz), chunk));
-            } else {
-                positions_to_generate.push((cx, cz));
-            }
-        }
-
-        // Generate new chunks in parallel using rayon
-        let generated_chunks: Vec<((i32, i32), Chunk)> = positions_to_generate
+        // Generate chunks in parallel using rayon
+        let generated_chunks: Vec<((i32, i32), Chunk)> = positions
             .par_iter()
             .map(|&(cx, cz)| {
-                let mut chunk = Chunk::new(cx, cz);
+                let mut chunk = if let Some(loaded) = chunk_storage::load_chunk(cx, cz) {
+                    loaded
+                } else {
+                    Chunk::new(cx, cz)
+                };
                 lighting::calculate_chunk_lighting(&mut chunk);
                 ((cx, cz), chunk)
             })
             .collect();
 
-        // Combine loaded and generated chunks
-        let all_new_chunks: Vec<((i32, i32), Chunk)> = loaded_chunks
-            .into_iter()
-            .chain(generated_chunks.into_iter())
-            .collect();
-
-        // Insert chunks into the world (must be sequential due to HashMap)
-        let new_chunk_positions: Vec<(i32, i32)> = all_new_chunks
+        let new_chunk_positions: Vec<(i32, i32)> = generated_chunks
             .iter()
             .map(|(pos, _)| *pos)
             .collect();
 
-        for (pos, chunk) in all_new_chunks {
+        for (pos, chunk) in generated_chunks {
             self.chunks.insert(pos, chunk);
         }
 
-        // Mark neighbors dirty so they re-mesh (stitch) with the new chunks
+        // Mark neighbors dirty
         for (cx, cz) in &new_chunk_positions {
             for (dx, dz) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
                 let neighbor_pos = (cx + dx, cz + dz);
@@ -82,16 +70,65 @@ impl World {
             }
         }
 
-        // Propagate light between the new chunks and the existing world
-        // - This ensures sunlight or caves flow correctly across the new boundaries
         self.propagate_cross_chunk_lighting(&new_chunk_positions);
+        self.last_center = (center_x, center_z);
+    }
+
+    /// Queue missing chunks to be loaded in the background
+    fn queue_missing_chunks(&mut self, center_x: i32, center_z: i32) {
+        for dx in -self.render_distance..=self.render_distance {
+            for dz in -self.render_distance..=self.render_distance {
+                let pos = (center_x + dx, center_z + dz);
+
+                // Skip if already loaded or already pending
+                if self.chunks.contains_key(&pos) || self.chunk_loader.is_pending(&pos) {
+                    continue;
+                }
+
+                // Calculate priority based on distance (squared)
+                let priority = (dx * dx + dz * dz) as f32;
+                self.chunk_loader.request_chunk(pos, priority);
+            }
+        }
+    }
+
+    /// Process completed chunks from the background loader
+    fn receive_loaded_chunks(&mut self) -> Vec<(i32, i32)> {
+        let results = self.chunk_loader.receive_chunks();
+        let mut new_positions = Vec::new();
+
+        for result in results {
+            let pos = result.position;
+
+            // Don't insert if it's now outside render distance
+            let (cx, cz) = self.last_center;
+            if (pos.0 - cx).abs() > self.render_distance || (pos.1 - cz).abs() > self.render_distance {
+                continue;
+            }
+
+            self.chunks.insert(pos, result.chunk);
+            new_positions.push(pos);
+        }
+
+        // Mark neighbors dirty for new chunks
+        for (cx, cz) in &new_positions {
+            for (dx, dz) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+                let neighbor_pos = (cx + dx, cz + dz);
+                if let Some(neighbor) = self.chunks.get_mut(&neighbor_pos) {
+                    neighbor.dirty = true;
+                }
+            }
+        }
+
+        new_positions
     }
 
     pub fn update_chunks(&mut self, camera_pos: (f32, f32)) {
         let chunk_x = (camera_pos.0 / CHUNK_SIZE as f32).floor() as i32;
         let chunk_z = (camera_pos.1 / CHUNK_SIZE as f32).floor() as i32;
+        self.last_center = (chunk_x, chunk_z);
 
-        // Save modified chunks before unloading
+        // Unload chunks outside render distance (queue saves in background)
         let chunks_to_unload: Vec<(i32, i32)> = self.chunks
             .iter()
             .filter(|(&(cx, cz), _)| {
@@ -102,17 +139,25 @@ impl World {
             .collect();
 
         for pos in chunks_to_unload {
-            if let Some(chunk) = self.chunks.get(&pos) {
+            if let Some(chunk) = self.chunks.remove(&pos) {
                 if chunk.modified {
-                    if let Err(e) = chunk_storage::save_chunk(chunk) {
-                        eprintln!("Failed to save chunk {:?}: {}", pos, e);
-                    }
+                    // Queue save in background thread
+                    self.chunk_loader.queue_save(pos, chunk.blocks, chunk.modified);
                 }
             }
-            self.chunks.remove(&pos);
         }
 
-        self.generate_chunks(chunk_x, chunk_z);
+        // Queue missing chunks to load in background
+        self.queue_missing_chunks(chunk_x, chunk_z);
+
+        // Receive completed chunks (limited per frame)
+        let new_positions = self.receive_loaded_chunks();
+
+        // Lightweight light propagation for each new chunk
+        // Only blends light with immediate neighbors, not all chunks
+        for pos in new_positions {
+            self.propagate_light_for_chunk(pos);
+        }
     }
 
     pub fn get_block_world(&self, x: i32, y: i32, z: i32) -> BlockType {
@@ -236,7 +281,101 @@ impl World {
         }
     }
 
-    /// Propagate light across chunk boundaries.
+    /// Lightweight light propagation for a single newly-loaded chunk.
+    /// Only propagates between this chunk and its 4 immediate neighbors.
+    /// Much faster than full propagation: O(4 * height * size) vs O(15 * N * height * size)
+    fn propagate_light_for_chunk(&mut self, pos: (i32, i32)) {
+        let (cx, cz) = pos;
+
+        // Do a few passes to let light spread across the boundary
+        for _ in 0..3 {
+            // Propagate from new chunk to neighbors
+            self.propagate_edge_to_neighbor(cx, cz, 1, 0);  // to right
+            self.propagate_edge_to_neighbor(cx, cz, -1, 0); // to left
+            self.propagate_edge_to_neighbor(cx, cz, 0, 1);  // to front
+            self.propagate_edge_to_neighbor(cx, cz, 0, -1); // to back
+
+            // Propagate from neighbors back to new chunk
+            self.propagate_edge_to_neighbor(cx + 1, cz, -1, 0);
+            self.propagate_edge_to_neighbor(cx - 1, cz, 1, 0);
+            self.propagate_edge_to_neighbor(cx, cz + 1, 0, -1);
+            self.propagate_edge_to_neighbor(cx, cz - 1, 0, 1);
+        }
+    }
+
+    /// Propagate light from one chunk's edge to its neighbor in the given direction.
+    fn propagate_edge_to_neighbor(&mut self, cx: i32, cz: i32, dx: i32, dz: i32) {
+        let neighbor_pos = (cx + dx, cz + dz);
+
+        if !self.chunks.contains_key(&neighbor_pos) {
+            return;
+        }
+
+        // Collect edge lights from source chunk
+        let edge_lights: Vec<(usize, usize, u8)> = {
+            if let Some(chunk) = self.chunks.get(&(cx, cz)) {
+                let mut lights = Vec::new();
+                for y in 0..CHUNK_HEIGHT {
+                    if dx == 1 {
+                        // Right edge: x = CHUNK_SIZE - 1
+                        for z in 0..CHUNK_SIZE {
+                            let light = chunk.light_levels[CHUNK_SIZE - 1][y][z];
+                            if light > 1 {
+                                lights.push((y, z, light - 1));
+                            }
+                        }
+                    } else if dx == -1 {
+                        // Left edge: x = 0
+                        for z in 0..CHUNK_SIZE {
+                            let light = chunk.light_levels[0][y][z];
+                            if light > 1 {
+                                lights.push((y, z, light - 1));
+                            }
+                        }
+                    } else if dz == 1 {
+                        // Front edge: z = CHUNK_SIZE - 1
+                        for x in 0..CHUNK_SIZE {
+                            let light = chunk.light_levels[x][y][CHUNK_SIZE - 1];
+                            if light > 1 {
+                                lights.push((x, y, light - 1));
+                            }
+                        }
+                    } else if dz == -1 {
+                        // Back edge: z = 0
+                        for x in 0..CHUNK_SIZE {
+                            let light = chunk.light_levels[x][y][0];
+                            if light > 1 {
+                                lights.push((x, y, light - 1));
+                            }
+                        }
+                    }
+                }
+                lights
+            } else {
+                Vec::new()
+            }
+        };
+
+        // Apply lights to neighbor
+        if let Some(neighbor) = self.chunks.get_mut(&neighbor_pos) {
+            for (a, b, light) in edge_lights {
+                let changed = if dx == 1 {
+                    lighting::seed_light_and_propagate(neighbor, 0, a, b, light)
+                } else if dx == -1 {
+                    lighting::seed_light_and_propagate(neighbor, CHUNK_SIZE - 1, a, b, light)
+                } else if dz == 1 {
+                    lighting::seed_light_and_propagate(neighbor, a, b, 0, light)
+                } else {
+                    lighting::seed_light_and_propagate(neighbor, a, b, CHUNK_SIZE - 1, light)
+                };
+                if changed {
+                    neighbor.dirty = true;
+                }
+            }
+        }
+    }
+
+    /// Propagate light across chunk boundaries (full version for initial load/block changes).
     fn propagate_cross_chunk_lighting(&mut self, _dirty_positions: &[(i32, i32)]) {
         for _ in 0..15 {
             let mut any_changes = false;
@@ -371,7 +510,11 @@ impl World {
     }
 
     /// Saves all modified chunks to disk (call on game exit)
-    pub fn save_all_modified_chunks(&self) {
+    pub fn save_all_modified_chunks(&mut self) {
+        // First, wait for any pending background saves to complete
+        self.chunk_loader.shutdown();
+
+        // Then save all currently loaded modified chunks synchronously
         let mut saved_count = 0;
         for (pos, chunk) in &self.chunks {
             if chunk.modified {

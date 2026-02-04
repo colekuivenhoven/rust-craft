@@ -2,6 +2,7 @@ mod bird;
 mod block;
 mod camera;
 mod chunk;
+mod chunk_loader;
 mod chunk_storage;
 mod crafting;
 mod dropped_item;
@@ -151,7 +152,7 @@ impl ApplicationHandler for App {
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
         // Save all modified chunks before exiting
-        if let Some(state) = &self.state {
+        if let Some(state) = &mut self.state {
             log::info!("Saving world...");
             state.save_world();
         }

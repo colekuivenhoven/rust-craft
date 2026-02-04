@@ -1100,7 +1100,7 @@ impl State {
     }
 
     /// Saves all modified chunks to disk (call before exiting)
-    pub fn save_world(&self) {
+    pub fn save_world(&mut self) {
         self.world.save_all_modified_chunks();
     }
 
