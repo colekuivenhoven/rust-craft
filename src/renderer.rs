@@ -1381,6 +1381,45 @@ impl State {
         // === Debug Axes (top-right) ===
         self.build_debug_axes(&mut verts, screen_w, screen_h);
 
+        // === Player Position (below compass) ===
+        let pos_text = format!(
+            "X:{:.2}, Y:{:.2}, Z:{:.2}",
+            self.camera.position.x,
+            self.camera.position.y,
+            self.camera.position.z
+        );
+        let pos_color = [1.0, 1.0, 1.0, 0.9];
+        let pos_bg_color = [0.0, 0.0, 0.0, 0.5];
+        let pos_scale = 2.0;
+        let pos_char_w = 6.0 * pos_scale;
+        let pos_char_h = 7.0 * pos_scale;
+        let pos_text_width = pos_text.len() as f32 * pos_char_w;
+        // Position below compass (compass center_y=60, bg_radius=55, so bottom is ~115)
+        let pos_x = screen_w - pos_text_width - 14.0; // Right-aligned with padding
+        let pos_y = 130.0; // Below compass
+        // Background
+        bitmap_font::push_rect_px(
+            &mut verts,
+            pos_x - 4.0,
+            pos_y - 4.0,
+            pos_text_width + 8.0,
+            pos_char_h + 8.0,
+            pos_bg_color,
+            screen_w,
+            screen_h,
+        );
+        bitmap_font::draw_text_quads(
+            &mut verts,
+            &pos_text,
+            pos_x,
+            pos_y,
+            pos_scale,
+            pos_scale,
+            pos_color,
+            screen_w,
+            screen_h,
+        );
+
         let fill = [1.0, 1.0, 1.0, 0.10];
         let outline = [1.0, 1.0, 1.0, 0.85];
         let outline_selected = [1.0, 1.0, 1.0, 1.0];
