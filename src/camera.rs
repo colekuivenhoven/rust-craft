@@ -93,9 +93,9 @@ impl CameraController {
         );
         let in_water = body_block.is_water();
 
-        // Noclip mode: free flight with no collision, doubled speed
+        // Noclip mode: free flight with no collision, quadrupled speed
         if noclip {
-            let fly_speed = self.speed * 2.0;
+            let fly_speed = self.speed * 4.0;
 
             // Get movement direction (use camera direction for forward/backward)
             let forward = camera.get_horizontal_direction();

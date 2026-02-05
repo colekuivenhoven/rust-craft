@@ -15,6 +15,71 @@ pub const TREE_MAX_HEIGHT: usize = 12;     // Maximum trunk height (tall trees)
 pub const TREE_BRANCH_CHANCE: f64 = 0.6;   // Chance for trunk to branch near top (0.0 - 1.0)
 pub const TREE_TALL_CHANCE: f64 = 0.3;     // Chance for a tree to be tall variant (0.0 - 1.0)
 
+// Biome types for terrain generation
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum BiomeType {
+    Desert,
+    Forest,
+    Mountains,
+    Arctic,
+    Ocean,
+}
+
+// Biome weights for smooth blending between biomes
+#[derive(Clone, Copy, Debug)]
+pub struct BiomeWeights {
+    pub desert: f64,
+    pub forest: f64,
+    pub mountains: f64,
+    pub arctic: f64,
+    pub ocean: f64,
+}
+
+impl BiomeWeights {
+    pub fn new() -> Self {
+        Self {
+            desert: 0.0,
+            forest: 0.0,
+            mountains: 0.0,
+            arctic: 0.0,
+            ocean: 0.0,
+        }
+    }
+
+    pub fn normalize(&mut self) {
+        let total = self.desert + self.forest + self.mountains + self.arctic + self.ocean;
+        if total > 0.0 {
+            self.desert /= total;
+            self.forest /= total;
+            self.mountains /= total;
+            self.arctic /= total;
+            self.ocean /= total;
+        }
+    }
+
+    pub fn dominant(&self) -> BiomeType {
+        let mut max_weight = self.desert;
+        let mut dominant = BiomeType::Desert;
+
+        if self.forest > max_weight {
+            max_weight = self.forest;
+            dominant = BiomeType::Forest;
+        }
+        if self.mountains > max_weight {
+            max_weight = self.mountains;
+            dominant = BiomeType::Mountains;
+        }
+        if self.arctic > max_weight {
+            max_weight = self.arctic;
+            dominant = BiomeType::Arctic;
+        }
+        if self.ocean > max_weight {
+            dominant = BiomeType::Ocean;
+        }
+        dominant
+    }
+}
+
 pub struct Chunk {
     pub blocks: Box<[[[BlockType; CHUNK_SIZE]; CHUNK_HEIGHT]; CHUNK_SIZE]>,
     pub light_levels: Box<[[[u8; CHUNK_SIZE]; CHUNK_HEIGHT]; CHUNK_SIZE]>,
@@ -148,327 +213,399 @@ impl Chunk {
     }
 
     fn generate_terrain(&mut self) {
+        // === Noise generators ===
         let perlin = Perlin::new(42);
-        let biome_perlin = Perlin::new(44);     // very low frequency: ocean/land mask
-        let mountain_perlin = Perlin::new(45);  // low frequency: mountain mask
-        let detail_perlin = Perlin::new(46);    // higher frequency: small variation
-        let jagged_perlin = Perlin::new(47);    // high frequency: jagged mountain detail
+        let detail_perlin = Perlin::new(46);
+        let jagged_perlin = Perlin::new(47);
 
-        // Cave noise generators
-        let cave_perlin_1 = Perlin::new(100);   // Primary spaghetti cave noise
-        let cave_perlin_2 = Perlin::new(101);   // Secondary spaghetti cave noise (perpendicular)
-        let cheese_perlin = Perlin::new(102);   // Large cavern "cheese" caves
-        let cave_mask_perlin = Perlin::new(103); // Controls cave density in different areas
+        // Biome noise generators - using large scale for smooth regions
+        let temperature_perlin = Perlin::new(300);
+        let humidity_perlin = Perlin::new(301);
+        let continentalness_perlin = Perlin::new(302);
+        let mountain_perlin = Perlin::new(303);
 
-        // Sky island noise generators (3D)
-        let sky_island_perlin = Perlin::new(200);      // Primary 3D shape
-        let sky_island_mask_perlin = Perlin::new(201); // 2D mask for sparse placement
-        let sky_island_detail = Perlin::new(202);      // Detail variation
+        // Transition/vein noise - creates organic, connected patterns at biome boundaries
+        let vein_perlin = Perlin::new(600);
+        let vein_detail = Perlin::new(601);
+
+        // Sky island noise generators
+        let sky_island_perlin = Perlin::new(200);
+        let sky_island_mask_perlin = Perlin::new(201);
+        let sky_island_detail = Perlin::new(202);
+
+        // Oasis and special feature noise
+        let oasis_perlin = Perlin::new(400);
+        let glacier_perlin = Perlin::new(401);
+
+        // Ocean island noise
+        let island_perlin = Perlin::new(500);
 
         let world_offset_x = self.position.0 * CHUNK_SIZE as i32;
         let world_offset_z = self.position.1 * CHUNK_SIZE as i32;
-        let sea_level: isize = 28;
+        let sea_level: isize = 32;
+        let sea = sea_level as usize;
 
         fn clamp01(v: f64) -> f64 {
             v.max(0.0).min(1.0)
         }
 
-        // Smoothstep for soft biome transitions.
         fn smoothstep(edge0: f64, edge1: f64, x: f64) -> f64 {
             let t = clamp01((x - edge0) / (edge1 - edge0));
             t * t * (3.0 - 2.0 * t)
         }
 
+        fn smootherstep(edge0: f64, edge1: f64, x: f64) -> f64 {
+            let t = clamp01((x - edge0) / (edge1 - edge0));
+            t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
+        }
+
+        // Store biome data for later use
+        let mut column_biomes: [[BiomeWeights; CHUNK_SIZE]; CHUNK_SIZE] = [[BiomeWeights::new(); CHUNK_SIZE]; CHUNK_SIZE];
+
+        // === First pass: Generate base terrain with biomes ===
         for x in 0..CHUNK_SIZE {
             for z in 0..CHUNK_SIZE {
                 let world_x = (world_offset_x + x as i32) as f64;
                 let world_z = (world_offset_z + z as i32) as f64;
 
-                // --- Large-scale biome masks ---
-                // Ocean mask: 0 = deep ocean, 1 = inland.
-                let biome_scale = 0.0012; // Reduced from 0.0035 for ~3x larger oceans/continents
-                let biome_raw = (biome_perlin.get([world_x * biome_scale, world_z * biome_scale]) + 1.0) * 0.5;
-                let inland = smoothstep(0.35, 0.55, biome_raw); // Push more area into ocean while keeping smooth shores.
+                // === Sample biome parameters ===
+                let biome_scale = 0.0025; // 0.0025 for testing, 0.00025 for continent-sized regions
 
-                // Mountain mask: 0 = no mountains, 1 = mountains.
-                let mountain_scale = 0.002; // Reduced from 0.006 for ~3x larger mountain ranges
-                let mountain_raw = (mountain_perlin.get([world_x * mountain_scale, world_z * mountain_scale]) + 1.0) * 0.5;
-                let mountains = smoothstep(0.60, 0.80, mountain_raw) * inland; // Only allow strong mountains well inland.
+                let raw_temperature = (temperature_perlin.get([world_x * biome_scale, world_z * biome_scale]) + 1.0) * 0.5;
+                let raw_humidity = (humidity_perlin.get([world_x * biome_scale * 1.1, world_z * biome_scale * 1.1 + 1000.0]) + 1.0) * 0.5;
+                let raw_mountainess = (mountain_perlin.get([world_x * biome_scale * 1.5, world_z * biome_scale * 1.5 + 3000.0]) + 1.0) * 0.5;
 
-                // --- Base terrain (plains) + local detail ---
-                let base_scale = 0.007; // Reduced from 0.02 for ~3x larger terrain features
+                // Continentalness with wider coastal zone
+                let continental_scale = biome_scale * 0.7;
+                let raw_continentalness = (continentalness_perlin.get([world_x * continental_scale, world_z * continental_scale + 2000.0]) + 1.0) * 0.5;
+
+                // === Calculate biome weights ===
+                let mut biome_weights = BiomeWeights::new();
+
+                // Ocean: wider transition zone (0.25 - 0.50)
+                if raw_continentalness < 0.25 {
+                    biome_weights.ocean = 1.0;
+                } else if raw_continentalness < 0.50 {
+                    biome_weights.ocean = smootherstep(0.50, 0.25, raw_continentalness);
+                }
+
+                let land_factor = 1.0 - biome_weights.ocean;
+
+                if land_factor > 0.0 {
+                    // Arctic: cold temperatures
+                    let arctic_factor = smootherstep(0.35, 0.15, raw_temperature);
+                    biome_weights.arctic = arctic_factor * land_factor;
+
+                    // Desert: hot, dry, and inland (but NOT near ocean at all)
+                    let desert_temp = smootherstep(0.55, 0.75, raw_temperature);
+                    let desert_dry = smootherstep(0.50, 0.25, raw_humidity);
+                    // Deserts require high continentalness to stay away from water
+                    let desert_inland = smootherstep(0.60, 0.80, raw_continentalness);
+                    biome_weights.desert = desert_temp * desert_dry * desert_inland * land_factor * (1.0 - biome_weights.arctic);
+
+                    // Mountains
+                    let mountain_factor = smootherstep(0.55, 0.75, raw_mountainess);
+                    let remaining = land_factor * (1.0 - biome_weights.arctic) * (1.0 - biome_weights.desert * 0.8);
+                    biome_weights.mountains = mountain_factor * remaining;
+
+                    // Forest: everything else on land
+                    let used = biome_weights.arctic + biome_weights.desert + biome_weights.mountains;
+                    biome_weights.forest = (land_factor - used).max(0.0);
+                }
+
+                biome_weights.normalize();
+                column_biomes[x][z] = biome_weights;
+
+                let dominant_biome = biome_weights.dominant();
+
+                // === Vein noise for organic biome transitions ===
+                // This creates connected, branching patterns instead of polka dots
+                let vein_scale = 0.02; // Medium frequency for visible veins
+                let vein_n1 = vein_perlin.get([world_x * vein_scale, world_z * vein_scale]);
+                let vein_n2 = vein_detail.get([world_x * vein_scale * 2.3, world_z * vein_scale * 2.3]);
+                // Combine to create fractal vein pattern
+                let vein_value = (vein_n1 * 0.7 + vein_n2 * 0.3 + 1.0) * 0.5; // 0-1
+
+                // === Calculate terrain height ===
+                let base_scale = 0.006;
                 let base_n = (perlin.get([world_x * base_scale, world_z * base_scale]) + 1.0) * 0.5;
-                let base_height = 18.0 + base_n * 18.0; // ~18..36
 
-                let detail_scale = 0.02; // Reduced from 0.06 for smoother terrain
-                let detail = detail_perlin.get([world_x * detail_scale, world_z * detail_scale]) * 2.5;
+                let detail_scale = 0.06;
+                let detail = detail_perlin.get([world_x * detail_scale, world_z * detail_scale]) * 1.5;
 
-                // --- Ocean shaping ---
-                let ocean_drop = (1.0 - inland) * 16.0; // Pull terrain down near coasts/ocean.
+                // === Ocean islands with GRADUAL slopes ===
+                let island_scale = 0.008; // Smaller scale = larger, smoother islands
+                let island_noise = (island_perlin.get([world_x * island_scale + 5000.0, world_z * island_scale + 5000.0]) + 1.0) * 0.5;
 
-                // --- Mountain shaping (jagged peaks) ---
-                // Use higher frequency noise for sharper, more jagged peaks
-                let ridge_scale = 0.015; // Reduced from 0.04 for wider mountain ridges
-                let ridge = (perlin.get([world_x * ridge_scale, world_z * ridge_scale]).abs()) * 15.0;
+                // Gradual island bump - squared falloff for smooth slopes
+                let island_bump = if biome_weights.ocean > 0.5 && island_noise > 0.65 {
+                    let island_strength = smootherstep(0.65, 0.85, island_noise);
+                    // Squared for gradual slope, not linear
+                    island_strength * island_strength * 22.0
+                } else {
+                    0.0
+                };
 
-                // Add extra high-frequency jagged detail for sharp, craggy look
-                let jagged_scale = 0.04; // Reduced from 0.12 for larger jagged features
-                let jagged = (jagged_perlin.get([world_x * jagged_scale, world_z * jagged_scale]).abs()) * 8.0;
+                // === Height per biome ===
+                // Ocean floor with gradual island rise
+                let ocean_base = 12.0 + base_n * 15.0;
+                let ocean_height = ocean_base + island_bump;
 
-                // Taller mountains: base 35 + up to 23 from noise = max ~58 blocks above base
-                let mountain_lift = mountains * (35.0 + ridge + jagged);
+                // Desert: ALWAYS well above sea level (minimum 38)
+                let desert_height = (40.0 + base_n * 5.0 + detail * 0.2).max(sea_level as f64 + 8.0);
 
-                let height_f = base_height + detail + mountain_lift - ocean_drop;
-                let height_i = height_f.round() as isize;
+                // Forest: gentle rolling hills
+                let forest_height = 36.0 + base_n * 8.0 + detail;
 
-                let height = height_i
-                    .clamp(0, (CHUNK_HEIGHT as isize) - 1) as usize;
+                // Arctic: varied terrain
+                let arctic_height = 35.0 + base_n * 10.0 + detail;
 
-                // Surface palette with biome-based block selection
-                let sea = sea_level as usize;
+                // Mountains: dramatic peaks
+                let ridge_scale = 0.015;
+                let ridge = perlin.get([world_x * ridge_scale, world_z * ridge_scale]).abs() * 15.0;
+                let jagged_scale = 0.04;
+                let jagged = jagged_perlin.get([world_x * jagged_scale, world_z * jagged_scale]).abs() * 8.0;
+                let mountain_height = 42.0 + base_n * 12.0 + ridge + jagged + detail;
 
-                // Jagged transition noise for clumpy block type boundaries
-                let transition_scale = 0.05; // Reduced from 0.15 for larger block type patches
+                // === Blend heights using biome weights ===
+                let mut blended_height =
+                    biome_weights.ocean * ocean_height +
+                    biome_weights.desert * desert_height +
+                    biome_weights.forest * forest_height +
+                    biome_weights.mountains * mountain_height +
+                    biome_weights.arctic * arctic_height;
+
+                // === CRITICAL: Ensure desert areas stay above sea level ===
+                // If desert has significant weight, pull height UP toward desert height
+                if biome_weights.desert > 0.2 {
+                    let desert_pull = smootherstep(0.2, 0.6, biome_weights.desert);
+                    let min_desert_height = sea_level as f64 + 6.0;
+                    blended_height = blended_height.max(min_desert_height * desert_pull + blended_height * (1.0 - desert_pull));
+                }
+
+                // === Coastal smoothing - WIDER zone with gentler slopes ===
+                let height_f = if raw_continentalness > 0.25 && raw_continentalness < 0.55 {
+                    // Coastal transition zone (0.25 - 0.55 = 30% of range)
+                    let shore_t = smootherstep(0.25, 0.55, raw_continentalness);
+                    // Start from near ocean floor, not sea level
+                    let min_shore = 20.0 + base_n * 8.0; // Underwater starting point
+                    let max_shore = blended_height;
+                    min_shore + (max_shore - min_shore) * shore_t
+                } else {
+                    blended_height
+                };
+
+                let height = (height_f.round() as isize).clamp(1, CHUNK_HEIGHT as isize - 1) as usize;
+
+                // === Surface block noise for variations ===
+                let transition_scale = 0.03;
                 let transition_noise = (detail_perlin.get([world_x * transition_scale, world_z * transition_scale]) + 1.0) * 0.5;
-                let transition_noise_2 = (jagged_perlin.get([world_x * transition_scale * 1.5, world_z * transition_scale * 1.5]) + 1.0) * 0.5;
-                let jagged_offset = ((transition_noise * 8.0) + (transition_noise_2 * 4.0)) as isize - 6; // -6 to +6 block variation
+                let transition_noise_2 = (jagged_perlin.get([world_x * transition_scale * 1.3, world_z * transition_scale * 1.3]) + 1.0) * 0.5;
+                let jagged_offset = ((transition_noise * 5.0) + (transition_noise_2 * 3.0)) as isize - 4;
 
-                // Narrow sand band right at coast edge (3-6 blocks from water)
-                // inland 0.0-0.15 is the immediate coast edge
-                let is_beach = inland > 0.0 && inland < 0.15;
-
-                // Mountain stone threshold with jagged variation - raised to allow grass higher
-                let mountain_stone_threshold = sea_level + 18 + jagged_offset;
-                let is_mountain_zone = mountains > 0.15;
-
-                // Snow threshold - snow appears on the highest mountain peaks
-                let snow_threshold = sea_level + 45 + jagged_offset; // Snow at very high elevations
-
-                // Extra noise for grass patches above stone threshold
+                let snow_threshold = sea_level + 38 + jagged_offset;
+                let stone_threshold = sea_level + 12 + jagged_offset;
+                let arctic_snow_threshold = sea_level + 3 + jagged_offset;
                 let grass_patch_noise = transition_noise * 0.7 + transition_noise_2 * 0.3;
+                let ice_noise = transition_noise * transition_noise_2;
 
+                // === Fill terrain column with ORGANIC transitions ===
                 for y in 0..=height {
                     let y_i = y as isize;
+                    let depth_from_surface = height - y;
 
-                    // Underwater blocks - mostly sand with sparse deep stone
-                    if y <= sea {
-                        // Very deep underwater = sparse stone patches, otherwise sand
-                        let deep_threshold = (sea_level - 15) as usize; // Deeper threshold
-                        // Use noise to make stone sparse (only ~20% of deep areas)
-                        let stone_noise = transition_noise * transition_noise_2;
-                        let is_deep_stone = y < deep_threshold && stone_noise > 0.4;
-                        self.blocks[x][y][z] = if is_deep_stone {
-                            BlockType::Stone
-                        } else {
-                            BlockType::Sand
-                        };
-                    }
-                    // Above water surface blocks
-                    else if y == height {
-                        // Snow-capped mountain peaks
-                        if is_mountain_zone && y_i > snow_threshold {
-                            self.blocks[x][y][z] = BlockType::Snow;
-                        }
-                        // Mountains: stone surface with jagged grass patches
-                        else if is_mountain_zone && y_i > mountain_stone_threshold {
-                            // How far above threshold determines grass chance
-                            let blocks_above = (y_i - mountain_stone_threshold) as f64;
-                            // Grass can appear up to 8 blocks above threshold with decreasing probability
-                            let grass_chance_threshold = 0.3 + (blocks_above * 0.1); // 0.3 at threshold, 1.1 at +8
-                            if grass_patch_noise > grass_chance_threshold && blocks_above < 8.0 {
-                                self.blocks[x][y][z] = BlockType::Grass;
+                    let block = if depth_from_surface == 0 && y > sea {
+                        // === SURFACE BLOCK with organic vein transitions ===
+
+                        // Check for transition zones between biomes
+                        // Use vein_value to create connected patterns, not random dots
+
+                        // Forest-Desert transition: dirt veins extending into desert
+                        if biome_weights.desert > 0.15 && biome_weights.forest > 0.15 {
+                            // In the transition zone
+                            let desert_dominance = biome_weights.desert / (biome_weights.desert + biome_weights.forest);
+                            // Vein threshold shifts based on dominance
+                            // More desert = need higher vein value to get grass
+                            let grass_threshold = 0.3 + desert_dominance * 0.5;
+                            if vein_value > grass_threshold {
+                                BlockType::Grass // Grass veins into desert
                             } else {
-                                self.blocks[x][y][z] = BlockType::Stone;
+                                BlockType::Sand
                             }
                         }
-                        // Beach: narrow sand band at coast edge with jagged grass patches
-                        else if is_beach {
-                            // Grass can intrude into beach with decreasing probability toward water
-                            // inland 0.0 = water edge, 0.15 = beach/grass boundary
-                            let beach_depth = inland / 0.15; // 0.0 at water, 1.0 at grass
-                            // More aggressive thresholds: grass intrudes significantly
-                            // Near grass boundary: 90% grass, near water: 35% grass
-                            let grass_intrusion_threshold = 0.65 - (beach_depth * 0.55);
-                            if grass_patch_noise > grass_intrusion_threshold {
-                                self.blocks[x][y][z] = BlockType::Grass;
+                        // Forest-Mountain transition
+                        else if biome_weights.mountains > 0.15 && biome_weights.forest > 0.15 {
+                            let mountain_dominance = biome_weights.mountains / (biome_weights.mountains + biome_weights.forest);
+                            if y_i > snow_threshold {
+                                BlockType::Snow
+                            } else if y_i > stone_threshold {
+                                let stone_threshold_here = 0.3 + mountain_dominance * 0.4;
+                                if vein_value > stone_threshold_here { BlockType::Grass } else { BlockType::Stone }
                             } else {
-                                self.blocks[x][y][z] = BlockType::Sand;
+                                BlockType::Grass
                             }
                         }
-                        // Default: grass everywhere else
+                        // Forest-Arctic transition
+                        else if biome_weights.arctic > 0.15 && biome_weights.forest > 0.15 {
+                            let arctic_dominance = biome_weights.arctic / (biome_weights.arctic + biome_weights.forest);
+                            let snow_threshold_here = 0.3 + arctic_dominance * 0.5;
+                            if vein_value < snow_threshold_here { BlockType::Snow } else { BlockType::Grass }
+                        }
+                        // Pure dominant biome
                         else {
-                            self.blocks[x][y][z] = BlockType::Grass;
+                            match dominant_biome {
+                                BiomeType::Desert => BlockType::Sand,
+                                BiomeType::Forest => BlockType::Grass,
+                                BiomeType::Ocean => {
+                                    if height > sea + 3 { BlockType::Grass } else { BlockType::Sand }
+                                },
+                                BiomeType::Mountains => {
+                                    if y_i > snow_threshold {
+                                        BlockType::Snow
+                                    } else if y_i > stone_threshold {
+                                        let blocks_above = (y_i - stone_threshold) as f64;
+                                        if grass_patch_noise > 0.35 + (blocks_above * 0.06) && blocks_above < 12.0 {
+                                            BlockType::Grass
+                                        } else {
+                                            BlockType::Stone
+                                        }
+                                    } else {
+                                        BlockType::Grass
+                                    }
+                                },
+                                BiomeType::Arctic => {
+                                    if y_i > arctic_snow_threshold || ice_noise > 0.55 {
+                                        BlockType::Snow
+                                    } else if ice_noise > 0.25 {
+                                        BlockType::Ice
+                                    } else {
+                                        BlockType::Snow
+                                    }
+                                },
+                            }
                         }
-                    }
-                    // Below surface blocks
-                    else {
-                        let depth_below_surface = height - y;
+                    } else if depth_from_surface == 0 && y <= sea {
+                        // Underwater surface
+                        BlockType::Sand
+                    } else if depth_from_surface <= 3 {
+                        // Near-surface with vein transitions
+                        if biome_weights.desert > 0.15 && biome_weights.forest > 0.15 {
+                            let desert_dominance = biome_weights.desert / (biome_weights.desert + biome_weights.forest);
+                            let dirt_threshold = 0.3 + desert_dominance * 0.5;
+                            if vein_value > dirt_threshold { BlockType::Dirt } else { BlockType::Sand }
+                        } else {
+                            match dominant_biome {
+                                BiomeType::Desert => BlockType::Sand,
+                                BiomeType::Forest => BlockType::Dirt,
+                                BiomeType::Ocean => BlockType::Sand,
+                                BiomeType::Mountains => {
+                                    if y_i > stone_threshold - 4 { BlockType::Stone } else { BlockType::Dirt }
+                                },
+                                BiomeType::Arctic => {
+                                    if y_i > arctic_snow_threshold { BlockType::Stone } else { BlockType::Dirt }
+                                },
+                            }
+                        }
+                    } else if depth_from_surface <= 6 {
+                        match dominant_biome {
+                            BiomeType::Desert => BlockType::Sand,
+                            _ => BlockType::Stone,
+                        }
+                    } else {
+                        BlockType::Stone
+                    };
 
-                        // Mountains: mostly stone with jagged transition
-                        if is_mountain_zone && y_i > mountain_stone_threshold - 4 {
-                            self.blocks[x][y][z] = BlockType::Stone;
-                        }
-                        // Near surface (1-3 blocks down)
-                        else if depth_below_surface <= 3 {
-                            // Beach areas get sand underneath, unless grass intruded
-                            if is_beach {
-                                let beach_depth = inland / 0.15;
-                                let grass_intrusion_threshold = 0.65 - (beach_depth * 0.55);
-                                if grass_patch_noise > grass_intrusion_threshold {
-                                    self.blocks[x][y][z] = BlockType::Dirt; // Under grass
+                    self.blocks[x][y][z] = block;
+                }
+
+                // === Fill water ===
+                // Desert should NEVER have water (except oases)
+                let is_desert_area = biome_weights.desert > 0.3;
+
+                if !is_desert_area {
+                    for y in height + 1..sea {
+                        if self.blocks[x][y][z] == BlockType::Air {
+                            if dominant_biome == BiomeType::Arctic && y == sea - 1 {
+                                let ice_gap_noise = (glacier_perlin.get([world_x * 0.05, world_z * 0.05]) + 1.0) * 0.5;
+                                if ice_gap_noise > 0.15 {
+                                    self.blocks[x][y][z] = BlockType::Ice;
                                 } else {
-                                    self.blocks[x][y][z] = BlockType::Sand; // Under sand
+                                    self.blocks[x][y][z] = BlockType::Water;
                                 }
                             } else {
-                                self.blocks[x][y][z] = BlockType::Dirt;
+                                self.blocks[x][y][z] = BlockType::Water;
                             }
                         }
-                        // Deeper underground
-                        else {
-                            self.blocks[x][y][z] = BlockType::Stone;
+                    }
+                }
+
+                // === Desert Oases ===
+                if dominant_biome == BiomeType::Desert && biome_weights.desert > 0.7 {
+                    let oasis_scale = 0.006;
+                    let oasis_noise = (oasis_perlin.get([world_x * oasis_scale, world_z * oasis_scale]) + 1.0) * 0.5;
+
+                    if oasis_noise > 0.90 {
+                        let oasis_strength = smoothstep(0.90, 0.97, oasis_noise);
+                        let depression_depth = (oasis_strength * 3.0) as usize + 1;
+
+                        let water_y = height.saturating_sub(depression_depth);
+                        if water_y > 10 && height > sea {
+                            for dy in 0..=depression_depth {
+                                let y = water_y + dy;
+                                if y < CHUNK_HEIGHT {
+                                    if dy < depression_depth / 2 + 1 {
+                                        self.blocks[x][y][z] = BlockType::Water;
+                                    } else {
+                                        self.blocks[x][y][z] = BlockType::Dirt;
+                                    }
+                                }
+                            }
+                            if height < CHUNK_HEIGHT {
+                                self.blocks[x][height][z] = BlockType::Grass;
+                            }
                         }
                     }
                 }
 
-                // Fill oceans/lakes.
-                for y in 0..(sea_level as usize) {
-                    if self.blocks[x][y][z] == BlockType::Air {
-                        self.blocks[x][y][z] = BlockType::Water;
+                // === Arctic Glaciers ===
+                if dominant_biome == BiomeType::Arctic && height <= sea {
+                    let glacier_scale = 0.015;
+                    let glacier_noise = (glacier_perlin.get([world_x * glacier_scale, world_z * glacier_scale]) + 1.0) * 0.5;
+
+                    if glacier_noise > 0.50 {
+                        let glacier_height = ((glacier_noise - 0.50) * 16.0) as usize;
+                        for gy in 0..glacier_height {
+                            let y = sea + gy;
+                            if y < CHUNK_HEIGHT {
+                                let taper = 1.0 - (gy as f64 / glacier_height.max(1) as f64);
+                                let taper_noise = (jagged_perlin.get([world_x * 0.08, y as f64 * 0.08, world_z * 0.08]) + 1.0) * 0.5;
+                                if taper_noise < taper {
+                                    self.blocks[x][y][z] = BlockType::Ice;
+                                }
+                            }
+                        }
                     }
                 }
             }
         }
 
-        // === Cave Generation ===
-        // Carve caves using 3D ridged noise for natural, connected tunnel networks
-        // Uses multiple layers: winding tunnels, large caverns, and vertical shafts
+        // NOTE: Cave generation removed - will be re-added later once biomes are stable
 
-        let cave_floor = 3;  // Don't carve below this (bedrock layer)
-        let surface_opening_perlin = Perlin::new(104);  // Controls where caves can reach surface
-        let cave_worm_perlin = Perlin::new(105);  // Additional worm-like cave layer
-        let vertical_shaft_perlin = Perlin::new(106);  // Vertical shafts connecting caves
-
+        // === Tree Generation with biome-aware density ===
         for x in 0..CHUNK_SIZE {
             for z in 0..CHUNK_SIZE {
                 let world_x = (world_offset_x + x as i32) as f64;
                 let world_z = (world_offset_z + z as i32) as f64;
 
-                // Find surface height at this column
-                let mut surface_y = 0;
-                for y in (0..CHUNK_HEIGHT).rev() {
-                    if self.blocks[x][y][z] != BlockType::Air && self.blocks[x][y][z] != BlockType::Water {
-                        surface_y = y;
-                        break;
-                    }
+                let biome_weights = column_biomes[x][z];
+                let dominant_biome = biome_weights.dominant();
+
+                // Skip arctic entirely
+                if dominant_biome == BiomeType::Arctic {
+                    continue;
                 }
 
-                // Regional cave density mask - some areas have more caves than others
-                let cave_density = (cave_mask_perlin.get([world_x * 0.002, world_z * 0.002]) + 1.0) * 0.5;
-
-                // Surface opening chance - very rare spots where caves can reach surface
-                let surface_opening_noise = surface_opening_perlin.get([world_x * 0.003, world_z * 0.003]);
-                let allow_surface_opening = surface_opening_noise > 0.95; // Only ~2.5% of terrain can have openings
-                let min_surface_depth = if allow_surface_opening { 2 } else { 8 }; // Even openings stay 2 blocks down, normal caves 8 blocks
-
-                for y in cave_floor..CHUNK_HEIGHT {
-                    // Skip air and water blocks
-                    let block = self.blocks[x][y][z];
-                    if block == BlockType::Air || block == BlockType::Water {
-                        continue;
-                    }
-
-                    // Don't carve too close to surface (unless this is an opening zone)
-                    let depth_below_surface = surface_y.saturating_sub(y);
-                    if depth_below_surface < min_surface_depth {
-                        continue;
-                    }
-
-                    let world_y = y as f64;
-
-                    // === Primary Cave Network (Ridged Noise) ===
-                    // Using ridged noise creates more natural, connected tunnel networks
-                    let cave_scale_1 = 0.025;
-                    let cave_noise_1 = cave_perlin_1.get([
-                        world_x * cave_scale_1,
-                        world_y * cave_scale_1 * 0.4,  // Stretch vertically for horizontal bias
-                        world_z * cave_scale_1
-                    ]);
-                    // Ridged noise: invert the absolute value to create ridges (tunnels along ridges)
-                    let ridged_1 = 1.0 - cave_noise_1.abs() * 2.0;
-
-                    // Second layer at different scale for variety
-                    let cave_scale_2 = 0.04;
-                    let cave_noise_2 = cave_perlin_2.get([
-                        world_x * cave_scale_2 + 100.0,  // Offset to decorrelate
-                        world_y * cave_scale_2 * 0.5,
-                        world_z * cave_scale_2 + 100.0
-                    ]);
-                    let ridged_2 = 1.0 - cave_noise_2.abs() * 2.0;
-
-                    // Combine ridged noise layers - tunnel forms where ridged value is high
-                    let combined_ridged = (ridged_1 * 0.6 + ridged_2 * 0.4).max(ridged_1.max(ridged_2) * 0.8);
-                    let tunnel_threshold = 0.75 + (1.0 - cave_density) * 0.12; // Increased from 0.65 for fewer caves
-                    let is_tunnel = combined_ridged > tunnel_threshold && cave_density > 0.3;
-
-                    // === Worm Caves (meandering tunnels) ===
-                    // Creates longer, more connected cave systems
-                    let worm_scale = 0.018;
-                    let worm_noise = cave_worm_perlin.get([
-                        world_x * worm_scale,
-                        world_y * worm_scale * 0.3,  // Very horizontal bias
-                        world_z * worm_scale
-                    ]);
-                    let worm_ridged = 1.0 - worm_noise.abs() * 1.8;
-                    let worm_threshold = 0.80 + (1.0 - cave_density) * 0.08; // Increased from 0.72 for fewer caves
-                    let is_worm = worm_ridged > worm_threshold && cave_density > 0.4;
-
-                    // === Cheese Caves (larger caverns) ===
-                    let cheese_scale = 0.012;
-                    let cheese_value = cheese_perlin.get([
-                        world_x * cheese_scale,
-                        world_y * cheese_scale * 0.5,
-                        world_z * cheese_scale
-                    ]);
-
-                    // Cheese caves stronger at lower elevations
-                    let cheese_y_factor = (1.0 - (world_y / 35.0).min(1.0)).max(0.0);
-                    let cheese_threshold = 0.60 + (1.0 - cave_density) * 0.12 - cheese_y_factor * 0.10; // Increased from 0.50 for fewer caves
-                    let is_cheese = cheese_value > cheese_threshold && cave_density > 0.45;
-
-                    // === Vertical Shafts (connect cave levels) ===
-                    let shaft_scale = 0.05;
-                    let shaft_noise = vertical_shaft_perlin.get([
-                        world_x * shaft_scale,
-                        world_z * shaft_scale
-                    ]);
-                    // Shafts are rare but connect caves vertically - must be deep underground
-                    let is_shaft = shaft_noise > 0.90 && y < surface_y.saturating_sub(15); // Increased threshold, deeper requirement
-
-                    // Carve the cave
-                    if is_tunnel || is_worm || is_cheese || is_shaft {
-                        // Don't carve through sand underwater (prevents ocean flooding caves)
-                        if block == BlockType::Sand && y < sea_level as usize {
-                            continue;
-                        }
-                        self.blocks[x][y][z] = BlockType::Air;
-                    }
-                }
-            }
-        }
-
-        // === Tree Generation ===
-        for x in 0..CHUNK_SIZE {
-            for z in 0..CHUNK_SIZE {
-                let world_x = (world_offset_x + x as i32) as f64;
-                let world_z = (world_offset_z + z as i32) as f64;
-
-                // Recalculate biome values for tree placement
-                let biome_scale = 0.0035;
-                let biome_raw = (biome_perlin.get([world_x * biome_scale, world_z * biome_scale]) + 1.0) * 0.5;
-                let inland = smoothstep(0.35, 0.55, biome_raw);
-
-                // Find grass surface for tree placement
-                // Trees should only spawn on Grass blocks (original terrain surface, not cave ceilings)
+                // Find grass surface
                 let mut height = 0;
                 let mut found_grass = false;
                 for y in (0..CHUNK_HEIGHT).rev() {
@@ -479,109 +616,122 @@ impl Chunk {
                     }
                 }
 
-                // Skip if no grass found (underwater, cave, etc.)
                 if !found_grass {
                     continue;
                 }
 
-                let sea = sea_level as usize;
+                let max_tree_space = TREE_MAX_HEIGHT + 4;
 
-                // Tree generation with variable height and occasional branching
-                let max_tree_space = TREE_MAX_HEIGHT + 4; // trunk + leaves
-
-                // Avoid trees in/near oceans (require inlandness) and keep them above sea level.
                 if height > sea && height < CHUNK_HEIGHT - max_tree_space && x > 3 && x < CHUNK_SIZE - 3 && z > 3 && z < CHUNK_SIZE - 3 {
-                    // Reduce trees near coasts.
-                    if inland > 0.55 {
-                        let tree_noise = perlin.get([world_x * 0.02, world_z * 0.02]); // Reduced from 0.1 for larger forest patches
-                        if tree_noise > 0.25 { // Lowered from 0.7 for more frequent trees
-                            // Check if there's already a tree trunk within 2 blocks (prevents adjacent trees)
-                            let mut too_close_to_tree = false;
-                            'check: for check_x in x.saturating_sub(2)..=(x + 2).min(CHUNK_SIZE - 1) {
-                                for check_z in z.saturating_sub(2)..=(z + 2).min(CHUNK_SIZE - 1) {
-                                    // Skip checking the current position
-                                    if check_x == x && check_z == z {
-                                        continue;
-                                    }
-                                    // Check for wood at trunk level (height + 1)
-                                    if height + 1 < CHUNK_HEIGHT && self.blocks[check_x][height + 1][check_z] == BlockType::Wood {
-                                        too_close_to_tree = true;
-                                        break 'check;
-                                    }
+                    // === Tree density based on BIOME WEIGHT, not just dominant ===
+                    // Trees become sparser as forest weight decreases
+                    let forest_weight = biome_weights.forest;
+
+                    // Base threshold adjusted by forest weight
+                    // Pure forest: threshold 0.3 (fairly dense but not overwhelming)
+                    // Forest edge: threshold increases, fewer trees
+                    let base_threshold = match dominant_biome {
+                        BiomeType::Forest => 0.3 + (1.0 - forest_weight) * 0.5, // 0.3 to 0.8
+                        BiomeType::Mountains => 0.6,
+                        BiomeType::Desert => 0.95,
+                        BiomeType::Ocean => 0.7,
+                        BiomeType::Arctic => 0.95,
+                    };
+
+                    let height_variance = dominant_biome == BiomeType::Forest && forest_weight > 0.5;
+
+                    let tree_noise = perlin.get([world_x * 0.02, world_z * 0.02]);
+                    if tree_noise > base_threshold {
+                        // Minimum spacing - forests get slightly closer trees but not packed
+                        let min_spacing = if dominant_biome == BiomeType::Forest && forest_weight > 0.6 { 3 } else { 4 };
+                        let mut too_close = false;
+                        'check: for check_x in x.saturating_sub(min_spacing)..=(x + min_spacing).min(CHUNK_SIZE - 1) {
+                            for check_z in z.saturating_sub(min_spacing)..=(z + min_spacing).min(CHUNK_SIZE - 1) {
+                                if check_x == x && check_z == z {
+                                    continue;
+                                }
+                                if height + 1 < CHUNK_HEIGHT && self.blocks[check_x][height + 1][check_z] == BlockType::Wood {
+                                    too_close = true;
+                                    break 'check;
                                 }
                             }
+                        }
 
-                            if too_close_to_tree {
-                                continue; // Skip this tree, too close to another
+                        if too_close {
+                            continue;
+                        }
+
+                        let tree_seed = ((world_x as i64).wrapping_mul(73856093) ^ (world_z as i64).wrapping_mul(19349663)) as u64;
+                        let mut rng = StdRng::seed_from_u64(tree_seed);
+
+                        // Forest biome has much more height variation
+                        let trunk_height = if height_variance {
+                            // Forest: wide range from small bushes to tall trees
+                            let height_roll = rng.gen::<f64>();
+                            if height_roll < 0.2 {
+                                rng.gen_range(3..=5)  // Short
+                            } else if height_roll < 0.6 {
+                                rng.gen_range(5..=8)  // Medium
+                            } else if height_roll < 0.85 {
+                                rng.gen_range(8..=11) // Tall
+                            } else {
+                                rng.gen_range(11..=14) // Very tall
                             }
-
-                            // Use deterministic RNG based on world position for consistent tree generation
-                            let tree_seed = ((world_x as i64).wrapping_mul(73856093) ^ (world_z as i64).wrapping_mul(19349663)) as u64;
-                            let mut rng = StdRng::seed_from_u64(tree_seed);
-
-                            // Determine tree height - either normal or tall variant
+                        } else {
                             let is_tall = rng.gen::<f64>() < TREE_TALL_CHANCE;
-                            let trunk_height = if is_tall {
+                            if is_tall {
                                 rng.gen_range(TREE_MAX_HEIGHT - 2..=TREE_MAX_HEIGHT)
                             } else {
                                 rng.gen_range(TREE_MIN_HEIGHT..=TREE_MIN_HEIGHT + 2)
-                            };
-
-                            // Generate main trunk (1 block wide)
-                            for trunk_y in height + 1..=height + trunk_height {
-                                if trunk_y < CHUNK_HEIGHT {
-                                    self.blocks[x][trunk_y][z] = BlockType::Wood;
-                                }
                             }
+                        };
 
-                            // Determine where branching starts (last 2-3 blocks of trunk)
-                            let branch_start_y = height + trunk_height.saturating_sub(2);
+                        // Generate trunk
+                        for trunk_y in height + 1..=height + trunk_height {
+                            if trunk_y < CHUNK_HEIGHT {
+                                self.blocks[x][trunk_y][z] = BlockType::Wood;
+                            }
+                        }
 
-                            // Occasionally add branches near the top of the trunk
-                            let should_branch = rng.gen::<f64>() < TREE_BRANCH_CHANCE;
-                            if should_branch && trunk_height >= 5 {
-                                // Add 1-2 branch blocks adjacent to trunk near the top
-                                let num_branches = rng.gen_range(1..=3);
-                                for _ in 0..num_branches {
-                                    let branch_y = rng.gen_range(branch_start_y..=height + trunk_height);
-                                    if branch_y < CHUNK_HEIGHT {
-                                        // Pick a random adjacent direction for the branch
-                                        let directions: [(i32, i32); 4] = [(-1, 0), (1, 0), (0, -1), (0, 1)];
-                                        let (dx, dz) = directions[rng.gen_range(0..4)];
-                                        let bx = (x as i32 + dx) as usize;
-                                        let bz = (z as i32 + dz) as usize;
-                                        if bx < CHUNK_SIZE && bz < CHUNK_SIZE {
-                                            self.blocks[bx][branch_y][bz] = BlockType::Wood;
-                                        }
+                        // Branches for taller trees
+                        let branch_start_y = height + trunk_height.saturating_sub(2);
+                        let should_branch = rng.gen::<f64>() < TREE_BRANCH_CHANCE;
+                        if should_branch && trunk_height >= 5 {
+                            let num_branches = rng.gen_range(1..=3);
+                            for _ in 0..num_branches {
+                                let branch_y = rng.gen_range(branch_start_y..=height + trunk_height);
+                                if branch_y < CHUNK_HEIGHT {
+                                    let directions: [(i32, i32); 4] = [(-1, 0), (1, 0), (0, -1), (0, 1)];
+                                    let (dx, dz) = directions[rng.gen_range(0..4)];
+                                    let bx = (x as i32 + dx) as usize;
+                                    let bz = (z as i32 + dz) as usize;
+                                    if bx < CHUNK_SIZE && bz < CHUNK_SIZE {
+                                        self.blocks[bx][branch_y][bz] = BlockType::Wood;
                                     }
                                 }
                             }
+                        }
 
-                            // Generate leaves - size scales with tree height
-                            let leaf_radius = if trunk_height >= 7 { 3 } else { 2 };
-                            let leaf_start_y = height + trunk_height - 1; // Leaves start a bit below top of trunk
-                            let leaf_height = if trunk_height >= 7 { 5 } else { 4 };
+                        // Leaves - scale with trunk height
+                        let leaf_radius = if trunk_height >= 10 { 4 } else if trunk_height >= 7 { 3 } else { 2 };
+                        let leaf_start_y = height + trunk_height - 1;
+                        let leaf_height = if trunk_height >= 10 { 6 } else if trunk_height >= 7 { 5 } else { 4 };
 
-                            for lx in x.saturating_sub(leaf_radius)..=(x + leaf_radius).min(CHUNK_SIZE - 1) {
-                                for lz in z.saturating_sub(leaf_radius)..=(z + leaf_radius).min(CHUNK_SIZE - 1) {
-                                    for ly in leaf_start_y..leaf_start_y + leaf_height {
-                                        if ly < CHUNK_HEIGHT {
-                                            // Create a more natural canopy shape
-                                            let dx = (lx as i32 - x as i32).abs();
-                                            let dz = (lz as i32 - z as i32).abs();
-                                            let dy = ly - leaf_start_y;
+                        for lx in x.saturating_sub(leaf_radius)..=(x + leaf_radius).min(CHUNK_SIZE - 1) {
+                            for lz in z.saturating_sub(leaf_radius)..=(z + leaf_radius).min(CHUNK_SIZE - 1) {
+                                for ly in leaf_start_y..leaf_start_y + leaf_height {
+                                    if ly < CHUNK_HEIGHT {
+                                        let dx = (lx as i32 - x as i32).abs();
+                                        let dz = (lz as i32 - z as i32).abs();
+                                        let dy = ly - leaf_start_y;
 
-                                            // Skip corners for rounder shape, especially at top and bottom
-                                            let is_corner = dx == leaf_radius as i32 && dz == leaf_radius as i32;
-                                            let skip_corner = is_corner && (dy == 0 || dy >= leaf_height - 1);
+                                        let is_corner = dx == leaf_radius as i32 && dz == leaf_radius as i32;
+                                        let skip_corner = is_corner && (dy == 0 || dy >= leaf_height - 1);
+                                        let at_top = dy >= leaf_height - 1;
+                                        let too_far_at_top = at_top && (dx > 1 || dz > 1);
 
-                                            // Taper the top of the canopy
-                                            let at_top = dy >= leaf_height - 1;
-                                            let too_far_at_top = at_top && (dx > 1 || dz > 1);
-
-                                            if !skip_corner && !too_far_at_top && self.blocks[lx][ly][lz] == BlockType::Air {
-                                                self.blocks[lx][ly][lz] = BlockType::Leaves;
-                                            }
+                                        if !skip_corner && !too_far_at_top && self.blocks[lx][ly][lz] == BlockType::Air {
+                                            self.blocks[lx][ly][lz] = BlockType::Leaves;
                                         }
                                     }
                                 }
@@ -592,6 +742,87 @@ impl Chunk {
             }
         }
 
+        // === Oasis Trees (Desert) ===
+        for x in 2..CHUNK_SIZE - 2 {
+            for z in 2..CHUNK_SIZE - 2 {
+                // Check for grass in desert (oasis indicator)
+                for y in (sea_level as usize)..CHUNK_HEIGHT - 10 {
+                    if self.blocks[x][y][z] != BlockType::Grass {
+                        continue;
+                    }
+
+                    // Verify this is in a desert by checking for nearby sand
+                    let mut near_sand = false;
+                    for dx in -2i32..=2 {
+                        for dz in -2i32..=2 {
+                            let nx = (x as i32 + dx) as usize;
+                            let nz = (z as i32 + dz) as usize;
+                            if nx < CHUNK_SIZE && nz < CHUNK_SIZE {
+                                if self.blocks[nx][y][nz] == BlockType::Sand {
+                                    near_sand = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if near_sand { break; }
+                    }
+
+                    if !near_sand {
+                        continue;
+                    }
+
+                    let world_x = (world_offset_x + x as i32) as f64;
+                    let world_z = (world_offset_z + z as i32) as f64;
+
+                    // Sparse trees at oases
+                    let tree_noise = perlin.get([world_x * 0.1, world_z * 0.1]);
+                    if tree_noise < 0.3 {
+                        continue;
+                    }
+
+                    // Check for nearby trees
+                    let mut too_close = false;
+                    'check: for check_x in x.saturating_sub(2)..=(x + 2).min(CHUNK_SIZE - 1) {
+                        for check_z in z.saturating_sub(2)..=(z + 2).min(CHUNK_SIZE - 1) {
+                            if check_x == x && check_z == z { continue; }
+                            if y + 1 < CHUNK_HEIGHT && self.blocks[check_x][y + 1][check_z] == BlockType::Wood {
+                                too_close = true;
+                                break 'check;
+                            }
+                        }
+                    }
+                    if too_close { continue; }
+
+                    // Small palm-like trees
+                    let tree_seed = ((world_x as i64).wrapping_mul(73856093) ^ (world_z as i64).wrapping_mul(19349663)) as u64;
+                    let mut rng = StdRng::seed_from_u64(tree_seed);
+                    let trunk_height = rng.gen_range(4..=6);
+
+                    for trunk_y in y + 1..=(y + trunk_height).min(CHUNK_HEIGHT - 1) {
+                        self.blocks[x][trunk_y][z] = BlockType::Wood;
+                    }
+
+                    // Small leaf canopy
+                    let leaf_y = y + trunk_height;
+                    if leaf_y < CHUNK_HEIGHT - 2 {
+                        for lx in x.saturating_sub(2)..=(x + 2).min(CHUNK_SIZE - 1) {
+                            for lz in z.saturating_sub(2)..=(z + 2).min(CHUNK_SIZE - 1) {
+                                for ly in leaf_y..=(leaf_y + 2).min(CHUNK_HEIGHT - 1) {
+                                    let dx = (lx as i32 - x as i32).abs();
+                                    let dz = (lz as i32 - z as i32).abs();
+                                    if dx + dz <= 3 && self.blocks[lx][ly][lz] == BlockType::Air {
+                                        self.blocks[lx][ly][lz] = BlockType::Leaves;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    break; // One tree per column
+                }
+            }
+        }
+
+        // === GlowStone in caves ===
         let glow_perlin = Perlin::new(43);
         for x in 0..CHUNK_SIZE {
             for z in 0..CHUNK_SIZE {
@@ -599,7 +830,7 @@ impl Chunk {
                 let world_z = (world_offset_z + z as i32) as f64;
                 for y in 5..25 {
                     if self.blocks[x][y][z] == BlockType::Stone {
-                        let noise_val = glow_perlin.get([world_x * 0.05, y as f64 * 0.05, world_z * 0.05]); // Reduced from 0.15 for larger clusters
+                        let noise_val = glow_perlin.get([world_x * 0.05, y as f64 * 0.05, world_z * 0.05]);
                         if noise_val > 0.85 {
                             self.blocks[x][y][z] = BlockType::GlowStone;
                         }
@@ -608,144 +839,132 @@ impl Chunk {
             }
         }
 
-        // === Floating Sky Islands ===
-        // Generate sparse, hilly islands at various heights with stalactites
-        let sky_island_base_y = 60;          // Lower base height
-        let sky_island_height_range = 40;    // More height variation (60-100)
-        let stalactite_perlin = Perlin::new(203); // For bottom stalactites
-        let hill_perlin = Perlin::new(204);       // For top hills
+        // === Floating Sky Islands (Desert Only) ===
+        // Sky islands only appear over desert biomes and are smaller
+        let sky_island_base_y = 65;           // Lower base
+        let sky_island_height_range = 20;     // Less height variation
+        let stalactite_perlin = Perlin::new(203);
+        let hill_perlin = Perlin::new(204);
 
         for x in 0..CHUNK_SIZE {
             for z in 0..CHUNK_SIZE {
+                // Only generate sky islands over desert biomes
+                let biome_weights = column_biomes[x][z];
+                if biome_weights.desert < 0.5 {
+                    continue; // Skip non-desert areas
+                }
+
                 let world_x = (world_offset_x + x as i32) as f64;
                 let world_z = (world_offset_z + z as i32) as f64;
 
-                // 2D mask for very sparse island placement
-                let mask_scale = 0.0017; // Reduced from 0.005 for ~3x larger island spacing
+                // Higher threshold = rarer islands, larger scale = smaller islands
+                let mask_scale = 0.003; // Larger scale = smaller islands
                 let island_mask = (sky_island_mask_perlin.get([world_x * mask_scale, world_z * mask_scale]) + 1.0) * 0.5;
 
-                if island_mask < 0.78 {
+                if island_mask < 0.85 { // Higher threshold = rarer
                     continue;
                 }
 
-                // Height of this island cluster
-                let height_noise = (sky_island_detail.get([world_x * 0.001, world_z * 0.001]) + 1.0) * 0.5; // Reduced from 0.003
+                let height_noise = (sky_island_detail.get([world_x * 0.002, world_z * 0.002]) + 1.0) * 0.5;
                 let island_center_y = sky_island_base_y + (height_noise * sky_island_height_range as f64) as usize;
 
-                // Hills on top - adds 0-4 blocks of height variation
-                let hill_scale = 0.025; // Reduced from 0.08 for larger hills
+                let hill_scale = 0.04; // Larger scale = smaller features
                 let hill_noise = (hill_perlin.get([world_x * hill_scale, world_z * hill_scale]) + 1.0) * 0.5;
-                let hill_height = (hill_noise * 4.0) as usize;
+                let hill_height = (hill_noise * 2.0) as usize; // Smaller hills
 
-                // Calculate "centeredness" - how close this point is to the core of the island
-                // Use horizontal slice of island noise to determine center
-                let island_scale = 0.008; // Reduced from 0.025 for ~3x larger islands
+                let island_scale = 0.015; // Larger scale = smaller islands
                 let horizontal_island_noise = (sky_island_perlin.get([
                     world_x * island_scale,
-                    island_center_y as f64 * island_scale * 0.25, // Sample at island center height
+                    island_center_y as f64 * island_scale * 0.3,
                     world_z * island_scale,
                 ]) + 1.0) * 0.5;
 
-                // Centeredness: higher noise = closer to island core
-                let centeredness = smoothstep(0.5, 0.8, horizontal_island_noise);
+                let centeredness = smoothstep(0.55, 0.85, horizontal_island_noise);
 
-                // Stalactites - longer in general, and much longer/thicker toward center
-                let stalactite_scale = 0.05; // Reduced from 0.15 for larger stalactite patterns
+                let stalactite_scale = 0.08;
                 let stalactite_noise = (stalactite_perlin.get([world_x * stalactite_scale, world_z * stalactite_scale]) + 1.0) * 0.5;
 
-                // Base stalactite depth (longer in general: 2-8 blocks at edges)
-                let base_stalactite = if stalactite_noise > 0.25 {
-                    2 + ((stalactite_noise - 0.25) * 10.0) as usize // 2-8 blocks
+                // Smaller stalactites
+                let base_stalactite = if stalactite_noise > 0.35 {
+                    1 + ((stalactite_noise - 0.35) * 5.0) as usize
                 } else {
                     0
                 };
 
-                // Center bonus: add up to 8 more blocks at the very center
-                let center_bonus = (centeredness * 8.0) as usize;
-
-                // Combined stalactite depth
+                let center_bonus = (centeredness * 4.0) as usize; // Smaller center bonus
                 let stalactite_depth = base_stalactite + center_bonus;
 
-                // Base island thickness
-                let base_thickness = 5;
+                let base_thickness = 3; // Thinner islands
                 let island_min_y = island_center_y.saturating_sub(base_thickness / 2 + stalactite_depth);
-                let island_max_y = (island_center_y + base_thickness / 2 + hill_height + 2).min(CHUNK_HEIGHT);
+                let island_max_y = (island_center_y + base_thickness / 2 + hill_height + 1).min(CHUNK_HEIGHT);
 
-                let island_strength = smoothstep(0.78, 0.90, island_mask);
+                let island_strength = smoothstep(0.85, 0.95, island_mask);
 
                 for y in island_min_y..island_max_y {
                     let world_y = y as f64;
 
-                    // 3D noise for island shape (island_scale defined above)
                     let island_noise = sky_island_perlin.get([
                         world_x * island_scale,
-                        world_y * island_scale * 0.25,
+                        world_y * island_scale * 0.3,
                         world_z * island_scale,
                     ]);
 
-                    // Adjusted center accounting for hills
                     let effective_center_y = (island_center_y + hill_height / 2) as f64;
                     let effective_thickness = base_thickness as f64 + hill_height as f64 / 2.0 + stalactite_depth as f64 / 2.0;
 
-                    // Vertical falloff
                     let y_dist = (world_y - effective_center_y).abs() / (effective_thickness / 2.0 + 1.0);
                     let y_falloff = (1.0 - y_dist.powi(2)).max(0.0);
 
-                    // Bottom tapers more, with stalactites extending further at center
                     let is_below_center = world_y < effective_center_y;
                     let taper = if is_below_center {
-                        // Stalactite regions taper less to allow them to extend down
-                        // More centeredness = less taper = longer stalactites
                         let base_taper = 0.5;
-                        let center_taper_bonus = centeredness * 0.4; // Up to 0.9 at center
+                        let center_taper_bonus = centeredness * 0.3;
                         y_falloff * (base_taper + center_taper_bonus)
                     } else {
                         y_falloff
                     };
 
-                    let threshold = 0.45 - (island_strength * 0.25) - (taper * 0.2);
+                    let threshold = 0.50 - (island_strength * 0.20) - (taper * 0.15); // Tighter threshold
 
                     if island_noise > threshold && self.blocks[x][y][z] == BlockType::Air {
-                        // Check if this is a surface block
                         let is_surface = y + 1 >= island_max_y || {
                             let above_y = (y + 1) as f64;
                             let above_noise = sky_island_perlin.get([
                                 world_x * island_scale,
-                                above_y * island_scale * 0.25,
+                                above_y * island_scale * 0.3,
                                 world_z * island_scale,
                             ]);
                             let above_y_dist = (above_y - effective_center_y).abs() / (effective_thickness / 2.0 + 1.0);
                             let above_y_falloff = (1.0 - above_y_dist.powi(2)).max(0.0);
                             let above_taper = if above_y < effective_center_y {
                                 let base_taper = 0.5;
-                                let center_taper_bonus = centeredness * 0.4;
+                                let center_taper_bonus = centeredness * 0.3;
                                 above_y_falloff * (base_taper + center_taper_bonus)
                             } else {
                                 above_y_falloff
                             };
-                            let above_threshold = 0.45 - (island_strength * 0.25) - (above_taper * 0.2);
+                            let above_threshold = 0.50 - (island_strength * 0.20) - (above_taper * 0.15);
                             above_noise <= above_threshold
                         };
 
-                        // Depth from surface for block type
                         let mut depth_from_surface = 0;
-                        for check_y in (y + 1)..island_max_y.min(y + 5) {
+                        for check_y in (y + 1)..island_max_y.min(y + 4) {
                             let check_world_y = check_y as f64;
                             let check_noise = sky_island_perlin.get([
                                 world_x * island_scale,
-                                check_world_y * island_scale * 0.25,
+                                check_world_y * island_scale * 0.3,
                                 world_z * island_scale,
                             ]);
                             let check_y_dist = (check_world_y - effective_center_y).abs() / (effective_thickness / 2.0 + 1.0);
                             let check_y_falloff = (1.0 - check_y_dist.powi(2)).max(0.0);
                             let check_taper = if check_world_y < effective_center_y {
                                 let base_taper = 0.5;
-                                let center_taper_bonus = centeredness * 0.4;
+                                let center_taper_bonus = centeredness * 0.3;
                                 check_y_falloff * (base_taper + center_taper_bonus)
                             } else {
                                 check_y_falloff
                             };
-                            let check_threshold = 0.45 - (island_strength * 0.25) - (check_taper * 0.2);
+                            let check_threshold = 0.50 - (island_strength * 0.20) - (check_taper * 0.15);
                             if check_noise > check_threshold {
                                 depth_from_surface += 1;
                             } else {
@@ -753,13 +972,13 @@ impl Chunk {
                             }
                         }
 
-                        // Stalactites (below center) are always stone, top surface gets grass/dirt
+                        // Desert sky islands are sandstone-like
                         self.blocks[x][y][z] = if is_below_center {
-                            BlockType::Stone // Stalactites are always stone
+                            BlockType::Stone
                         } else if is_surface {
-                            BlockType::Grass
-                        } else if depth_from_surface < 3 {
-                            BlockType::Dirt
+                            BlockType::Sand // Sandy top
+                        } else if depth_from_surface < 2 {
+                            BlockType::Sand
                         } else {
                             BlockType::Stone
                         };
@@ -768,327 +987,7 @@ impl Chunk {
             }
         }
 
-        // === Sky Island Ponds ===
-        // Create large ponds using flood-fill to ensure contiguous, properly-bounded water bodies
-        // Minimum size: 6x6 (36 blocks). Ponds are excavated basins filled with water at a flat level.
-
-        let pond_noise = Perlin::new(205);
-
-        // Track which positions have been used for ponds (to avoid overlaps)
-        let mut used_for_pond = [[false; CHUNK_SIZE]; CHUNK_SIZE];
-
-        // Find pond seed points - locations where we'll try to create ponds
-        let mut pond_seeds: Vec<(usize, usize, usize)> = Vec::new(); // (x, z, surface_y)
-
-        for x in 6..CHUNK_SIZE - 6 {
-            for z in 6..CHUNK_SIZE - 6 {
-                let world_x = (world_offset_x + x as i32) as f64;
-                let world_z = (world_offset_z + z as i32) as f64;
-
-                // Check if we're on a floating island using the island mask
-                let mask_scale = 0.005;
-                let island_mask = (sky_island_mask_perlin.get([world_x * mask_scale, world_z * mask_scale]) + 1.0) * 0.5;
-                if island_mask < 0.82 {
-                    continue;
-                }
-
-                // Use noise to create sparse pond locations
-                let pond_chance = (pond_noise.get([world_x * 0.009, world_z * 0.009]) + 1.0) * 0.5; // Reduced from 0.02
-                if pond_chance < 0.50 {
-                    continue;
-                }
-
-                // Find the grass surface at this location
-                for y in (sky_island_base_y..CHUNK_HEIGHT - 5).rev() {
-                    if self.blocks[x][y][z] != BlockType::Grass {
-                        continue;
-                    }
-
-                    // Verify this is on a floating island (has air below at some point)
-                    let mut is_floating = false;
-                    for check_y in (sky_island_base_y.saturating_sub(10))..y {
-                        if self.blocks[x][check_y][z] == BlockType::Air {
-                            is_floating = true;
-                            break;
-                        }
-                    }
-                    if !is_floating {
-                        continue;
-                    }
-
-                    // Check not already used
-                    if used_for_pond[x][z] {
-                        continue;
-                    }
-
-                    pond_seeds.push((x, z, y));
-                    break;
-                }
-            }
-        }
-
-        // For each seed, try to create a pond using flood-fill
-        for (seed_x, seed_z, seed_y) in pond_seeds {
-            if used_for_pond[seed_x][seed_z] {
-                continue;
-            }
-
-            // Flood-fill to find contiguous solid region
-            // We'll find all positions that:
-            // 1. Are within chunk bounds (with buffer)
-            // 2. Have solid surface (grass/dirt) within a few Y levels of the seed
-            // 3. Have solid ground below (at least 5 blocks deep for excavation)
-            // 4. Are connected to the seed position
-
-            let mut queue: Vec<(usize, usize)> = Vec::new();
-            let mut visited = [[false; CHUNK_SIZE]; CHUNK_SIZE];
-            let mut region: Vec<(usize, usize, usize)> = Vec::new(); // (x, z, surface_y)
-
-            queue.push((seed_x, seed_z));
-            visited[seed_x][seed_z] = true;
-
-            let max_pond_radius = 12; // Maximum distance from seed
-
-            while let Some((x, z)) = queue.pop() {
-                // Check distance from seed (limit pond size for performance and aesthetics)
-                let dx = (x as i32 - seed_x as i32).abs();
-                let dz = (z as i32 - seed_z as i32).abs();
-                if dx > max_pond_radius || dz > max_pond_radius {
-                    continue;
-                }
-
-                // Check chunk bounds with buffer
-                if x < 3 || x >= CHUNK_SIZE - 3 || z < 3 || z >= CHUNK_SIZE - 3 {
-                    continue;
-                }
-
-                // Find surface at this position (within a few Y levels of seed)
-                let mut surface_y = None;
-                for y in (seed_y.saturating_sub(4)..=seed_y + 4).rev() {
-                    if y < CHUNK_HEIGHT {
-                        let block = self.blocks[x][y][z];
-                        if block == BlockType::Grass || block == BlockType::Dirt {
-                            surface_y = Some(y);
-                            break;
-                        }
-                    }
-                }
-
-                let sy = match surface_y {
-                    Some(y) => y,
-                    None => continue, // No solid surface here
-                };
-
-                // Check we have solid ground below for excavation (5 blocks minimum)
-                let mut solid_below = true;
-                for depth in 1..=5 {
-                    if sy < depth {
-                        solid_below = false;
-                        break;
-                    }
-                    let block = self.blocks[x][sy - depth][z];
-                    if block == BlockType::Air {
-                        solid_below = false;
-                        break;
-                    }
-                }
-                if !solid_below {
-                    continue;
-                }
-
-                // Check immediate neighbors for air at surface level (edge detection)
-                // If any direct neighbor is air, we're at the island edge - don't include
-                let mut at_edge = false;
-                for (nx, nz) in [(x.wrapping_sub(1), z), (x + 1, z), (x, z.wrapping_sub(1)), (x, z + 1)] {
-                    if nx < CHUNK_SIZE && nz < CHUNK_SIZE {
-                        if self.blocks[nx][sy][nz] == BlockType::Air {
-                            at_edge = true;
-                            break;
-                        }
-                    }
-                }
-                if at_edge {
-                    continue;
-                }
-
-                // This position is valid - add to region
-                region.push((x, z, sy));
-
-                // Add unvisited neighbors to queue
-                for (nx, nz) in [(x.wrapping_sub(1), z), (x + 1, z), (x, z.wrapping_sub(1)), (x, z + 1)] {
-                    if nx < CHUNK_SIZE && nz < CHUNK_SIZE && !visited[nx][nz] && !used_for_pond[nx][nz] {
-                        visited[nx][nz] = true;
-                        queue.push((nx, nz));
-                    }
-                }
-            }
-
-            // Check if region is large enough (minimum 36 = 6x6)
-            if region.len() < 36 {
-                continue;
-            }
-
-            // Find the bounding box and check it's not too elongated
-            let min_x = region.iter().map(|(x, _, _)| *x).min().unwrap();
-            let max_x = region.iter().map(|(x, _, _)| *x).max().unwrap();
-            let min_z = region.iter().map(|(_, z, _)| *z).min().unwrap();
-            let max_z = region.iter().map(|(_, z, _)| *z).max().unwrap();
-            let width = max_x - min_x + 1;
-            let depth = max_z - min_z + 1;
-
-            // Skip if too narrow in either dimension (want at least 6 in both)
-            if width < 6 || depth < 6 {
-                continue;
-            }
-
-            // Find water surface level (use the highest surface Y in the region)
-            let water_level = region.iter().map(|(_, _, y)| *y).max().unwrap();
-
-            // Calculate center of the region for depth calculations
-            let center_x = (min_x + max_x) / 2;
-            let center_z = (min_z + max_z) / 2;
-            let max_dist = ((width.max(depth) / 2) as f64).max(1.0);
-
-            // Mark all positions as used
-            for (x, z, _) in &region {
-                used_for_pond[*x][*z] = true;
-            }
-
-            // Excavate basin and fill with water
-            for (x, z, _) in &region {
-                // Calculate depth based on distance from center (deeper in middle)
-                let dist_x = (*x as f64 - center_x as f64).abs();
-                let dist_z = (*z as f64 - center_z as f64).abs();
-                let dist = (dist_x * dist_x + dist_z * dist_z).sqrt();
-                let normalized_dist = (dist / max_dist).min(1.0);
-
-                let pond_depth = if normalized_dist < 0.3 {
-                    4 // Center: 4 blocks deep
-                } else if normalized_dist < 0.5 {
-                    3 // Inner ring: 3 blocks deep
-                } else if normalized_dist < 0.7 {
-                    2 // Middle: 2 blocks deep
-                } else {
-                    1 // Edge: 1 block deep
-                };
-
-                // Excavate from water_level down to water_level - pond_depth + 1
-                // Then fill with water
-                let bottom_y = water_level.saturating_sub(pond_depth - 1);
-
-                for y in bottom_y..=water_level {
-                    if y >= CHUNK_HEIGHT {
-                        continue;
-                    }
-                    let block = self.blocks[*x][y][*z];
-                    // Don't break through air or stone
-                    if block != BlockType::Air && block != BlockType::Stone {
-                        self.blocks[*x][y][*z] = BlockType::Water;
-                    }
-                }
-
-                // Place dirt floor under the water
-                if bottom_y > 0 {
-                    let floor_y = bottom_y - 1;
-                    let floor_block = self.blocks[*x][floor_y][*z];
-                    if floor_block != BlockType::Air && floor_block != BlockType::Stone && floor_block != BlockType::Water {
-                        self.blocks[*x][floor_y][*z] = BlockType::Dirt;
-                    }
-                }
-            }
-        }
-
-        // === Sky Island Trees ===
-        // Generate trees on sky island grass blocks
-        for x in 3..CHUNK_SIZE - 3 {
-            for z in 3..CHUNK_SIZE - 3 {
-                let world_x = (world_offset_x + x as i32) as f64;
-                let world_z = (world_offset_z + z as i32) as f64;
-
-                // Find grass blocks in the sky island range
-                for y in sky_island_base_y..CHUNK_HEIGHT - 12 {
-                    if self.blocks[x][y][z] != BlockType::Grass {
-                        continue;
-                    }
-
-                    // Make sure this is a sky island (above normal terrain)
-                    // Check that there's air below at some point (floating)
-                    let mut is_floating = false;
-                    for check_y in (sky_island_base_y - 10)..y {
-                        if self.blocks[x][check_y][z] == BlockType::Air {
-                            is_floating = true;
-                            break;
-                        }
-                    }
-                    if !is_floating {
-                        continue;
-                    }
-
-                    // Tree placement noise
-                    let tree_noise = perlin.get([world_x * 0.05, world_z * 0.05]); // Reduced from 0.15 for larger forest patches
-                    if tree_noise < 0.4 { // Lowered from 0.6 for more trees on sky islands
-                        continue;
-                    }
-
-                    // Check for nearby trees
-                    let mut too_close = false;
-                    'check: for check_x in x.saturating_sub(2)..=(x + 2).min(CHUNK_SIZE - 1) {
-                        for check_z in z.saturating_sub(2)..=(z + 2).min(CHUNK_SIZE - 1) {
-                            if check_x == x && check_z == z {
-                                continue;
-                            }
-                            if y + 1 < CHUNK_HEIGHT && self.blocks[check_x][y + 1][check_z] == BlockType::Wood {
-                                too_close = true;
-                                break 'check;
-                            }
-                        }
-                    }
-                    if too_close {
-                        continue;
-                    }
-
-                    // Generate a small tree (sky island trees are shorter)
-                    let tree_seed = ((world_x as i64).wrapping_mul(73856093) ^ (world_z as i64).wrapping_mul(19349663) ^ (y as i64 * 83492791)) as u64;
-                    let mut rng = StdRng::seed_from_u64(tree_seed);
-                    let trunk_height = rng.gen_range(3..=5);
-
-                    // Trunk
-                    for trunk_y in (y + 1)..=(y + trunk_height).min(CHUNK_HEIGHT - 1) {
-                        self.blocks[x][trunk_y][z] = BlockType::Wood;
-                    }
-
-                    // Leaves
-                    let leaf_radius = 2;
-                    let leaf_start_y = y + trunk_height - 1;
-                    let leaf_height = 3;
-
-                    for lx in x.saturating_sub(leaf_radius)..=(x + leaf_radius).min(CHUNK_SIZE - 1) {
-                        for lz in z.saturating_sub(leaf_radius)..=(z + leaf_radius).min(CHUNK_SIZE - 1) {
-                            for ly in leaf_start_y..(leaf_start_y + leaf_height).min(CHUNK_HEIGHT) {
-                                let dx = (lx as i32 - x as i32).abs();
-                                let dz = (lz as i32 - z as i32).abs();
-                                let dy = ly - leaf_start_y;
-
-                                // Skip corners
-                                let is_corner = dx == leaf_radius as i32 && dz == leaf_radius as i32;
-                                if is_corner {
-                                    continue;
-                                }
-
-                                // Taper top
-                                if dy >= leaf_height - 1 && (dx > 1 || dz > 1) {
-                                    continue;
-                                }
-
-                                if self.blocks[lx][ly][lz] == BlockType::Air {
-                                    self.blocks[lx][ly][lz] = BlockType::Leaves;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        // NOTE: Sky island trees removed - desert islands don't have trees
     }
 
     pub fn get_block(&self, x: usize, y: usize, z: usize) -> BlockType {
