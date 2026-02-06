@@ -14,7 +14,7 @@ pub const CHUNK_HEIGHT: usize = 128;
 // ============================================================================
 
 // Master seed - change this single value to generate a completely different world
-pub const MASTER_SEED: u32 = 42;
+pub const MASTER_SEED: u32 = 52; // default seed = 42
 
 // Derived seeds - each offset creates a unique noise pattern while keeping worlds reproducible
 pub const SEED_BASE_TERRAIN: u32 = MASTER_SEED;
@@ -111,9 +111,10 @@ pub const MOUNTAIN_HEIGHT_BASE: f64 = 42.0;
 pub const MOUNTAIN_HEIGHT_VARIATION: f64 = 12.0;
 
 // Coastal transition zone
-pub const COASTAL_START: f64 = 0.25;            // Where coastal zone begins
-pub const COASTAL_END: f64 = 0.55;              // Where coastal zone ends
-pub const COASTAL_MIN_HEIGHT: f64 = 20.0;       // Minimum height at coast
+pub const COASTAL_START: f64 = 0.35;           // Where coastal zone begins
+pub const COASTAL_END: f64 = 0.45;              // Where coastal zone ends
+pub const COASTAL_MIN_HEIGHT: f64 = 12.0;      // Minimum height at coast
+pub const ISLAND_COASTAL_BLEND_WIDTH: f64 = 0.15; // How far into ocean the island-to-coast blend extends
 
 // ============================================================================
 // SURFACE BLOCK THRESHOLDS - Control surface material distribution
@@ -137,10 +138,11 @@ pub const ARCTIC_FULL_ICE_THRESHOLD: f64 = 0.55;
 // ============================================================================
 // OCEAN ISLAND PARAMETERS - Islands within ocean biomes
 // ============================================================================
-pub const OCEAN_ISLAND_SCALE: f64 = 0.008;
-pub const OCEAN_ISLAND_THRESHOLD: f64 = 0.65;
+pub const OCEAN_ISLAND_SCALE: f64 = 0.01; // default = 0.008
+pub const OCEAN_ISLAND_THRESHOLD: f64 = 0.4;
 pub const OCEAN_ISLAND_STRENGTH_MAX: f64 = 0.85;
-pub const OCEAN_ISLAND_MAX_BUMP: f64 = 22.0;
+pub const OCEAN_ISLAND_MAX_BUMP: f64 = 14.0;
+pub const OCEAN_ISLAND_GRASS_START: usize = 1; // How many blocks above sea level grass starts
 
 // ============================================================================
 // TREE GENERATION CONFIGURATION
@@ -165,9 +167,9 @@ pub const TREE_THRESHOLD_OCEAN: f64 = 0.7;             // Ocean islands
 pub const TREE_THRESHOLD_ARCTIC: f64 = 0.95;           // Almost no trees in arctic
 
 // Tree spacing (minimum blocks between trees)
-pub const TREE_SPACING_FOREST_DENSE: usize = 3;        // Dense forest spacing
-pub const TREE_SPACING_DEFAULT: usize = 4;             // Standard spacing
-pub const TREE_SPACING_FOREST_WEIGHT_THRESHOLD: f64 = 0.6; // Forest weight needed for dense spacing
+pub const TREE_SPACING_FOREST_DENSE: usize = 4;        // Dense forest spacing
+pub const TREE_SPACING_DEFAULT: usize = 5;             // Standard spacing
+pub const TREE_SPACING_FOREST_WEIGHT_THRESHOLD: f64 = 0.5; // Forest weight needed for dense spacing
 
 // Forest tree height distribution (random roll thresholds)
 pub const FOREST_TREE_SHORT_CHANCE: f64 = 0.2;         // 20% chance for short tree
@@ -203,7 +205,7 @@ pub const BRANCH_COUNT_MIN: usize = 1;
 pub const BRANCH_COUNT_MAX: usize = 3;
 
 // Tree border buffer (distance from chunk edge)
-pub const TREE_BORDER_BUFFER: usize = 3;
+pub const TREE_BORDER_BUFFER: usize = 2;
 
 // ============================================================================
 // OASIS PARAMETERS - Water features in desert biomes
@@ -587,11 +589,18 @@ impl Chunk {
                 // === Ocean islands with GRADUAL slopes ===
                 let island_noise = (island_perlin.get([world_x * OCEAN_ISLAND_SCALE + 5000.0, world_z * OCEAN_ISLAND_SCALE + 5000.0]) + 1.0) * 0.5;
 
-                // Gradual island bump - squared falloff for smooth slopes
-                let island_bump = if biome_weights.ocean > 0.5 && island_noise > OCEAN_ISLAND_THRESHOLD {
+                // Compute raw island bump from noise alone (no ocean weight gate)
+                let island_bump_raw = if island_noise > OCEAN_ISLAND_THRESHOLD {
                     let island_strength = smootherstep(OCEAN_ISLAND_THRESHOLD, OCEAN_ISLAND_STRENGTH_MAX, island_noise);
                     // Squared for gradual slope, not linear
                     island_strength * island_strength * OCEAN_ISLAND_MAX_BUMP
+                } else {
+                    0.0
+                };
+
+                // Gradual island bump - only applied in ocean-dominant areas
+                let island_bump = if biome_weights.ocean > 0.5 {
+                    island_bump_raw
                 } else {
                     0.0
                 };
@@ -623,7 +632,7 @@ impl Chunk {
                     biome_weights.mountains * mountain_height +
                     biome_weights.arctic * arctic_height;
 
-                // === CRITICAL: Ensure desert areas stay above sea level ===
+                // === Ensure desert areas stay above sea level ===
                 // If desert has significant weight, pull height UP toward desert height
                 if biome_weights.desert > DESERT_PULL_THRESHOLD {
                     let desert_pull = smootherstep(DESERT_PULL_THRESHOLD, DESERT_PULL_STRENGTH, biome_weights.desert);
@@ -632,13 +641,23 @@ impl Chunk {
                 }
 
                 // === Coastal smoothing - WIDER zone with gentler slopes ===
+                let island_blend_start = COASTAL_START - ISLAND_COASTAL_BLEND_WIDTH;
+                let base_shore = COASTAL_MIN_HEIGHT + base_n * FOREST_HEIGHT_VARIATION;
                 let height_f = if raw_continentalness > COASTAL_START && raw_continentalness < COASTAL_END {
                     // Coastal transition zone
                     let shore_t = smootherstep(COASTAL_START, COASTAL_END, raw_continentalness);
-                    // Start from near ocean floor, not sea level
-                    let min_shore = COASTAL_MIN_HEIGHT + base_n * FOREST_HEIGHT_VARIATION; // Underwater starting point
+                    // Blend island height into shore start, fading out as we move inland
+                    let min_shore = base_shore + island_bump_raw * (1.0 - shore_t);
                     let max_shore = blended_height;
                     min_shore + (max_shore - min_shore) * shore_t
+                } else if raw_continentalness >= island_blend_start && raw_continentalness <= COASTAL_START {
+                    // Island-to-coast blend zone: smooth ocean/island heights into coastal zone
+                    let blend_t = smootherstep(island_blend_start, COASTAL_START, raw_continentalness);
+                    // Target: what the coastal zone would give at COASTAL_START
+                    let coastal_start_height = base_shore + island_bump_raw;
+                    // At island_blend_start (blend_t=0): pure blended_height (ocean + islands)
+                    // At COASTAL_START (blend_t=1): matches coastal zone's starting height
+                    blended_height + (coastal_start_height - blended_height) * blend_t
                 } else {
                     blended_height
                 };
@@ -704,7 +723,7 @@ impl Chunk {
                                 BiomeType::Desert => BlockType::Sand,
                                 BiomeType::Forest => BlockType::Grass,
                                 BiomeType::Ocean => {
-                                    if height > sea + 3 { BlockType::Grass } else { BlockType::Sand }
+                                    if height > sea + OCEAN_ISLAND_GRASS_START { BlockType::Grass } else { BlockType::Sand }
                                 },
                                 BiomeType::Mountains => {
                                     if y_i > snow_threshold {
