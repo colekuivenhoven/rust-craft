@@ -1394,9 +1394,9 @@ impl State {
         let pos_char_w = 6.0 * pos_scale;
         let pos_char_h = 7.0 * pos_scale;
         let pos_text_width = pos_text.len() as f32 * pos_char_w;
-        // Position below compass (compass center_y=60, bg_radius=55, so bottom is ~115)
-        let pos_x = screen_w - pos_text_width - 14.0; // Right-aligned with padding
-        let pos_y = 130.0; // Below compass
+        let pos_x = screen_w - pos_text_width - 9.0; // Right-aligned with padding
+        let pos_y = 125.0; // Below compass
+
         // Background
         bitmap_font::push_rect_px(
             &mut verts,
@@ -1575,7 +1575,7 @@ impl State {
         let center_x = screen_w - margin;
         let center_y = margin;
         let axis_length = 40.0;
-        let line_thickness = 3.0;
+        let line_thickness = 5.0;
 
         // Get camera rotation (yaw and pitch)
         let yaw = self.camera.yaw.0;
@@ -1655,8 +1655,8 @@ impl State {
             verts.push(v3);
         };
 
-        // Draw background circle
-        let bg_color = [0.0, 0.0, 0.0, 0.4];
+        // Draw background
+        let bg_color = [0.0, 0.0, 0.0, 0.5];
         let bg_radius = axis_length + 15.0;
         bitmap_font::push_rect_px(
             verts,
