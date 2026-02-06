@@ -45,6 +45,7 @@ pub struct CameraController {
     pub shift_held: bool,
     pub velocity: Vector3<f32>,
     pub on_ground: bool,
+    pub last_fall_velocity: f32,  // Captures velocity.y at moment of landing (for fall damage)
 }
 
 impl CameraController {
@@ -60,6 +61,7 @@ impl CameraController {
             shift_held: false,
             velocity: Vector3::new(0.0, 0.0, 0.0),
             on_ground: false,
+            last_fall_velocity: 0.0,
         }
     }
 
@@ -378,6 +380,10 @@ impl CameraController {
 
         // Apply ground collision
         if found_ground {
+            // Capture fall velocity before zeroing (for fall damage calculation)
+            if !self.on_ground {
+                self.last_fall_velocity = self.velocity.y;
+            }
             new_pos.y = highest_ground + player_height;
             self.velocity.y = 0.0;
             self.on_ground = true;

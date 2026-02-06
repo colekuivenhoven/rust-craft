@@ -79,6 +79,7 @@ pub struct State {
     frustum: Frustum,
     world: World,
     player: Player,
+    spawn_point: Point3<f32>,
     water_simulation: WaterSimulation,
     enemy_manager: EnemyManager,
     bird_manager: BirdManager,
@@ -197,7 +198,7 @@ impl State {
         };
         surface.configure(&device, &config);
 
-        let camera = Camera::new(Point3::new(0.0, 35.0, 0.0));
+        let mut camera = Camera::new(Point3::new(0.0, 35.0, 0.0)); // Temporary position, updated after world gen
         let camera_controller = CameraController::new(10.0, 0.003);
         let projection = Projection::new(
             config.width,
@@ -555,7 +556,26 @@ impl State {
         });
 
         let world = World::new(18); // Sets render_distance
-        let player = Player::new(Point3::new(0.0, 35.0, 0.0));
+
+        // Find a safe spawn point: scan from top down at (0, 0) for a solid, non-water
+        // block exposed to the sky, then spawn 2 blocks above it
+        let spawn_point = {
+            let spawn_x = 0;
+            let spawn_z = 0;
+            let mut spawn_y = 35.0_f32; // fallback
+            for y in (1..CHUNK_HEIGHT).rev() {
+                let block = world.get_block_world(spawn_x, y as i32, spawn_z);
+                let block_above = world.get_block_world(spawn_x, y as i32 + 1, spawn_z);
+                if block.is_solid() && block_above == BlockType::Air {
+                    spawn_y = y as f32 + 3.0; // 2 blocks above surface + player eye height offset
+                    break;
+                }
+            }
+            Point3::new(spawn_x as f32 + 0.5, spawn_y, spawn_z as f32 + 0.5)
+        };
+
+        camera.position = spawn_point;
+        let player = Player::new(spawn_point);
         let water_simulation = WaterSimulation::new(0.5);
         let enemy_manager = EnemyManager::new(10.0, 10);
         let bird_manager = BirdManager::new();
@@ -1021,6 +1041,7 @@ impl State {
             frustum,
             world,
             player,
+            spawn_point,
             water_simulation,
             enemy_manager,
             bird_manager,
@@ -1081,6 +1102,15 @@ impl State {
 
     pub fn window(&self) -> &Window {
         &self.window
+    }
+
+    fn respawn(&mut self) {
+        self.player.health = self.player.max_health;
+        self.camera.position = self.spawn_point;
+        self.player.position = self.spawn_point;
+        self.camera_controller.velocity = Vector3::new(0.0, 0.0, 0.0);
+        self.camera_controller.on_ground = false;
+        self.camera_controller.last_fall_velocity = 0.0;
     }
 
     pub fn capture_mouse(&mut self) {
@@ -1416,6 +1446,78 @@ impl State {
             pos_scale,
             pos_scale,
             pos_color,
+            screen_w,
+            screen_h,
+        );
+
+        // === Health Bar ===
+        let health_bar_w = 300.0;
+        let health_bar_h = 30.0;
+        let health_bar_border = 2.0;
+        let health_bar_padding = 6.0; // Right padding for text
+        //let health_bar_x = start_x;
+        let health_bar_x = (screen_w - health_bar_w) / 2.0;
+        let health_bar_y = 24.0;
+        let health_pct = self.player.health / self.player.max_health;
+
+        // Dark background
+        bitmap_font::push_rect_px(
+            &mut verts,
+            health_bar_x,
+            health_bar_y,
+            health_bar_w,
+            health_bar_h,
+            [0.0, 0.0, 0.0, 0.25],
+            screen_w,
+            screen_h,
+        );
+
+        // White border (4 thin quads)
+        let border_color = [1.0, 1.0, 1.0, 0.85];
+        // top
+        bitmap_font::push_rect_px(&mut verts, health_bar_x, health_bar_y, health_bar_w, health_bar_border, border_color, screen_w, screen_h);
+        // bottom
+        bitmap_font::push_rect_px(&mut verts, health_bar_x, health_bar_y + health_bar_h - health_bar_border, health_bar_w, health_bar_border, border_color, screen_w, screen_h);
+        // left
+        bitmap_font::push_rect_px(&mut verts, health_bar_x, health_bar_y, health_bar_border, health_bar_h, border_color, screen_w, screen_h);
+        // right
+        bitmap_font::push_rect_px(&mut verts, health_bar_x + health_bar_w - health_bar_border, health_bar_y, health_bar_border, health_bar_h, border_color, screen_w, screen_h);
+
+        // Red health fill (inside borders)
+        let fill_x = health_bar_x + health_bar_border;
+        let fill_y = health_bar_y + health_bar_border;
+        let fill_max_w = health_bar_w - health_bar_border * 2.0;
+        let fill_h = health_bar_h - health_bar_border * 2.0;
+        let fill_w = fill_max_w * health_pct;
+        if fill_w > 0.0 {
+            bitmap_font::push_rect_px(
+                &mut verts,
+                fill_x,
+                fill_y,
+                fill_w,
+                fill_h,
+                [0.8, 0.1, 0.1, 0.9],
+                screen_w,
+                screen_h,
+            );
+        }
+
+        // Percentage text (anchored right inside the bar)
+        let health_text = format!("{}%", (health_pct * 100.0).round() as u32);
+        let health_text_scale = 2.0;
+        let health_char_w = 6.0 * health_text_scale;
+        let health_char_h = 7.0 * health_text_scale;
+        let health_text_w = health_text.len() as f32 * health_char_w;
+        let health_text_x = health_bar_x + health_bar_w - health_bar_border - health_bar_padding - health_text_w;
+        let health_text_y = health_bar_y + (health_bar_h - health_char_h) * 0.5;
+        bitmap_font::draw_text_quads(
+            &mut verts,
+            &health_text,
+            health_text_x,
+            health_text_y,
+            health_text_scale,
+            health_text_scale,
+            [1.0, 1.0, 1.0, 0.95],
             screen_w,
             screen_h,
         );
@@ -2087,6 +2189,18 @@ impl State {
         self.camera_underwater = self.camera_controller.update_camera(&mut self.camera, dt, &self.world, self.noclip_mode);
         self.player.position = self.camera.position;
 
+        // Fall damage: velocity threshold of -15.0 (roughly 4+ block fall)
+        // Damage scales with how far beyond the threshold
+        let fall_vel = self.camera_controller.last_fall_velocity;
+        if fall_vel < -15.0 {
+            let damage = (fall_vel.abs() - 15.0) * 2.5;
+            self.player.take_damage(damage);
+            if !self.player.is_alive() {
+                self.respawn();
+            }
+        }
+        self.camera_controller.last_fall_velocity = 0.0;
+
         // Update world
         self.world
             .update_chunks((self.camera.position.x, self.camera.position.z));
@@ -2119,7 +2233,7 @@ impl State {
         if damage > 0.0 {
             self.player.take_damage(damage * dt);
             if !self.player.is_alive() {
-                println!("GAME OVER! You died!");
+                self.respawn();
             }
         }
 
