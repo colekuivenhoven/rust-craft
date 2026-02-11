@@ -244,11 +244,11 @@ pub const GLOWSTONE_SCALE: f64 = 0.05;
 pub const GLOWSTONE_THRESHOLD: f64 = 0.85;
 
 // ============================================================================
-// SKY ISLAND PARAMETERS - Floating islands (desert only)
+// SKY ISLAND PARAMETERS - Floating islands (desert and ocean biomes)
 // ============================================================================
 pub const SKY_ISLAND_BASE_Y: usize = 65;
 pub const SKY_ISLAND_HEIGHT_RANGE: usize = 20;
-pub const SKY_ISLAND_MIN_DESERT_WEIGHT: f64 = 0.5;
+pub const SKY_ISLAND_MIN_BIOME_WEIGHT: f64 = 0.5;
 
 // Sky island noise scales
 pub const SKY_ISLAND_MASK_SCALE: f64 = 0.003;
@@ -257,9 +257,9 @@ pub const SKY_ISLAND_SCALE: f64 = 0.015;
 pub const SKY_ISLAND_HILL_SCALE: f64 = 0.04;
 pub const SKY_ISLAND_STALACTITE_SCALE: f64 = 0.08;
 
-// Sky island thresholds
-pub const SKY_ISLAND_MASK_THRESHOLD: f64 = 0.85;
-pub const SKY_ISLAND_STRENGTH_THRESHOLD: f64 = 0.95;
+// Sky island thresholds (lower mask = more frequent)
+pub const SKY_ISLAND_MASK_THRESHOLD: f64 = 0.7;
+pub const SKY_ISLAND_STRENGTH_THRESHOLD: f64 = 0.85;
 
 // Sky island geometry
 pub const SKY_ISLAND_BASE_THICKNESS: usize = 3;
@@ -1104,16 +1104,18 @@ impl Chunk {
         }
 
         // === Floating Sky Islands (Desert Only) ===
-        // Sky islands only appear over desert biomes and are smaller
+        // Sky islands appear over desert and ocean biomes
         let stalactite_perlin = Perlin::new(SEED_STALACTITE);
         let hill_perlin = Perlin::new(SEED_HILL);
 
         for x in 0..CHUNK_SIZE {
             for z in 0..CHUNK_SIZE {
-                // Only generate sky islands over desert biomes
+                // Only generate sky islands over desert or ocean biomes
                 let biome_weights = column_biomes[x][z];
-                if biome_weights.desert < SKY_ISLAND_MIN_DESERT_WEIGHT {
-                    continue; // Skip non-desert areas
+                let is_desert_island = biome_weights.desert >= SKY_ISLAND_MIN_BIOME_WEIGHT;
+                let is_ocean_island = biome_weights.ocean >= SKY_ISLAND_MIN_BIOME_WEIGHT;
+                if !is_desert_island && !is_ocean_island {
+                    continue; // Skip other biomes
                 }
 
                 let world_x = (world_offset_x + x as i32) as f64;
@@ -1229,22 +1231,136 @@ impl Chunk {
                             }
                         }
 
-                        // Desert sky islands are sandstone-like
-                        self.blocks[x][y][z] = if is_below_center {
-                            BlockType::Stone
-                        } else if is_surface {
-                            BlockType::Sand // Sandy top
-                        } else if depth_from_surface < 2 {
-                            BlockType::Sand
+                        // Block types depend on biome
+                        self.blocks[x][y][z] = if is_desert_island {
+                            // Desert sky islands are sandstone-like
+                            if is_below_center {
+                                BlockType::Stone
+                            } else if is_surface {
+                                BlockType::Sand
+                            } else if depth_from_surface < 2 {
+                                BlockType::Sand
+                            } else {
+                                BlockType::Stone
+                            }
                         } else {
-                            BlockType::Stone
+                            // Ocean sky islands are grassy
+                            if is_below_center {
+                                BlockType::Stone
+                            } else if is_surface {
+                                BlockType::Grass
+                            } else if depth_from_surface < 2 {
+                                BlockType::Dirt
+                            } else {
+                                BlockType::Stone
+                            }
                         };
                     }
                 }
             }
         }
 
-        // NOTE: Sky island trees removed - desert islands don't have trees
+        // === Sky Island Trees (Ocean islands only) ===
+        // Dense forest with wide height variety on ocean sky islands
+        for x in TREE_BORDER_BUFFER..CHUNK_SIZE - TREE_BORDER_BUFFER {
+            for z in TREE_BORDER_BUFFER..CHUNK_SIZE - TREE_BORDER_BUFFER {
+                for y in (SKY_ISLAND_BASE_Y..CHUNK_HEIGHT.saturating_sub(TREE_MAX_HEIGHT)).rev() {
+                    if self.blocks[x][y][z] != BlockType::Grass {
+                        continue;
+                    }
+                    // Verify there's air above (actual surface)
+                    if y + 1 >= CHUNK_HEIGHT || self.blocks[x][y + 1][z] != BlockType::Air {
+                        continue;
+                    }
+
+                    let world_x = (world_offset_x + x as i32) as f64;
+                    let world_z = (world_offset_z + z as i32) as f64;
+
+                    // Dense placement - low threshold so most grass blocks get a tree
+                    let tree_noise = perlin.get([world_x * TREE_NOISE_SCALE, world_z * TREE_NOISE_SCALE]);
+                    if tree_noise < TREE_THRESHOLD_FOREST_BASE {
+                        continue;
+                    }
+
+                    // Tight spacing for dense canopy
+                    let mut too_close = false;
+                    'sky_check: for check_x in x.saturating_sub(TREE_SPACING_FOREST_DENSE)..=(x + TREE_SPACING_FOREST_DENSE).min(CHUNK_SIZE - 1) {
+                        for check_z in z.saturating_sub(TREE_SPACING_FOREST_DENSE)..=(z + TREE_SPACING_FOREST_DENSE).min(CHUNK_SIZE - 1) {
+                            if check_x == x && check_z == z { continue; }
+                            if y + 1 < CHUNK_HEIGHT && self.blocks[check_x][y + 1][check_z] == BlockType::Wood {
+                                too_close = true;
+                                break 'sky_check;
+                            }
+                        }
+                    }
+                    if too_close { continue; }
+
+                    // Wide height variety - same distribution as forest biome
+                    let tree_seed = ((world_x as i64).wrapping_mul(TREE_SEED_HASH_1) ^ (world_z as i64).wrapping_mul(TREE_SEED_HASH_2)) as u64;
+                    let mut rng = StdRng::seed_from_u64(tree_seed);
+                    let height_roll = rng.gen::<f64>();
+                    let trunk_height = if height_roll < FOREST_TREE_SHORT_CHANCE {
+                        rng.gen_range(FOREST_TREE_SHORT_MIN..=FOREST_TREE_SHORT_MAX)
+                    } else if height_roll < FOREST_TREE_MEDIUM_CHANCE {
+                        rng.gen_range(FOREST_TREE_MEDIUM_MIN..=FOREST_TREE_MEDIUM_MAX)
+                    } else if height_roll < FOREST_TREE_TALL_CHANCE {
+                        rng.gen_range(FOREST_TREE_TALL_MIN..=FOREST_TREE_TALL_MAX)
+                    } else {
+                        rng.gen_range(FOREST_TREE_VERY_TALL_MIN..=FOREST_TREE_VERY_TALL_MAX)
+                    };
+
+                    // Trunk
+                    for trunk_y in (y + 1)..=(y + trunk_height).min(CHUNK_HEIGHT - 1) {
+                        self.blocks[x][trunk_y][z] = BlockType::Wood;
+                    }
+
+                    // Branches for taller trees
+                    let branch_start_y = y + trunk_height.saturating_sub(2);
+                    let should_branch = rng.gen::<f64>() < TREE_BRANCH_CHANCE;
+                    if should_branch && trunk_height >= BRANCH_MIN_TRUNK_HEIGHT {
+                        let num_branches = rng.gen_range(BRANCH_COUNT_MIN..=BRANCH_COUNT_MAX);
+                        for _ in 0..num_branches {
+                            let branch_y = rng.gen_range(branch_start_y..=y + trunk_height);
+                            if branch_y < CHUNK_HEIGHT {
+                                let directions: [(i32, i32); 4] = [(-1, 0), (1, 0), (0, -1), (0, 1)];
+                                let (dx, dz) = directions[rng.gen_range(0..4)];
+                                let bx = (x as i32 + dx) as usize;
+                                let bz = (z as i32 + dz) as usize;
+                                if bx < CHUNK_SIZE && bz < CHUNK_SIZE {
+                                    self.blocks[bx][branch_y][bz] = BlockType::Wood;
+                                }
+                            }
+                        }
+                    }
+
+                    // Leaves - scale canopy with trunk height
+                    let leaf_radius = if trunk_height >= TREE_HEIGHT_LARGE_THRESHOLD { LEAF_RADIUS_LARGE } else if trunk_height >= TREE_HEIGHT_MEDIUM_THRESHOLD { LEAF_RADIUS_MEDIUM } else { LEAF_RADIUS_SMALL };
+                    let leaf_height = if trunk_height >= TREE_HEIGHT_LARGE_THRESHOLD { LEAF_HEIGHT_LARGE } else if trunk_height >= TREE_HEIGHT_MEDIUM_THRESHOLD { LEAF_HEIGHT_MEDIUM } else { LEAF_HEIGHT_SMALL };
+                    let leaf_start_y = y + trunk_height - 1;
+
+                    for lx in x.saturating_sub(leaf_radius)..=(x + leaf_radius).min(CHUNK_SIZE - 1) {
+                        for lz in z.saturating_sub(leaf_radius)..=(z + leaf_radius).min(CHUNK_SIZE - 1) {
+                            for ly in leaf_start_y..=(leaf_start_y + leaf_height).min(CHUNK_HEIGHT - 1) {
+                                let dx = (lx as i32 - x as i32).abs();
+                                let dz = (lz as i32 - z as i32).abs();
+                                let dy = ly - leaf_start_y;
+
+                                let is_corner = dx == leaf_radius as i32 && dz == leaf_radius as i32;
+                                let skip_corner = is_corner && (dy == 0 || dy >= leaf_height - 1);
+                                let at_top = dy >= leaf_height - 1;
+                                let too_far_at_top = at_top && (dx > 1 || dz > 1);
+
+                                if !skip_corner && !too_far_at_top && self.blocks[lx][ly][lz] == BlockType::Air {
+                                    self.blocks[lx][ly][lz] = BlockType::Leaves;
+                                }
+                            }
+                        }
+                    }
+
+                    break; // One tree per column
+                }
+            }
+        }
     }
 
     pub fn get_block(&self, x: usize, y: usize, z: usize) -> BlockType {
