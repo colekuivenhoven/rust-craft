@@ -129,12 +129,20 @@ pub struct State {
     underwater_bind_group_layout: wgpu::BindGroupLayout,
     underwater_bind_group: wgpu::BindGroup,
     underwater_uniform_buffer: wgpu::Buffer,
-    // Off-screen texture for post-processing
+    // Off-screen textures for post-processing
     scene_texture: wgpu::Texture,
     scene_texture_view: wgpu::TextureView,
+    post_process_texture: wgpu::Texture,
+    post_process_texture_view: wgpu::TextureView,
     scene_sampler: wgpu::Sampler,
     start_time: Instant,
-    
+
+    // Motion blur (Post-Processing)
+    motion_blur_pipeline: wgpu::RenderPipeline,
+    motion_blur_bind_group_layout: wgpu::BindGroupLayout,
+    motion_blur_bind_group: wgpu::BindGroup,
+    motion_blur_uniform_buffer: wgpu::Buffer,
+
     // Texture atlas
     texture_atlas: TextureAtlas,
     // Breaking mechanics
@@ -946,25 +954,7 @@ impl State {
             ],
         });
 
-        // 5. Underwater Bind Group
-        let underwater_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Underwater Bind Group"),
-            layout: &underwater_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: underwater_uniform_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&scene_texture_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::Sampler(&scene_sampler),
-                },
-            ],
-        });
+        // 5. Underwater Bind Group (created later after motion blur setup, pointing to post_process_texture)
 
         // Underwater effect pipeline
         let underwater_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -1021,6 +1011,151 @@ impl State {
             },
             multiview: None,
             cache: None,
+        });
+
+        // === MOTION BLUR POST-PROCESSING ===
+
+        // Second off-screen texture for chaining post-process passes
+        let post_process_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Post Process Texture"),
+            size: wgpu::Extent3d {
+                width: config.width,
+                height: config.height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: config.format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let post_process_texture_view = post_process_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let motion_blur_uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Motion Blur Uniform Buffer"),
+            contents: bytemuck::cast_slice(&[0.0f32, 0.0, 0.0, 0.0]), // blur_dir.xy, strength, padding
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        let motion_blur_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Motion Blur Bind Group Layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+
+        let motion_blur_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Motion Blur Bind Group"),
+            layout: &motion_blur_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: motion_blur_uniform_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&scene_texture_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&scene_sampler),
+                },
+            ],
+        });
+
+        let motion_blur_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Motion Blur Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/motion_blur_shader.wgsl").into()),
+        });
+
+        let motion_blur_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Motion Blur Pipeline Layout"),
+            bind_group_layouts: &[&motion_blur_bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
+        let motion_blur_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Motion Blur Pipeline"),
+            layout: Some(&motion_blur_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &motion_blur_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &motion_blur_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            multiview: None,
+            cache: None,
+        });
+
+        // Update underwater bind group to read from post_process_texture (after motion blur)
+        let underwater_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Underwater Bind Group"),
+            layout: &underwater_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: underwater_uniform_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&post_process_texture_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&scene_sampler),
+                },
+            ],
         });
 
         Self {
@@ -1087,8 +1222,15 @@ impl State {
             underwater_uniform_buffer,
             scene_texture,
             scene_texture_view,
+            post_process_texture,
+            post_process_texture_view,
             scene_sampler,
             start_time,
+            // Motion blur
+            motion_blur_pipeline,
+            motion_blur_bind_group_layout,
+            motion_blur_bind_group,
+            motion_blur_uniform_buffer,
             // Texture atlas
             texture_atlas,
             // Breaking mechanics
@@ -1136,7 +1278,7 @@ impl State {
 
     pub fn process_mouse(&mut self, dx: f64, dy: f64) {
         if self.mouse_captured {
-            self.camera_controller.process_mouse(&mut self.camera, dx as f32, dy as f32);
+            self.camera_controller.process_mouse(dx as f32, dy as f32);
         }
     }
 
@@ -1221,7 +1363,44 @@ impl State {
             });
             self.scene_texture_view = self.scene_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-            // Recreate Underwater Bind Group (points to new scene texture view)
+            // Recreate Post Process Texture
+            self.post_process_texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("Post Process Texture"),
+                size: wgpu::Extent3d {
+                    width: new_size.width,
+                    height: new_size.height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: self.config.format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+            self.post_process_texture_view = self.post_process_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+            // Recreate Motion Blur Bind Group (reads from scene_texture)
+            self.motion_blur_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Motion Blur Bind Group"),
+                layout: &self.motion_blur_bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: self.motion_blur_uniform_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&self.scene_texture_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::Sampler(&self.scene_sampler),
+                    },
+                ],
+            });
+
+            // Recreate Underwater Bind Group (reads from post_process_texture after motion blur)
             self.underwater_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("Underwater Bind Group"),
                 layout: &self.underwater_bind_group_layout,
@@ -1232,7 +1411,7 @@ impl State {
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
-                        resource: wgpu::BindingResource::TextureView(&self.scene_texture_view),
+                        resource: wgpu::BindingResource::TextureView(&self.post_process_texture_view),
                     },
                     wgpu::BindGroupEntry {
                         binding: 2,
@@ -2189,6 +2368,32 @@ impl State {
         self.camera_underwater = self.camera_controller.update_camera(&mut self.camera, dt, &self.world, self.noclip_mode);
         self.player.position = self.camera.position;
 
+        // Update motion blur uniform from camera rotation velocity
+        {
+            use crate::camera::{MOTION_BLUR_AMOUNT};
+            let yaw_vel = self.camera_controller.yaw_velocity;
+            let pitch_vel = self.camera_controller.pitch_velocity;
+            // Map rotation velocity to screen-space blur direction
+            // yaw -> horizontal, pitch -> vertical; scale by dt-like factor for perceptual sizing
+            let blur_scale = 0.015; // converts rad/s to UV-space offset
+            let blur_x = yaw_vel * blur_scale;
+            let blur_y = pitch_vel * blur_scale;
+            let magnitude = (blur_x * blur_x + blur_y * blur_y).sqrt();
+            // Normalize direction, strength is magnitude * user amount
+            let (dir_x, dir_y) = if magnitude > 0.0001 {
+                (blur_x / magnitude, blur_y / magnitude)
+            } else {
+                (0.0, 0.0)
+            };
+            let strength = (magnitude * MOTION_BLUR_AMOUNT).min(0.05); // cap to avoid extreme blur
+            let uniform_data: [f32; 4] = [dir_x, dir_y, strength, 0.0];
+            self.queue.write_buffer(
+                &self.motion_blur_uniform_buffer,
+                0,
+                bytemuck::cast_slice(&uniform_data),
+            );
+        }
+
         // Fall damage: velocity threshold of -15.0 (roughly 4+ block fall)
         // Damage scales with how far beyond the threshold
         let fall_vel = self.camera_controller.last_fall_velocity;
@@ -2373,14 +2578,9 @@ impl State {
                 label: Some("Render Encoder"),
             });
             
-        // LOGIC: If we are underwater, we render the world to `scene_texture_view` first,
-        // so we can distort it later. If we are NOT underwater, we render directly to
-        // `swap_chain_view` (the screen) to save performance.
-        let world_render_target = if self.camera_underwater {
-            &self.scene_texture_view
-        } else {
-            &swap_chain_view
-        };
+        // Always render world to scene_texture for motion blur post-processing.
+        // Motion blur then writes to swap_chain (or post_process_texture if underwater).
+        let world_render_target = &self.scene_texture_view;
 
         // --- PASS 1: RENDER WORLD (Opaque chunks & enemies) ---
         {
@@ -2933,18 +3133,47 @@ impl State {
             }
         }
 
-        // --- PASS 5: POST-PROCESSING (Underwater Effect) ---
-        // Only run if camera is underwater.
-        // Input: scene_texture_view (bound in bind group)
-        // Output: swap_chain_view (Screen)
+        // --- PASS 5: POST-PROCESSING (Motion Blur + Underwater) ---
+        // Motion blur always runs: scene_texture -> swap_chain (or post_process_texture if underwater)
+        // If underwater, an additional pass applies the underwater effect afterward.
+        {
+            // If underwater, motion blur writes to post_process_texture; underwater reads it next.
+            // If not underwater, motion blur writes directly to swap_chain.
+            let blur_target = if self.camera_underwater {
+                &self.post_process_texture_view
+            } else {
+                &swap_chain_view
+            };
+
+            let mut blur_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Motion Blur Render Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: blur_target,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+
+            blur_pass.set_pipeline(&self.motion_blur_pipeline);
+            blur_pass.set_bind_group(0, &self.motion_blur_bind_group, &[]);
+            blur_pass.draw(0..3, 0..1); // Full-screen triangle
+        }
+
+        // If underwater, apply underwater distortion: post_process_texture -> swap_chain
         if self.camera_underwater {
             let mut underwater_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Underwater Render Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &swap_chain_view, // Now writing to screen
+                    view: &swap_chain_view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), // Replace screen content with processed image
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -2954,7 +3183,6 @@ impl State {
             });
 
             underwater_pass.set_pipeline(&self.underwater_pipeline);
-            // Bind the texture we just rendered to in passes 1-3
             underwater_pass.set_bind_group(0, &self.underwater_bind_group, &[]);
             underwater_pass.draw(0..3, 0..1); // Full-screen triangle
         }

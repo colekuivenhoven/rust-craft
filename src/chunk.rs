@@ -1444,6 +1444,9 @@ impl Chunk {
                         } else if is_semi_transparent {
                             // Semi-transparent blocks always draw all faces (except against same block type)
                             neighbor_block != block
+                        } else if block == BlockType::Leaves {
+                            // Leaves always render all six faces unconditionally
+                            true
                         } else {
                             (block.is_transparent() || neighbor_block.is_transparent() || neighbor_block.is_semi_transparent()) && neighbor_block != block
                         };
@@ -1571,25 +1574,11 @@ impl Chunk {
                                         base_index + 1, base_index + 2, base_index + 3,
                                         base_index + 3, base_index, base_index + 1,
                                     ]);
-                                    // For transparent blocks (leaves), also add back face (reversed winding)
-                                    if block.is_transparent() {
-                                        indices.extend_from_slice(&[
-                                            base_index + 3, base_index + 2, base_index + 1,
-                                            base_index + 1, base_index, base_index + 3,
-                                        ]);
-                                    }
                                 } else {
                                     indices.extend_from_slice(&[
                                         base_index, base_index + 1, base_index + 2,
                                         base_index + 2, base_index + 3, base_index,
                                     ]);
-                                    // For transparent blocks (leaves), also add back face (reversed winding)
-                                    if block.is_transparent() {
-                                        indices.extend_from_slice(&[
-                                            base_index + 2, base_index + 1, base_index,
-                                            base_index, base_index + 3, base_index + 2,
-                                        ]);
-                                    }
                                 }
                             }
                         }

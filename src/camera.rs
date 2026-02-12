@@ -1,5 +1,18 @@
 use cgmath::*;
 
+// === SMOOTHING CONSTANTS ===
+
+/// How quickly horizontal movement reaches target speed (higher = snappier). Units: 1/s.
+pub const MOVEMENT_ACCEL: f32 = 18.0;
+/// How quickly horizontal movement decays to zero when keys are released (higher = snappier). Units: 1/s.
+pub const MOVEMENT_DECEL: f32 = 12.0;
+/// Mouse look smoothing time constant in seconds (0.0 = instant/no smoothing, higher = smoother).
+pub const MOUSE_SMOOTHING: f32 = 0.025;
+/// Motion blur intensity (0.0 = disabled, 1.0 = heavy blur).
+pub const MOTION_BLUR_AMOUNT: f32 = 0.35;
+/// Number of samples for the motion blur shader (higher = smoother blur, more expensive).
+pub const MOTION_BLUR_SAMPLES: u32 = 8;
+
 pub struct Camera {
     pub position: Point3<f32>,
     pub yaw: Rad<f32>,
@@ -46,6 +59,12 @@ pub struct CameraController {
     pub velocity: Vector3<f32>,
     pub on_ground: bool,
     pub last_fall_velocity: f32,  // Captures velocity.y at moment of landing (for fall damage)
+    // Mouse look smoothing: raw input accumulates into target, camera lerps toward it
+    pub target_yaw: f32,
+    pub target_pitch: f32,
+    // Camera rotation velocity (radians/sec) — used by motion blur
+    pub yaw_velocity: f32,
+    pub pitch_velocity: f32,
 }
 
 impl CameraController {
@@ -62,20 +81,43 @@ impl CameraController {
             velocity: Vector3::new(0.0, 0.0, 0.0),
             on_ground: false,
             last_fall_velocity: 0.0,
+            target_yaw: 0.0,
+            target_pitch: 0.0,
+            yaw_velocity: 0.0,
+            pitch_velocity: 0.0,
         }
     }
 
-    pub fn process_mouse(&mut self, camera: &mut Camera, dx: f32, dy: f32) {
-        camera.yaw += Rad(dx * self.sensitivity);
-        camera.pitch -= Rad(dy * self.sensitivity);
+    pub fn process_mouse(&mut self, dx: f32, dy: f32) {
+        // Accumulate raw mouse input into targets; camera lerps toward these in update_camera
+        self.target_yaw += dx * self.sensitivity;
+        self.target_pitch -= dy * self.sensitivity;
 
-        // Clamp pitch to prevent camera flipping
         let max_pitch = std::f32::consts::FRAC_PI_2 - 0.1;
-        camera.pitch.0 = camera.pitch.0.clamp(-max_pitch, max_pitch);
+        self.target_pitch = self.target_pitch.clamp(-max_pitch, max_pitch);
     }
 
     /// Updates camera position with physics. Returns true if camera is underwater.
     pub fn update_camera(&mut self, camera: &mut Camera, dt: f32, world: &crate::world::World, noclip: bool) -> bool {
+        // --- Mouse look smoothing ---
+        let prev_yaw = camera.yaw.0;
+        let prev_pitch = camera.pitch.0;
+
+        if MOUSE_SMOOTHING <= 0.0 {
+            camera.yaw = Rad(self.target_yaw);
+            camera.pitch = Rad(self.target_pitch);
+        } else {
+            let factor = 1.0 - (-dt / MOUSE_SMOOTHING).exp();
+            camera.yaw = Rad(camera.yaw.0 + (self.target_yaw - camera.yaw.0) * factor);
+            camera.pitch = Rad(camera.pitch.0 + (self.target_pitch - camera.pitch.0) * factor);
+        }
+
+        // Track rotation velocity for motion blur
+        if dt > 0.0 {
+            self.yaw_velocity = (camera.yaw.0 - prev_yaw) / dt;
+            self.pitch_velocity = (camera.pitch.0 - prev_pitch) / dt;
+        }
+
         let player_height = 1.6; // Player is ~1.6 blocks tall, camera at eye level
 
         // Check if camera (head) is underwater
@@ -126,27 +168,33 @@ impl CameraController {
             }
 
             // Normalize and apply speed
-            if move_dir.magnitude2() > 0.0 {
+            let has_input = move_dir.magnitude2() > 0.0;
+            if has_input {
                 move_dir = move_dir.normalize() * fly_speed;
             }
 
-            // Apply movement directly (no collision)
-            camera.position.x += move_dir.x * dt;
-            camera.position.y += move_dir.y * dt;
-            camera.position.z += move_dir.z * dt;
+            // Smoothly interpolate noclip velocity
+            let rate = if has_input { MOVEMENT_ACCEL } else { MOVEMENT_DECEL };
+            let factor = 1.0 - (-rate * dt).exp();
+            self.velocity.x += (move_dir.x - self.velocity.x) * factor;
+            self.velocity.y += (move_dir.y - self.velocity.y) * factor;
+            self.velocity.z += (move_dir.z - self.velocity.z) * factor;
 
-            // Reset velocity and on_ground state
-            self.velocity = Vector3::new(0.0, 0.0, 0.0);
+            // Apply smoothed velocity (no collision)
+            camera.position.x += self.velocity.x * dt;
+            camera.position.y += self.velocity.y * dt;
+            camera.position.z += self.velocity.z * dt;
+
             self.on_ground = false;
             return camera_underwater;
         }
 
         // Swimming mode: different physics when in water
         if in_water {
-            let swim_speed = self.speed * 0.6; // Slower in water
+            let swim_speed = self.speed * 0.5; // Slower in water
             let sink_speed = -2.0; // Slow sinking
-            let swim_up_speed = 6.0;
-            let swim_down_speed = -6.0;
+            let swim_up_speed = 8.0;
+            let swim_down_speed = -5.0;
 
             // Get movement direction
             let forward = camera.get_horizontal_direction();
@@ -167,7 +215,8 @@ impl CameraController {
             }
 
             // Normalize horizontal movement
-            if move_dir.magnitude2() > 0.0 {
+            let has_input = move_dir.magnitude2() > 0.0;
+            if has_input {
                 move_dir = move_dir.normalize() * swim_speed;
             }
 
@@ -179,9 +228,12 @@ impl CameraController {
                 vertical_velocity = swim_down_speed;
             }
 
-            // Apply water drag to existing velocity
-            self.velocity.x = move_dir.x;
-            self.velocity.z = move_dir.z;
+            // Smoothly interpolate horizontal water movement
+            let rate = if has_input { MOVEMENT_ACCEL } else { MOVEMENT_DECEL };
+            let factor = 1.0 - (-rate * dt).exp();
+            self.velocity.x += (move_dir.x - self.velocity.x) * factor;
+            self.velocity.z += (move_dir.z - self.velocity.z) * factor;
+            // Vertical set directly so the player can break the surface and exit water
             self.velocity.y = vertical_velocity;
 
             // Calculate new position
@@ -231,7 +283,7 @@ impl CameraController {
         }
 
         // Normal mode with gravity and collision
-        let gravity = -20.0;
+        let gravity = -30.0;
         let jump_velocity = 10.0;
 
         // Get movement direction (horizontal only for WASD)
@@ -254,13 +306,16 @@ impl CameraController {
         }
 
         // Normalize and apply speed
-        if move_dir.magnitude2() > 0.0 {
+        let has_input = move_dir.magnitude2() > 0.0;
+        if has_input {
             move_dir = move_dir.normalize() * self.speed;
         }
 
-        // Set horizontal velocity directly for responsive controls
-        self.velocity.x = move_dir.x;
-        self.velocity.z = move_dir.z;
+        // Smoothly accelerate/decelerate horizontal velocity
+        let rate = if has_input { MOVEMENT_ACCEL } else { MOVEMENT_DECEL };
+        let factor = 1.0 - (-rate * dt).exp();
+        self.velocity.x += (move_dir.x - self.velocity.x) * factor;
+        self.velocity.z += (move_dir.z - self.velocity.z) * factor;
 
         // Apply gravity
         self.velocity.y += gravity * dt;

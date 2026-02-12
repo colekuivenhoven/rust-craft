@@ -1,5 +1,5 @@
 use cgmath::Vector3;
-use crate::texture::{FaceTextures, TEX_DIRT, TEX_GRASS_TOP, TEX_GRASS_SIDE, TEX_SAND, TEX_ICE, TEX_STONE, TEX_WOOD_TOP, TEX_WOOD_SIDE, TEX_NONE};
+use crate::texture::{FaceTextures, TEX_DIRT, TEX_GRASS_TOP, TEX_GRASS_SIDE, TEX_SAND, TEX_ICE, TEX_STONE, TEX_WOOD_TOP, TEX_WOOD_SIDE, TEX_LEAVES, TEX_NONE};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BlockType {
@@ -172,6 +172,9 @@ impl BlockType {
 
             // Stone
             BlockType::Stone => FaceTextures::all(TEX_STONE),
+
+            // Leaves
+            BlockType::Leaves => FaceTextures::all(TEX_LEAVES),
 
             // All other blocks use color fallback
             _ => FaceTextures::all(TEX_NONE),

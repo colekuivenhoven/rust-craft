@@ -70,6 +70,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         base_color = tex_color.rgb;
         // Use texture alpha for transparency (e.g., ice blocks)
         alpha = tex_color.a * in.alpha;
+
+        // Alpha test: discard fully transparent pixels so they don't write to the depth buffer
+        // (prevents leaf texture transparent pixels from blocking faces behind them)
+        if (alpha < 0.5) {
+            discard;
+        }
     }
 
     // Minimum ambient light (visibility even in complete darkness)
