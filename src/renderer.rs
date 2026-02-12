@@ -2324,6 +2324,32 @@ impl State {
                 let place_z = z + normal.z;
 
                 if self.world.get_block_world(place_x, place_y, place_z) == BlockType::Air {
+                    // Check if placement would overlap with player's collision capsule
+                    let player_pos = self.camera.position;
+                    let player_radius = 0.25;
+                    let player_height = 1.6;
+                    let player_min_x = player_pos.x - player_radius;
+                    let player_max_x = player_pos.x + player_radius;
+                    let player_min_y = player_pos.y - player_height;
+                    let player_max_y = player_pos.y;
+                    let player_min_z = player_pos.z - player_radius;
+                    let player_max_z = player_pos.z + player_radius;
+
+                    let block_min_x = place_x as f32;
+                    let block_max_x = place_x as f32 + 1.0;
+                    let block_min_y = place_y as f32;
+                    let block_max_y = place_y as f32 + 1.0;
+                    let block_min_z = place_z as f32;
+                    let block_max_z = place_z as f32 + 1.0;
+
+                    let overlaps = player_max_x > block_min_x && player_min_x < block_max_x
+                        && player_max_y > block_min_y && player_min_y < block_max_y
+                        && player_max_z > block_min_z && player_min_z < block_max_z;
+
+                    if overlaps {
+                        return; // Don't place block inside player
+                    }
+
                     self.world
                         .set_block_world(place_x, place_y, place_z, block_type);
                     self.player

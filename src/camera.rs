@@ -407,6 +407,33 @@ impl CameraController {
             }
         }
 
+        // Overlap resolution: if player's body is embedded in a solid block
+        // (e.g., a block was placed inside them), push them up above it.
+        // Check blocks from feet to head at all check positions.
+        {
+            let feet_y = new_pos.y - player_height;
+            let feet_block_y = feet_y.floor() as i32;
+            let body_block_y = (new_pos.y - 1.0).floor() as i32;
+
+            for &by in &[feet_block_y, body_block_y] {
+                for (check_x, check_z) in check_positions.iter() {
+                    let block = world.get_block_world(
+                        check_x.floor() as i32,
+                        by,
+                        check_z.floor() as i32,
+                    );
+                    if block.is_solid() {
+                        let block_top = (by + 1) as f32;
+                        let required_y = block_top + player_height;
+                        if required_y > new_pos.y && feet_y < block_top {
+                            new_pos.y = required_y;
+                            self.velocity.y = self.velocity.y.max(0.0);
+                        }
+                    }
+                }
+            }
+        }
+
         // Ground collision - only when falling, check if we're crossing into a block from above
         let feet_y = new_pos.y - player_height;
         let mut highest_ground = f32::NEG_INFINITY;

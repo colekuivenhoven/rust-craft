@@ -187,69 +187,76 @@ impl World {
         let local_x = x.rem_euclid(CHUNK_SIZE as i32) as usize;
         let local_z = z.rem_euclid(CHUNK_SIZE as i32) as usize;
 
-        // Light can propagate up to 15 blocks, so changes near edges affect neighbors.
-        let light_propagation_distance = 15;
-
         // 1. Update the block in the specific chunk
+        // set_block() calls on_block_removed/on_block_placed for incremental lighting
+        // and marks dirty=true for mesh rebuild. No need for full light recalc.
         if let Some(chunk) = self.chunks.get_mut(&(chunk_x, chunk_z)) {
             chunk.set_block(local_x, y as usize, local_z, block_type);
-            // Always mark light_dirty to ensure full recalculation
-            chunk.light_dirty = true;
         }
 
-        // 2. Check all neighbors (including diagonals) within range.
-        // - We determine the range of chunk offsets (-1, 0, or 1) based on proximity to edges.
-        
-        let min_dx = if local_x < light_propagation_distance { -1 } else { 0 };
-        let max_dx = if local_x >= CHUNK_SIZE - light_propagation_distance { 1 } else { 0 };
-        
-        let min_dz = if local_z < light_propagation_distance { -1 } else { 0 };
-        let max_dz = if local_z >= CHUNK_SIZE - light_propagation_distance { 1 } else { 0 };
+        // 2. Mark immediate neighbor chunks as dirty (mesh rebuild only) if block
+        // is within 2 blocks of the chunk edge. The incremental lighting update
+        // already handled most light changes; neighbors just need mesh updates
+        // for correct face culling at boundaries.
+        let edge_distance = 2;
+
+        let min_dx = if local_x < edge_distance { -1 } else { 0 };
+        let max_dx = if local_x >= CHUNK_SIZE - edge_distance { 1 } else { 0 };
+
+        let min_dz = if local_z < edge_distance { -1 } else { 0 };
+        let max_dz = if local_z >= CHUNK_SIZE - edge_distance { 1 } else { 0 };
 
         for dx in min_dx..=max_dx {
             for dz in min_dz..=max_dz {
-                // Skip the center chunk (dx=0, dz=0) as it was handled above
                 if dx == 0 && dz == 0 {
                     continue;
                 }
 
                 if let Some(neighbor) = self.chunks.get_mut(&(chunk_x + dx, chunk_z + dz)) {
-                    neighbor.dirty = true;       // Needs mesh rebuild
-                    neighbor.light_dirty = true; // Needs light recalc
+                    neighbor.dirty = true;
                 }
             }
         }
+
+        // 3. Lightweight cross-chunk light propagation for the modified chunk only
+        self.propagate_light_for_chunk((chunk_x, chunk_z));
     }
 
     pub fn rebuild_dirty_chunks(&mut self) {
-        // First, recalculate lighting for any chunks that need it
+        // Recalculate lighting only for chunks explicitly marked light_dirty
+        // (e.g., from new chunk loading, NOT from single block changes which use
+        // incremental updates via on_block_removed/on_block_placed)
         let light_dirty_positions: Vec<(i32, i32)> = self.chunks.iter()
             .filter(|(_, c)| c.light_dirty)
             .map(|(&pos, _)| pos)
             .collect();
 
-        for pos in light_dirty_positions.iter() {
+        // Limit full light recalcs per frame to avoid stuttering
+        let max_light_recalcs = 2;
+        for pos in light_dirty_positions.iter().take(max_light_recalcs) {
             if let Some(chunk) = self.chunks.get_mut(pos) {
                 lighting::calculate_chunk_lighting(chunk);
             }
         }
 
-        // Cross-chunk light propagation: propagate light from chunk edges into neighbors
-        // - This is needed because calculate_chunk_lighting only works within a single chunk
+        // Cross-chunk propagation scoped to only dirty chunks and their neighbors
         if !light_dirty_positions.is_empty() {
-            self.propagate_cross_chunk_lighting(&light_dirty_positions);
+            let recalced: Vec<(i32, i32)> = light_dirty_positions.iter()
+                .take(max_light_recalcs).cloned().collect();
+            self.propagate_cross_chunk_lighting(&recalced);
         }
 
-        // Then rebuild meshes for dirty chunks
+        // Rebuild meshes for dirty chunks (limit per frame to avoid stuttering)
+        let max_mesh_rebuilds = 4;
         let dirty_chunk_positions: Vec<(i32, i32)> = self.chunks.iter()
             .filter(|(_, c)| c.dirty)
             .map(|(&pos, _)| pos)
+            .take(max_mesh_rebuilds)
             .collect();
 
         for pos in dirty_chunk_positions {
             let (cx, cz) = pos;
 
-            // Generate mesh data immutably (read-only access to self.chunks)
             let mesh_data = {
                 if let Some(center) = self.chunks.get(&pos) {
                     let neighbors = ChunkNeighbors {
@@ -265,7 +272,6 @@ impl World {
                 }
             };
 
-            // Apply mesh data mutably (write access to self.chunks)
             if let Some((vertices, indices, water_vertices, water_indices, transparent_vertices, transparent_indices)) = mesh_data {
                 if let Some(chunk) = self.chunks.get_mut(&pos) {
                     chunk.vertices = vertices;
@@ -375,16 +381,27 @@ impl World {
         }
     }
 
-    /// Propagate light across chunk boundaries (full version for initial load/block changes).
-    fn propagate_cross_chunk_lighting(&mut self, _dirty_positions: &[(i32, i32)]) {
-        for _ in 0..15 {
+    /// Propagate light across chunk boundaries for the given dirty chunks and their neighbors.
+    fn propagate_cross_chunk_lighting(&mut self, dirty_positions: &[(i32, i32)]) {
+        // Build the set of chunks to process: dirty chunks + their immediate neighbors
+        let mut positions_to_process: Vec<(i32, i32)> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for &(cx, cz) in dirty_positions {
+            for dx in -1..=1 {
+                for dz in -1..=1 {
+                    let pos = (cx + dx, cz + dz);
+                    if self.chunks.contains_key(&pos) && seen.insert(pos) {
+                        positions_to_process.push(pos);
+                    }
+                }
+            }
+        }
+
+        for _ in 0..3 {
             let mut any_changes = false;
 
-            // Get all chunk positions (we need to check all, not just dirty ones)
-            let all_positions: Vec<(i32, i32)> = self.chunks.keys().cloned().collect();
-
-            // For each chunk, propagate its edge light into neighbors
-            for (cx, cz) in all_positions {
+            // For each chunk in the scoped set, propagate its edge light into neighbors
+            for (cx, cz) in positions_to_process.clone() {
 
                 // Propagate to right neighbor (cx+1): our x=CHUNK_SIZE-1 -> their x=0
                 if self.chunks.contains_key(&(cx + 1, cz)) {
