@@ -378,9 +378,63 @@ pub fn create_face_vertices(pos: Vector3<f32>, block_type: BlockType, face_index
     create_face_vertices_with_alpha(pos, block_type, face_index, light_level, 1.0, tex_index, uvs, ao_values)
 }
 
+/// Creates vertices for a single face with a custom color tint (used for noise-colored leaves)
+pub fn create_face_vertices_tinted(pos: Vector3<f32>, face_index: usize, light_level: f32, tex_index: u32, uvs: [[f32; 2]; 4], ao_values: [f32; 4], tint: [f32; 3]) -> [Vertex; 4] {
+    let color = tint;
+    let x = pos.x;
+    let y = pos.y;
+    let z = pos.z;
+    let alpha = 1.0;
+
+    match face_index {
+        0 => [ // Front face (+Z)
+            Vertex { position: [x, y, z + 1.0], color, normal: [0.0, 0.0, 1.0], light_level, alpha, uv: uvs[0], tex_index, ao: ao_values[0] },
+            Vertex { position: [x + 1.0, y, z + 1.0], color, normal: [0.0, 0.0, 1.0], light_level, alpha, uv: uvs[1], tex_index, ao: ao_values[1] },
+            Vertex { position: [x + 1.0, y + 1.0, z + 1.0], color, normal: [0.0, 0.0, 1.0], light_level, alpha, uv: uvs[2], tex_index, ao: ao_values[2] },
+            Vertex { position: [x, y + 1.0, z + 1.0], color, normal: [0.0, 0.0, 1.0], light_level, alpha, uv: uvs[3], tex_index, ao: ao_values[3] },
+        ],
+        1 => [ // Back face (-Z)
+            Vertex { position: [x + 1.0, y, z], color, normal: [0.0, 0.0, -1.0], light_level, alpha, uv: uvs[0], tex_index, ao: ao_values[0] },
+            Vertex { position: [x, y, z], color, normal: [0.0, 0.0, -1.0], light_level, alpha, uv: uvs[1], tex_index, ao: ao_values[1] },
+            Vertex { position: [x, y + 1.0, z], color, normal: [0.0, 0.0, -1.0], light_level, alpha, uv: uvs[2], tex_index, ao: ao_values[2] },
+            Vertex { position: [x + 1.0, y + 1.0, z], color, normal: [0.0, 0.0, -1.0], light_level, alpha, uv: uvs[3], tex_index, ao: ao_values[3] },
+        ],
+        2 => [ // Top face (+Y)
+            Vertex { position: [x, y + 1.0, z + 1.0], color, normal: [0.0, 1.0, 0.0], light_level, alpha, uv: uvs[0], tex_index, ao: ao_values[0] },
+            Vertex { position: [x + 1.0, y + 1.0, z + 1.0], color, normal: [0.0, 1.0, 0.0], light_level, alpha, uv: uvs[1], tex_index, ao: ao_values[1] },
+            Vertex { position: [x + 1.0, y + 1.0, z], color, normal: [0.0, 1.0, 0.0], light_level, alpha, uv: uvs[2], tex_index, ao: ao_values[2] },
+            Vertex { position: [x, y + 1.0, z], color, normal: [0.0, 1.0, 0.0], light_level, alpha, uv: uvs[3], tex_index, ao: ao_values[3] },
+        ],
+        3 => [ // Bottom face (-Y)
+            Vertex { position: [x, y, z], color, normal: [0.0, -1.0, 0.0], light_level, alpha, uv: uvs[0], tex_index, ao: ao_values[0] },
+            Vertex { position: [x + 1.0, y, z], color, normal: [0.0, -1.0, 0.0], light_level, alpha, uv: uvs[1], tex_index, ao: ao_values[1] },
+            Vertex { position: [x + 1.0, y, z + 1.0], color, normal: [0.0, -1.0, 0.0], light_level, alpha, uv: uvs[2], tex_index, ao: ao_values[2] },
+            Vertex { position: [x, y, z + 1.0], color, normal: [0.0, -1.0, 0.0], light_level, alpha, uv: uvs[3], tex_index, ao: ao_values[3] },
+        ],
+        4 => [ // Right face (+X)
+            Vertex { position: [x + 1.0, y, z + 1.0], color, normal: [1.0, 0.0, 0.0], light_level, alpha, uv: uvs[0], tex_index, ao: ao_values[0] },
+            Vertex { position: [x + 1.0, y, z], color, normal: [1.0, 0.0, 0.0], light_level, alpha, uv: uvs[1], tex_index, ao: ao_values[1] },
+            Vertex { position: [x + 1.0, y + 1.0, z], color, normal: [1.0, 0.0, 0.0], light_level, alpha, uv: uvs[2], tex_index, ao: ao_values[2] },
+            Vertex { position: [x + 1.0, y + 1.0, z + 1.0], color, normal: [1.0, 0.0, 0.0], light_level, alpha, uv: uvs[3], tex_index, ao: ao_values[3] },
+        ],
+        _ => [ // Left face (-X)
+            Vertex { position: [x, y, z], color, normal: [-1.0, 0.0, 0.0], light_level, alpha, uv: uvs[0], tex_index, ao: ao_values[0] },
+            Vertex { position: [x, y, z + 1.0], color, normal: [-1.0, 0.0, 0.0], light_level, alpha, uv: uvs[1], tex_index, ao: ao_values[1] },
+            Vertex { position: [x, y + 1.0, z + 1.0], color, normal: [-1.0, 0.0, 0.0], light_level, alpha, uv: uvs[2], tex_index, ao: ao_values[2] },
+            Vertex { position: [x, y + 1.0, z], color, normal: [-1.0, 0.0, 0.0], light_level, alpha, uv: uvs[3], tex_index, ao: ao_values[3] },
+        ],
+    }
+}
+
 /// Creates vertices for a single face of a cube with custom alpha and per-vertex AO
 pub fn create_face_vertices_with_alpha(pos: Vector3<f32>, block_type: BlockType, face_index: usize, light_level: f32, alpha: f32, tex_index: u32, uvs: [[f32; 2]; 4], ao_values: [f32; 4]) -> [Vertex; 4] {
-    let color = block_type.get_color();
+    // White tint for textured blocks (shader multiplies tex_color * vertex_color).
+    // Fallback color only used when tex_index == 255 (no texture).
+    let color = if tex_index != 255 {
+        [1.0, 1.0, 1.0]
+    } else {
+        block_type.get_color()
+    };
     let x = pos.x;
     let y = pos.y;
     let z = pos.z;
@@ -566,8 +620,11 @@ pub fn create_scaled_cube_vertices(
 ) -> Vec<Vertex> {
     use crate::texture::get_face_uvs;
 
-    let color = block_type.get_color();
     let face_textures = block_type.get_face_textures(false); // Dropped items are always "exposed"
+    // Use white tint for textured blocks (shader multiplies tex * color).
+    // For leaves, this gives a neutral white tint for dropped items/previews.
+    let has_texture = face_textures.get_for_face(0) != 255;
+    let color = if has_texture { [1.0, 1.0, 1.0] } else { block_type.get_color() };
     let half = scale * 0.5;
     let x = center.x - half;
     let y = center.y - half;

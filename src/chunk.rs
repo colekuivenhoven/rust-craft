@@ -1,4 +1,4 @@
-use crate::block::{BlockType, Vertex, create_face_vertices, create_water_face_vertices, AO_OFFSETS, calculate_ao};
+use crate::block::{BlockType, Vertex, create_face_vertices, create_face_vertices_tinted, create_water_face_vertices, AO_OFFSETS, calculate_ao};
 use crate::lighting;
 use crate::texture::{get_face_uvs, TEX_NONE};
 use cgmath::Vector3;
@@ -35,6 +35,7 @@ pub const SEED_SKY_ISLAND_DETAIL: u32 = MASTER_SEED.wrapping_add(160);
 pub const SEED_STALACTITE: u32 = MASTER_SEED.wrapping_add(161);
 pub const SEED_HILL: u32 = MASTER_SEED.wrapping_add(162);
 pub const SEED_GLOWSTONE: u32 = MASTER_SEED.wrapping_add(1);
+pub const SEED_LEAF_COLOR: u32 = MASTER_SEED.wrapping_add(700);
 
 // ============================================================================
 // TERRAIN GENERATION - Base terrain shape and height parameters
@@ -1406,6 +1407,9 @@ impl Chunk {
         let world_offset_x = chunk.position.0 * CHUNK_SIZE as i32;
         let world_offset_z = chunk.position.1 * CHUNK_SIZE as i32;
 
+        // Noise for leaf color variation (green ↔ orange)
+        let leaf_color_noise = Perlin::new(SEED_LEAF_COLOR);
+
         let face_directions: [(i32, i32, i32); 6] = [
             (0, 0, 1), (0, 0, -1), (0, 1, 0), (0, -1, 0), (1, 0, 0), (-1, 0, 0),
         ];
@@ -1563,7 +1567,25 @@ impl Chunk {
                                     ]);
                                 }
                             } else {
-                                let face_verts = create_face_vertices(world_pos, block, face_idx, light_normalized, tex_index, uvs, ao_values);
+                                let face_verts = if block == BlockType::Leaves {
+                                    // Compute noise-based leaf tint at block center
+                                    let wx = (world_offset_x + x as i32) as f64;
+                                    let wy = y as f64;
+                                    let wz = (world_offset_z + z as i32) as f64;
+                                    // Large scale (0.02) for gradual color flow across trees
+                                    let noise_val = leaf_color_noise.get([wx * 0.02, wy * 0.02, wz * 0.02]);
+                                    // Map noise (-1..1) to 0..1, then use as blend factor
+                                    let t = (noise_val as f32 * 0.5 + 0.5).clamp(0.0, 1.0);
+                                    // Vibrant green (0.3, 0.95, 0.2) ↔ Bright fall orange (1.0, 0.65, 0.1)
+                                    let tint = [
+                                        0.3 + t * (1.0 - 0.3),
+                                        0.95 + t * (0.65 - 0.95),
+                                        0.2 + t * (0.1 - 0.2),
+                                    ];
+                                    create_face_vertices_tinted(world_pos, face_idx, light_normalized, tex_index, uvs, ao_values, tint)
+                                } else {
+                                    create_face_vertices(world_pos, block, face_idx, light_normalized, tex_index, uvs, ao_values)
+                                };
 
                                 let base_index = vertices.len() as u16;
                                 vertices.extend_from_slice(&face_verts);

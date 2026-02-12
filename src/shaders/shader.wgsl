@@ -67,7 +67,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     } else {
         // Sample from texture atlas (includes alpha channel)
         let tex_color = textureSample(texture_atlas, texture_sampler, in.uv);
-        base_color = tex_color.rgb;
+        // Tint texture by vertex color (white = no tint, colored = leaf tint, etc.)
+        base_color = tex_color.rgb * in.color;
         // Use texture alpha for transparency (e.g., ice blocks)
         alpha = tex_color.a * in.alpha;
 
