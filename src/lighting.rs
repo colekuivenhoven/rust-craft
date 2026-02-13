@@ -52,7 +52,7 @@ pub fn calculate_chunk_lighting(chunk: &mut Chunk) {
 
                 if block.is_solid() && !block.is_transparent() {
                     sunlight = 0;
-                } else if block.is_transparent() && block != BlockType::Air {
+                } else if block.is_transparent() && !block.no_shadow_casting() {
                     sunlight = sunlight.saturating_sub(1);
                 }
 
@@ -114,7 +114,7 @@ pub fn on_block_removed(chunk: &mut Chunk, x: usize, y: usize, z: usize) {
         let mut sunlight = SUNLIGHT_LEVEL;
         for check_y in ((y + 1)..CHUNK_HEIGHT).rev() {
             let block = chunk.blocks[x][check_y][z];
-            if block.is_transparent() && block != BlockType::Air {
+            if block.is_transparent() && !block.no_shadow_casting() {
                 sunlight = sunlight.saturating_sub(1);
             }
         }
@@ -125,7 +125,7 @@ pub fn on_block_removed(chunk: &mut Chunk, x: usize, y: usize, z: usize) {
             if block.is_solid() && !block.is_transparent() {
                 break;
             }
-            if block.is_transparent() && block != BlockType::Air {
+            if block.is_transparent() && !block.no_shadow_casting() {
                 sunlight = sunlight.saturating_sub(1);
             }
 

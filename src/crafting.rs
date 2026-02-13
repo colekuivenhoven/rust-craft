@@ -45,12 +45,6 @@ impl CraftingSystem {
             output: (BlockType::Stone, 1.0),
         });
 
-        // Dirt + Grass -> More Grass
-        self.recipes.push(Recipe {
-            inputs: vec![(BlockType::Dirt, 2.0), (BlockType::Grass, 1.0)],
-            output: (BlockType::Grass, 3.0),
-        });
-
         // Sand -> Stone (smelting)
         self.recipes.push(Recipe {
             inputs: vec![(BlockType::Sand, 4.0)],

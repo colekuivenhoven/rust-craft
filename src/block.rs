@@ -1,10 +1,16 @@
 use cgmath::Vector3;
-use crate::texture::{FaceTextures, TEX_DIRT, TEX_GRASS_TOP, TEX_GRASS_SIDE, TEX_SAND, TEX_ICE, TEX_STONE, TEX_WOOD_TOP, TEX_WOOD_SIDE, TEX_LEAVES, TEX_GRAINS, TEX_NONE};
+use crate::texture::{FaceTextures, TEX_DIRT, TEX_SAND, TEX_ICE, TEX_STONE, TEX_WOOD_TOP, TEX_WOOD_SIDE, TEX_LEAVES, TEX_GRAINS, TEX_NONE};
+
+// ============================================================================
+// Cross Model Constants (grass tufts, foliage)
+// ============================================================================
+pub const CROSS_MODEL_SCALE_MIN: f32 = 0.5;   // Minimum scale factor for cross model quads (1.0 = full block size)
+pub const CROSS_MODEL_SCALE_MAX: f32 = 1.0;   // Maximum scale factor for cross model quads
+pub const CROSS_MODEL_OFFSET_MAX: f32 = 0.5; // Maximum offset applied to quad endpoints for angle variation (in blocks). Higher values make the crossing angle deviate more from 90 degrees.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BlockType {
     Air,
-    Grass,
     Dirt,
     Stone,
     Wood,
@@ -39,6 +45,10 @@ impl BlockType {
         matches!(self, BlockType::Ice)
     }
 
+    pub fn no_shadow_casting(&self) -> bool {
+        matches!(self, BlockType::Air | BlockType::GrassTuft)
+    }
+
     /// Returns the alpha value for this block (1.0 = fully opaque, 0.0 = fully transparent)
     pub fn get_alpha(&self) -> f32 {
         match self {
@@ -56,7 +66,6 @@ impl BlockType {
     pub fn get_color(&self) -> [f32; 3] {
         match self {
             BlockType::Air => [0.0, 0.0, 0.0],
-            BlockType::Grass => [0.2, 0.8, 0.2],
             BlockType::Dirt => [0.6, 0.4, 0.2],
             BlockType::Stone => [0.5, 0.5, 0.5],
             BlockType::Wood => [0.4, 0.25, 0.1],
@@ -76,7 +85,6 @@ impl BlockType {
     pub fn display_name(&self) -> &'static str {
         match self {
             BlockType::Air => "Air",
-            BlockType::Grass => "Grass",
             BlockType::Dirt => "Dirt",
             BlockType::Stone => "Stone",
             BlockType::Wood => "Wood",
@@ -96,7 +104,6 @@ impl BlockType {
     pub fn get_id(&self) -> u8 {
         match self {
             BlockType::Air => 0,
-            BlockType::Grass => 1,
             BlockType::Dirt => 2,
             BlockType::Stone => 3,
             BlockType::Wood => 4,
@@ -116,7 +123,7 @@ impl BlockType {
     pub fn from_id(id: u8) -> Self {
         match id {
             0 => BlockType::Air,
-            1 => BlockType::Grass,
+            1 => BlockType::Dirt, // Legacy grass ID maps to dirt
             2 => BlockType::Dirt,
             3 => BlockType::Stone,
             4 => BlockType::Wood,
@@ -146,22 +153,10 @@ impl BlockType {
 
     /// Returns texture indices for block faces.
     /// `has_block_above`: true if there's a solid block directly above this one
-    pub fn get_face_textures(&self, has_block_above: bool) -> FaceTextures {
+    pub fn get_face_textures(&self, _has_block_above: bool) -> FaceTextures {
         match self {
-            // Dirt
-            BlockType::Dirt | BlockType::Grass => {
-                if has_block_above {
-                    // Covered dirt: all faces use dirt texture
-                    FaceTextures::all(TEX_DIRT)
-                } else {
-                    // Exposed dirt/grass: grass top, grass sides, dirt bottom
-                    FaceTextures {
-                        top: TEX_GRASS_TOP,
-                        bottom: TEX_DIRT,
-                        sides: TEX_GRASS_SIDE,
-                    }
-                }
-            }
+            // Dirt (grass overlay handled in mesh builder for exposed tops)
+            BlockType::Dirt => FaceTextures::all(TEX_DIRT),
 
             // Wood
             BlockType::Wood => FaceTextures {
@@ -194,7 +189,6 @@ impl BlockType {
     pub fn get_durability(&self) -> f32 {
         match self {
             BlockType::Air => 0.0,
-            BlockType::Grass => 0.6,
             BlockType::Dirt => 0.5,
             BlockType::Stone => 1.5,
             BlockType::Wood => 2.0,
@@ -566,18 +560,6 @@ pub fn create_water_face_vertices(
         ],
     }
 }
-
-// ============================================================================
-// Cross Model Constants (grass tufts, foliage)
-// ============================================================================
-
-/// Minimum scale factor for cross model quads (1.0 = full block size)
-pub const CROSS_MODEL_SCALE_MIN: f32 = 0.7;
-/// Maximum scale factor for cross model quads
-pub const CROSS_MODEL_SCALE_MAX: f32 = 1.0;
-/// Maximum offset applied to quad endpoints for angle variation (in blocks).
-/// Higher values make the crossing angle deviate more from 90 degrees.
-pub const CROSS_MODEL_OFFSET_MAX: f32 = 0.25;
 
 /// Creates vertices for a cross model (two intersecting quads forming an X shape).
 /// Used for grass tufts and similar foliage. Each quad is rendered double-sided.

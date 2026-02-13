@@ -61,21 +61,58 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     var base_color: vec3<f32>;
     var alpha: f32 = in.alpha;
 
-    if (in.tex_index == 255u) {
+    // Extract packed fields from tex_index:
+    //   bits 0-15:  base texture index
+    //   bits 16-23: overlay texture index + 1 (0 = no overlay)
+    //   bits 24-31: overlay tint parameter (0-255 -> 0.0-1.0)
+    let base_idx = in.tex_index & 0xFFFFu;
+    let overlay_idx_raw = (in.tex_index >> 16u) & 0xFFu;
+    let tint_byte = (in.tex_index >> 24u) & 0xFFu;
+
+    if (base_idx == 255u) {
         // No texture - use vertex color (fallback for untextured blocks)
         base_color = in.color;
     } else {
-        // Sample from texture atlas (includes alpha channel)
+        // Sample base texture from atlas
         let tex_color = textureSample(texture_atlas, texture_sampler, in.uv);
-        // Tint texture by vertex color (white = no tint, colored = leaf tint, etc.)
-        base_color = tex_color.rgb * in.color;
-        // Use texture alpha for transparency (e.g., ice blocks)
-        alpha = tex_color.a * in.alpha;
 
-        // Alpha test: discard fully transparent pixels so they don't write to the depth buffer
-        // (prevents leaf texture transparent pixels from blocking faces behind them)
-        if (alpha < 0.5) {
-            discard;
+        if (overlay_idx_raw > 0u) {
+            // Overlay texture present (e.g., grass_side blended over dirt)
+            let overlay_idx = overlay_idx_raw - 1u;
+            // Extract local UV within the base tile using known tile position
+            let base_col = f32(base_idx % 16u);
+            let base_row = f32(base_idx / 16u);
+            let local_u = in.uv.x * 16.0 - base_col;
+            let local_v = in.uv.y * 16.0 - base_row;
+            // Compute overlay atlas UV from overlay tile index + local coords
+            let o_col = f32(overlay_idx % 16u);
+            let o_row = f32(overlay_idx / 16u);
+            let overlay_uv = vec2<f32>(
+                (o_col + local_u) / 16.0,
+                (o_row + local_v) / 16.0
+            );
+            let overlay_tex = textureSample(texture_atlas, texture_sampler, overlay_uv);
+
+            // Reconstruct grass tint from packed parameter (green <-> orange spectrum)
+            let t = f32(tint_byte) / 255.0;
+            let overlay_tint = vec3<f32>(0.3 + t * 0.7, 0.95 - t * 0.3, 0.2 - t * 0.1);
+
+            // Blend: base texture with vertex color where overlay is transparent,
+            // overlay with reconstructed tint where overlay is opaque
+            base_color = mix(tex_color.rgb * in.color, overlay_tex.rgb * overlay_tint, overlay_tex.a);
+            alpha = 1.0; // Combined face is always fully opaque
+        } else {
+            // Standard single texture
+            // Tint texture by vertex color (white = no tint, colored = leaf tint, etc.)
+            base_color = tex_color.rgb * in.color;
+            // Use texture alpha for transparency (e.g., ice blocks)
+            alpha = tex_color.a * in.alpha;
+
+            // Alpha test: discard fully transparent pixels so they don't write to the depth buffer
+            // (prevents leaf texture transparent pixels from blocking faces behind them)
+            if (alpha < 0.5) {
+                discard;
+            }
         }
     }
 

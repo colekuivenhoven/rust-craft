@@ -1,6 +1,6 @@
 use crate::block::{BlockType, Vertex, create_face_vertices, create_face_vertices_tinted, create_cross_model_vertices, create_water_face_vertices, AO_OFFSETS, calculate_ao};
 use crate::lighting;
-use crate::texture::{get_face_uvs, rotate_face_uvs, TEX_NONE};
+use crate::texture::{get_face_uvs, rotate_face_uvs, TEX_NONE, TEX_GRASS_TOP, TEX_GRASS_SIDE};
 use cgmath::Vector3;
 use noise::{NoiseFn, Perlin};
 use rand::{Rng, SeedableRng};
@@ -702,7 +702,7 @@ impl Chunk {
                             // More desert = need higher vein value to get grass
                             let grass_threshold = 0.3 + desert_dominance * 0.5;
                             if vein_value > grass_threshold {
-                                BlockType::Grass // Grass veins into desert
+                                BlockType::Dirt // Grass veins into desert
                             } else {
                                 BlockType::Sand
                             }
@@ -714,24 +714,24 @@ impl Chunk {
                                 BlockType::Snow
                             } else if y_i > stone_threshold {
                                 let stone_threshold_here = 0.3 + mountain_dominance * 0.4;
-                                if vein_value > stone_threshold_here { BlockType::Grass } else { BlockType::Stone }
+                                if vein_value > stone_threshold_here { BlockType::Dirt } else { BlockType::Stone }
                             } else {
-                                BlockType::Grass
+                                BlockType::Dirt
                             }
                         }
                         // Forest-Arctic transition
                         else if biome_weights.arctic > 0.15 && biome_weights.forest > 0.15 {
                             let arctic_dominance = biome_weights.arctic / (biome_weights.arctic + biome_weights.forest);
                             let snow_threshold_here = 0.3 + arctic_dominance * 0.5;
-                            if vein_value < snow_threshold_here { BlockType::Snow } else { BlockType::Grass }
+                            if vein_value < snow_threshold_here { BlockType::Snow } else { BlockType::Dirt }
                         }
                         // Pure dominant biome
                         else {
                             match dominant_biome {
                                 BiomeType::Desert => BlockType::Sand,
-                                BiomeType::Forest => BlockType::Grass,
+                                BiomeType::Forest => BlockType::Dirt,
                                 BiomeType::Ocean => {
-                                    if height > sea + OCEAN_ISLAND_GRASS_START { BlockType::Grass } else { BlockType::Sand }
+                                    if height > sea + OCEAN_ISLAND_GRASS_START { BlockType::Dirt } else { BlockType::Sand }
                                 },
                                 BiomeType::Mountains => {
                                     if y_i > snow_threshold {
@@ -739,12 +739,12 @@ impl Chunk {
                                     } else if y_i > stone_threshold {
                                         let blocks_above = (y_i - stone_threshold) as f64;
                                         if grass_patch_noise > GRASS_PATCH_BASE_THRESHOLD + (blocks_above * GRASS_PATCH_HEIGHT_FACTOR) && blocks_above < GRASS_PATCH_MAX_HEIGHT {
-                                            BlockType::Grass
+                                            BlockType::Dirt
                                         } else {
                                             BlockType::Stone
                                         }
                                     } else {
-                                        BlockType::Grass
+                                        BlockType::Dirt
                                     }
                                 },
                                 BiomeType::Arctic => {
@@ -834,7 +834,7 @@ impl Chunk {
                                 }
                             }
                             if height < CHUNK_HEIGHT {
-                                self.blocks[x][height][z] = BlockType::Grass;
+                                self.blocks[x][height][z] = BlockType::Dirt;
                             }
                         }
                     }
@@ -881,7 +881,7 @@ impl Chunk {
                 let mut height = 0;
                 let mut found_grass = false;
                 for y in (0..CHUNK_HEIGHT).rev() {
-                    if self.blocks[x][y][z] == BlockType::Grass {
+                    if self.blocks[x][y][z] == BlockType::Dirt {
                         height = y;
                         found_grass = true;
                         break;
@@ -1019,7 +1019,7 @@ impl Chunk {
             for z in OASIS_TREE_SPACING..CHUNK_SIZE - OASIS_TREE_SPACING {
                 // Check for grass in desert (oasis indicator)
                 for y in SEA_LEVEL..CHUNK_HEIGHT - 10 {
-                    if self.blocks[x][y][z] != BlockType::Grass {
+                    if self.blocks[x][y][z] != BlockType::Dirt {
                         continue;
                     }
 
@@ -1256,7 +1256,7 @@ impl Chunk {
                             if is_below_center {
                                 BlockType::Stone
                             } else if is_surface {
-                                BlockType::Grass
+                                BlockType::Dirt
                             } else if depth_from_surface < 2 {
                                 BlockType::Dirt
                             } else {
@@ -1273,7 +1273,7 @@ impl Chunk {
         for x in TREE_BORDER_BUFFER..CHUNK_SIZE - TREE_BORDER_BUFFER {
             for z in TREE_BORDER_BUFFER..CHUNK_SIZE - TREE_BORDER_BUFFER {
                 for y in (SKY_ISLAND_BASE_Y..CHUNK_HEIGHT.saturating_sub(TREE_MAX_HEIGHT)).rev() {
-                    if self.blocks[x][y][z] != BlockType::Grass {
+                    if self.blocks[x][y][z] != BlockType::Dirt {
                         continue;
                     }
                     // Verify there's air above (actual surface)
@@ -1385,7 +1385,7 @@ impl Chunk {
 
                 // Find topmost grass block in column
                 for y in (SEA_LEVEL..CHUNK_HEIGHT - 1).rev() {
-                    if self.blocks[x][y][z] == BlockType::Grass && self.blocks[x][y + 1][z] == BlockType::Air {
+                    if self.blocks[x][y][z] == BlockType::Dirt && self.blocks[x][y + 1][z] == BlockType::Air {
                         self.blocks[x][y + 1][z] = BlockType::GrassTuft;
                         break;
                     }
@@ -1653,24 +1653,50 @@ impl Chunk {
                                     ]);
                                 }
                             } else {
-                                let face_verts = if block == BlockType::Leaves {
-                                    // Compute noise-based leaf tint at block center
+                                // Determine if this is exposed dirt (grass rendering)
+                                let is_grass_dirt = block == BlockType::Dirt && !has_block_above && !block_above.is_water();
+
+                                // Compute noise tint parameter for leaves and grass (shared noise)
+                                let needs_tint = block == BlockType::Leaves || is_grass_dirt;
+                                let tint_t = if needs_tint {
                                     let wx = (world_offset_x + x as i32) as f64;
                                     let wy = y as f64;
                                     let wz = (world_offset_z + z as i32) as f64;
-                                    // Large scale (0.02) for gradual color flow across trees
                                     let noise_val = leaf_color_noise.get([wx * 0.02, wy * 0.02, wz * 0.02]);
-                                    // Map noise (-1..1) to 0..1, then use as blend factor
-                                    let t = (noise_val as f32 * 0.5 + 0.5).clamp(0.0, 1.0);
-                                    // Vibrant green (0.3, 0.95, 0.2) ↔ Bright fall orange (1.0, 0.65, 0.1)
-                                    let tint = [
-                                        0.3 + t * (1.0 - 0.3),
-                                        0.95 + t * (0.65 - 0.95),
-                                        0.2 + t * (0.1 - 0.2),
-                                    ];
-                                    create_face_vertices_tinted(world_pos, face_idx, light_normalized, tex_index, uvs, ao_values, tint)
+                                    (noise_val as f32 * 0.5 + 0.5).clamp(0.0, 1.0)
                                 } else {
-                                    create_face_vertices(world_pos, block, face_idx, light_normalized, tex_index, uvs, ao_values)
+                                    0.0
+                                };
+                                let tint = if needs_tint {
+                                    [
+                                        0.3 + tint_t * (1.0 - 0.3),
+                                        0.95 + tint_t * (0.65 - 0.95),
+                                        0.2 + tint_t * (0.1 - 0.2),
+                                    ]
+                                } else {
+                                    [1.0, 1.0, 1.0]
+                                };
+
+                                // For exposed dirt top face: use grass_top texture with tint
+                                let (actual_tex, actual_uvs) = if is_grass_dirt && face_idx == 2 {
+                                    let grass_uvs = get_face_uvs(TEX_GRASS_TOP);
+                                    (TEX_GRASS_TOP, grass_uvs)
+                                } else {
+                                    (tex_index, uvs)
+                                };
+
+                                let face_verts = if block == BlockType::Leaves || (is_grass_dirt && face_idx == 2) {
+                                    // Leaves: always tinted. Grass dirt top face: grass_top with tint.
+                                    create_face_vertices_tinted(world_pos, face_idx, light_normalized, actual_tex, actual_uvs, ao_values, tint)
+                                } else if is_grass_dirt && face_idx != 2 && face_idx != 3 {
+                                    // Side faces of exposed dirt: pack overlay index (bits 16-23) and
+                                    // tint parameter (bits 24-31) into tex_index. Shader reconstructs
+                                    // tint and uses vertex color (dirt color) for the base texture.
+                                    let tint_byte = (tint_t * 255.0) as u32;
+                                    let packed_tex = tex_index | ((TEX_GRASS_SIDE + 1) << 16) | (tint_byte << 24);
+                                    create_face_vertices(world_pos, block, face_idx, light_normalized, packed_tex, uvs, ao_values)
+                                } else {
+                                    create_face_vertices(world_pos, block, face_idx, light_normalized, actual_tex, actual_uvs, ao_values)
                                 };
 
                                 let base_index = vertices.len() as u16;
