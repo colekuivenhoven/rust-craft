@@ -5,7 +5,7 @@ use crate::camera::{Camera, CameraController, CameraUniform, Projection, Frustum
 use crate::chunk::{CHUNK_SIZE, CHUNK_HEIGHT};
 use crate::crafting::CraftingSystem;
 use crate::dropped_item::DroppedItemManager;
-use crate::enemy::EnemyManager;
+use crate::enemy::{EnemyManager, create_enemy_vertices, generate_enemy_indices};
 use crate::bitmap_font;
 use crate::particle::ParticleManager;
 use crate::player::Player;
@@ -142,6 +142,14 @@ pub struct State {
     motion_blur_bind_group_layout: wgpu::BindGroupLayout,
     motion_blur_bind_group: wgpu::BindGroup,
     motion_blur_uniform_buffer: wgpu::Buffer,
+
+    // Damage flash effect (Post-Processing)
+    damage_flash_intensity: f32,
+    damage_pipeline: wgpu::RenderPipeline,
+    damage_bind_group_layout: wgpu::BindGroupLayout,
+    damage_bind_group: wgpu::BindGroup,       // reads post_process_texture
+    damage_bind_group_alt: wgpu::BindGroup,   // reads scene_texture (when combined with underwater)
+    damage_uniform_buffer: wgpu::Buffer,
 
     // Texture atlas
     texture_atlas: TextureAtlas,
@@ -1158,6 +1166,141 @@ impl State {
             ],
         });
 
+        // --- Damage flash effect pipeline ---
+        let damage_uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Damage Uniform Buffer"),
+            contents: bytemuck::cast_slice(&[0.0f32, 0.0f32]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        let damage_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Damage Bind Group Layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+
+        let damage_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Damage Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/damage_shader.wgsl").into()),
+        });
+
+        let damage_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Damage Pipeline Layout"),
+            bind_group_layouts: &[&damage_bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
+        let damage_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Damage Pipeline"),
+            layout: Some(&damage_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &damage_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &damage_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: Some(wgpu::BlendState {
+                        color: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::SrcAlpha,
+                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                        alpha: wgpu::BlendComponent::OVER,
+                    }),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            multiview: None,
+            cache: None,
+        });
+
+        // Damage bind group: reads from post_process_texture (damage-only case)
+        let damage_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Damage Bind Group"),
+            layout: &damage_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: damage_uniform_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&post_process_texture_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&scene_sampler),
+                },
+            ],
+        });
+
+        // Damage bind group alt: reads from scene_texture (underwater+damage case)
+        let damage_bind_group_alt = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Damage Bind Group Alt"),
+            layout: &damage_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: damage_uniform_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&scene_texture_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&scene_sampler),
+                },
+            ],
+        });
+
         Self {
             surface,
             device,
@@ -1231,6 +1374,13 @@ impl State {
             motion_blur_bind_group_layout,
             motion_blur_bind_group,
             motion_blur_uniform_buffer,
+            // Damage flash
+            damage_flash_intensity: 0.0,
+            damage_pipeline,
+            damage_bind_group_layout,
+            damage_bind_group,
+            damage_bind_group_alt,
+            damage_uniform_buffer,
             // Texture atlas
             texture_atlas,
             // Breaking mechanics
@@ -1271,9 +1421,10 @@ impl State {
         self.mouse_captured
     }
 
-    /// Saves all modified chunks to disk (call before exiting)
+    /// Saves all modified chunks and enemies to disk (call before exiting)
     pub fn save_world(&mut self) {
         self.world.save_all_modified_chunks();
+        self.enemy_manager.save_to_disk();
     }
 
     pub fn process_mouse(&mut self, dx: f64, dy: f64) {
@@ -1412,6 +1563,44 @@ impl State {
                     wgpu::BindGroupEntry {
                         binding: 1,
                         resource: wgpu::BindingResource::TextureView(&self.post_process_texture_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::Sampler(&self.scene_sampler),
+                    },
+                ],
+            });
+
+            // Recreate Damage Bind Groups
+            self.damage_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Damage Bind Group"),
+                layout: &self.damage_bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: self.damage_uniform_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&self.post_process_texture_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::Sampler(&self.scene_sampler),
+                    },
+                ],
+            });
+            self.damage_bind_group_alt = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Damage Bind Group Alt"),
+                layout: &self.damage_bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: self.damage_uniform_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&self.scene_texture_view),
                     },
                     wgpu::BindGroupEntry {
                         binding: 2,
@@ -2380,6 +2569,13 @@ impl State {
             bytemuck::cast_slice(&[total_time]),
         );
 
+        // Update damage flash uniforms
+        self.queue.write_buffer(
+            &self.damage_uniform_buffer,
+            0,
+            bytemuck::cast_slice(&[self.damage_flash_intensity, total_time]),
+        );
+
         // Update water wave animation time (only the time component, rest stays constant)
         self.queue.write_buffer(
             &self.water_time_buffer,
@@ -2432,6 +2628,7 @@ impl State {
         if fall_vel < -15.0 {
             let damage = (fall_vel.abs() - 15.0) * 2.5;
             self.player.take_damage(damage);
+            self.damage_flash_intensity = 1.0;
             if !self.player.is_alive() {
                 self.respawn();
             }
@@ -2447,8 +2644,7 @@ impl State {
         self.water_simulation.update(&mut self.world, dt);
 
         // Update enemies
-        // TODO: Re-enable enemy spawning after testing
-        // self.enemy_manager.update(dt, self.player.position);
+        self.enemy_manager.update(dt, self.player.position, &self.world);
 
         // Update birds
         self.bird_manager.update(dt, self.player.position, &self.world);
@@ -2469,9 +2665,15 @@ impl State {
         let damage = self.enemy_manager.check_player_damage(self.player.position);
         if damage > 0.0 {
             self.player.take_damage(damage * dt);
+            self.damage_flash_intensity = 1.0;
             if !self.player.is_alive() {
                 self.respawn();
             }
+        }
+
+        // Decay damage flash
+        if self.damage_flash_intensity > 0.0 {
+            self.damage_flash_intensity = (self.damage_flash_intensity - dt * 3.0).max(0.0);
         }
 
         // Update targeted block (for outline rendering)
@@ -2673,48 +2875,32 @@ impl State {
 
             // Render enemies
             for enemy in &self.enemy_manager.enemies {
-                if enemy.alive {
-                    let vertices = create_cube_vertices(
-                        cgmath::Vector3::new(
-                            enemy.position.x,
-                            enemy.position.y,
-                            enemy.position.z,
-                        ),
-                        BlockType::Air,
-                        1.0, // Full brightness for enemies
-                    );
+                if !enemy.alive { continue; }
+                let vertices = create_enemy_vertices(enemy);
+                if vertices.is_empty() { continue; }
 
-                    // Override color for enemies
-                    let enemy_color = enemy.get_color();
-                    let vertices: Vec<Vertex> = vertices
-                        .into_iter()
-                        .map(|mut v| {
-                            v.color = enemy_color;
-                            v
-                        })
-                        .collect();
+                let num_cubes = vertices.len() / 24;
+                let indices = generate_enemy_indices(num_cubes);
 
-                    let vertex_buffer =
-                        self.device
-                            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                                label: Some("Enemy Vertex Buffer"),
-                                contents: bytemuck::cast_slice(&vertices),
-                                usage: wgpu::BufferUsages::VERTEX,
-                            });
+                let vertex_buffer =
+                    self.device
+                        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                            label: Some("Enemy Vertex Buffer"),
+                            contents: bytemuck::cast_slice(&vertices),
+                            usage: wgpu::BufferUsages::VERTEX,
+                        });
 
-                    let index_buffer =
-                        self.device
-                            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                                label: Some("Enemy Index Buffer"),
-                                contents: bytemuck::cast_slice(CUBE_INDICES),
-                                usage: wgpu::BufferUsages::INDEX,
-                            });
+                let index_buffer =
+                    self.device
+                        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                            label: Some("Enemy Index Buffer"),
+                            contents: bytemuck::cast_slice(&indices),
+                            usage: wgpu::BufferUsages::INDEX,
+                        });
 
-                    render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
-                    render_pass
-                        .set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint16);
-                    render_pass.draw_indexed(0..CUBE_INDICES.len() as u32, 0, 0..1);
-                }
+                render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+                render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+                render_pass.draw_indexed(0..indices.len() as u32, 0, 0..1);
             }
 
             // Render dropped item shadows first (so they appear behind items)
@@ -3165,13 +3351,17 @@ impl State {
             }
         }
 
-        // --- PASS 5: POST-PROCESSING (Motion Blur + Underwater) ---
-        // Motion blur always runs: scene_texture -> swap_chain (or post_process_texture if underwater)
-        // If underwater, an additional pass applies the underwater effect afterward.
+        // --- PASS 5: POST-PROCESSING (Motion Blur + Underwater + Damage) ---
+        // Texture routing:
+        //   Neither:           blur scene_texture -> swap_chain
+        //   Underwater only:   blur scene_texture -> post_process, underwater post_process -> swap_chain
+        //   Damage only:       blur scene_texture -> post_process, damage post_process -> swap_chain
+        //   Both:              blur scene_texture -> post_process, underwater post_process -> scene_texture,
+        //                      damage scene_texture -> swap_chain
+        let damage_active = self.damage_flash_intensity > 0.01;
+        let needs_post = self.camera_underwater || damage_active;
         {
-            // If underwater, motion blur writes to post_process_texture; underwater reads it next.
-            // If not underwater, motion blur writes directly to swap_chain.
-            let blur_target = if self.camera_underwater {
+            let blur_target = if needs_post {
                 &self.post_process_texture_view
             } else {
                 &swap_chain_view
@@ -3194,15 +3384,21 @@ impl State {
 
             blur_pass.set_pipeline(&self.motion_blur_pipeline);
             blur_pass.set_bind_group(0, &self.motion_blur_bind_group, &[]);
-            blur_pass.draw(0..3, 0..1); // Full-screen triangle
+            blur_pass.draw(0..3, 0..1);
         }
 
-        // If underwater, apply underwater distortion: post_process_texture -> swap_chain
+        // Underwater: post_process_texture -> (scene_texture if damage follows, else swap_chain)
         if self.camera_underwater {
+            let underwater_target = if damage_active {
+                &self.scene_texture_view
+            } else {
+                &swap_chain_view
+            };
+
             let mut underwater_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Underwater Render Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &swap_chain_view,
+                    view: underwater_target,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
@@ -3216,7 +3412,35 @@ impl State {
 
             underwater_pass.set_pipeline(&self.underwater_pipeline);
             underwater_pass.set_bind_group(0, &self.underwater_bind_group, &[]);
-            underwater_pass.draw(0..3, 0..1); // Full-screen triangle
+            underwater_pass.draw(0..3, 0..1);
+        }
+
+        // Damage flash: reads from post_process (no underwater) or scene_texture (after underwater) -> swap_chain
+        if damage_active {
+            let damage_bind_group = if self.camera_underwater {
+                &self.damage_bind_group_alt
+            } else {
+                &self.damage_bind_group
+            };
+
+            let mut damage_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Damage Flash Render Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &swap_chain_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+
+            damage_pass.set_pipeline(&self.damage_pipeline);
+            damage_pass.set_bind_group(0, damage_bind_group, &[]);
+            damage_pass.draw(0..3, 0..1);
         }
 
         // --- PASS 6: UI (Crosshair & HUD) ---
