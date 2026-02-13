@@ -14,6 +14,7 @@ pub const TEX_STONE: u32 = 5;
 pub const TEX_WOOD_TOP: u32 = 6;
 pub const TEX_WOOD_SIDE: u32 = 7;
 pub const TEX_LEAVES: u32 = 8;
+pub const TEX_GRAINS: u32 = 9;
 pub const TEX_NONE: u32 = 255; // Sentinel for "use color fallback"
 
 // Breaking textures start at row 1 (index 16)
@@ -69,6 +70,17 @@ pub fn get_face_uvs(tile_index: u32) -> [[f32; 2]; 4] {
     ]
 }
 
+/// Rotate face UVs by 0, 90, 180, or 270 degrees (clockwise).
+/// rotation: 0=0°, 1=90°, 2=180°, 3=270°
+pub fn rotate_face_uvs(uvs: [[f32; 2]; 4], rotation: usize) -> [[f32; 2]; 4] {
+    match rotation % 4 {
+        1 => [uvs[3], uvs[0], uvs[1], uvs[2]],
+        2 => [uvs[2], uvs[3], uvs[0], uvs[1]],
+        3 => [uvs[1], uvs[2], uvs[3], uvs[0]],
+        _ => uvs,
+    }
+}
+
 pub struct TextureAtlas {
     pub texture: wgpu::Texture,
     pub view: wgpu::TextureView,
@@ -97,6 +109,7 @@ impl TextureAtlas {
         Self::load_texture_into_atlas(&mut atlas, "assets/textures/blocks/wood_top.png", TEX_WOOD_TOP);
         Self::load_texture_into_atlas(&mut atlas, "assets/textures/blocks/wood_side.png", TEX_WOOD_SIDE);
         Self::load_texture_into_atlas(&mut atlas, "assets/textures/blocks/leaves.png", TEX_LEAVES);
+        Self::load_texture_into_atlas(&mut atlas, "assets/textures/blocks/grains.png", TEX_GRAINS);
 
         // Load breaking textures (row 1, starting at index 16)
         for i in 0..10 {

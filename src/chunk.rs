@@ -1,6 +1,6 @@
-use crate::block::{BlockType, Vertex, create_face_vertices, create_face_vertices_tinted, create_water_face_vertices, AO_OFFSETS, calculate_ao};
+use crate::block::{BlockType, Vertex, create_face_vertices, create_face_vertices_tinted, create_cross_model_vertices, create_water_face_vertices, AO_OFFSETS, calculate_ao};
 use crate::lighting;
-use crate::texture::{get_face_uvs, TEX_NONE};
+use crate::texture::{get_face_uvs, rotate_face_uvs, TEX_NONE};
 use cgmath::Vector3;
 use noise::{NoiseFn, Perlin};
 use rand::{Rng, SeedableRng};
@@ -36,6 +36,7 @@ pub const SEED_STALACTITE: u32 = MASTER_SEED.wrapping_add(161);
 pub const SEED_HILL: u32 = MASTER_SEED.wrapping_add(162);
 pub const SEED_GLOWSTONE: u32 = MASTER_SEED.wrapping_add(1);
 pub const SEED_LEAF_COLOR: u32 = MASTER_SEED.wrapping_add(700);
+pub const SEED_GRASS_TUFT: u32 = MASTER_SEED.wrapping_add(800);
 
 // ============================================================================
 // TERRAIN GENERATION - Base terrain shape and height parameters
@@ -235,6 +236,12 @@ pub const GLACIER_MAX_HEIGHT: f64 = 16.0;
 pub const GLACIER_ICE_GAP_SCALE: f64 = 0.05;
 pub const GLACIER_ICE_GAP_THRESHOLD: f64 = 0.15;
 pub const GLACIER_TAPER_SCALE: f64 = 0.08;
+
+// ============================================================================
+// GRASS TUFT PARAMETERS - Cross-model foliage on grass blocks
+// ============================================================================
+pub const GRASS_TUFT_NOISE_SCALE: f64 = 0.15;       // Noise scale for placement clustering
+pub const GRASS_TUFT_THRESHOLD: f64 = -0.1;         // Noise threshold (lower = more widespread)
 
 // ============================================================================
 // GLOWSTONE PARAMETERS - Natural light sources in caves
@@ -1362,6 +1369,29 @@ impl Chunk {
                 }
             }
         }
+
+        // === Grass Tufts ===
+        // Spawn cross-model grass tufts on grass blocks using noise for natural clustering
+        let tuft_noise = Perlin::new(SEED_GRASS_TUFT);
+        for x in 0..CHUNK_SIZE {
+            for z in 0..CHUNK_SIZE {
+                let world_x = (world_offset_x + x as i32) as f64;
+                let world_z = (world_offset_z + z as i32) as f64;
+
+                let noise_val = tuft_noise.get([world_x * GRASS_TUFT_NOISE_SCALE, world_z * GRASS_TUFT_NOISE_SCALE]);
+                if noise_val < GRASS_TUFT_THRESHOLD {
+                    continue;
+                }
+
+                // Find topmost grass block in column
+                for y in (SEA_LEVEL..CHUNK_HEIGHT - 1).rev() {
+                    if self.blocks[x][y][z] == BlockType::Grass && self.blocks[x][y + 1][z] == BlockType::Air {
+                        self.blocks[x][y + 1][z] = BlockType::GrassTuft;
+                        break;
+                    }
+                }
+            }
+        }
     }
 
     pub fn get_block(&self, x: usize, y: usize, z: usize) -> BlockType {
@@ -1422,6 +1452,51 @@ impl Chunk {
                         continue;
                     }
 
+                    // Cross-model blocks (grass tufts) use special geometry instead of cube faces
+                    if block.is_cross_model() {
+                        let world_pos = Vector3::new(
+                            (world_offset_x + x as i32) as f32,
+                            y as f32,
+                            (world_offset_z + z as i32) as f32,
+                        );
+
+                        let face_textures = block.get_face_textures(false);
+                        let tex_index = face_textures.get_for_face(0);
+                        let uvs = if tex_index != TEX_NONE { get_face_uvs(tex_index) } else { [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]] };
+
+                        // Sample light from above the block for consistent brightness
+                        let light = neighbors.get_light(x as i32, y as i32 + 1, z as i32);
+                        let light_normalized = light as f32 / 15.0;
+
+                        // Use same leaf color noise for consistent biome-wide coloring
+                        let wx = (world_offset_x + x as i32) as f64;
+                        let wy = y as f64;
+                        let wz = (world_offset_z + z as i32) as f64;
+                        let noise_val = leaf_color_noise.get([wx * 0.02, wy * 0.02, wz * 0.02]);
+                        let t = (noise_val as f32 * 0.5 + 0.5).clamp(0.0, 1.0);
+                        let tint = [
+                            0.3 + t * (1.0 - 0.3),
+                            0.95 + t * (0.65 - 0.95),
+                            0.2 + t * (0.1 - 0.2),
+                        ];
+
+                        // Deterministic hash for per-instance scale and angle variation
+                        let wx_i = world_offset_x + x as i32;
+                        let wz_i = world_offset_z + z as i32;
+                        let cross_hash = (wx_i.wrapping_mul(73856093) ^ (y as i32).wrapping_mul(19349663) ^ wz_i.wrapping_mul(83492791)) as u32;
+
+                        let (cross_verts, cross_indices) = create_cross_model_vertices(
+                            world_pos, light_normalized, tex_index, uvs, tint, cross_hash,
+                        );
+
+                        let base_index = vertices.len() as u16;
+                        vertices.extend_from_slice(&cross_verts);
+                        for &idx in &cross_indices {
+                            indices.push(base_index + idx);
+                        }
+                        continue;
+                    }
+
                     let world_pos = Vector3::new(
                         (world_offset_x + x as i32) as f32,
                         y as f32,
@@ -1469,7 +1544,18 @@ impl Chunk {
 
                             // Get UVs for this texture (or default for non-textured)
                             let uvs = if tex_index != TEX_NONE {
-                                get_face_uvs(tex_index)
+                                let base_uvs = get_face_uvs(tex_index);
+                                // Rotate leaf texture UVs randomly per face for visual variety
+                                if block == BlockType::Leaves {
+                                    let wx = world_offset_x + x as i32;
+                                    let wy = y as i32;
+                                    let wz = world_offset_z + z as i32;
+                                    let hash = wx.wrapping_mul(73856093) ^ wy.wrapping_mul(19349663) ^ wz.wrapping_mul(83492791) ^ (face_idx as i32).wrapping_mul(48611);
+                                    let rotation = (hash as u32 % 4) as usize;
+                                    rotate_face_uvs(base_uvs, rotation)
+                                } else {
+                                    base_uvs
+                                }
                             } else {
                                 [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]
                             };

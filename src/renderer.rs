@@ -2210,6 +2210,12 @@ impl State {
         // Remove the block from the world
         self.world.set_block_world(x, y, z, BlockType::Air);
         println!("Broke block: {:?}", block_type);
+
+        // Break any cross-model block sitting on top (e.g. grass tufts)
+        let above = self.world.get_block_world(x, y + 1, z);
+        if above.is_cross_model() {
+            self.world.set_block_world(x, y + 1, z, BlockType::Air);
+        }
     }
 
     /// Creates vertices for the breaking overlay on visible faces of a block

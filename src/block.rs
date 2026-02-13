@@ -1,5 +1,5 @@
 use cgmath::Vector3;
-use crate::texture::{FaceTextures, TEX_DIRT, TEX_GRASS_TOP, TEX_GRASS_SIDE, TEX_SAND, TEX_ICE, TEX_STONE, TEX_WOOD_TOP, TEX_WOOD_SIDE, TEX_LEAVES, TEX_NONE};
+use crate::texture::{FaceTextures, TEX_DIRT, TEX_GRASS_TOP, TEX_GRASS_SIDE, TEX_SAND, TEX_ICE, TEX_STONE, TEX_WOOD_TOP, TEX_WOOD_SIDE, TEX_LEAVES, TEX_GRAINS, TEX_NONE};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BlockType {
@@ -16,12 +16,13 @@ pub enum BlockType {
     GlowStone,
     Ice,
     Snow,
+    GrassTuft,
     Boundary, // Virtual block type for unloaded chunk boundaries.
 }
 
 impl BlockType {
     pub fn is_solid(&self) -> bool {
-        !matches!(self, BlockType::Air | BlockType::Water | BlockType::Boundary)
+        !matches!(self, BlockType::Air | BlockType::Water | BlockType::GrassTuft | BlockType::Boundary)
     }
 
     pub fn is_water(&self) -> bool {
@@ -29,7 +30,7 @@ impl BlockType {
     }
 
     pub fn is_transparent(&self) -> bool {
-        matches!(self, BlockType::Air | BlockType::Water | BlockType::Leaves | BlockType::Boundary)
+        matches!(self, BlockType::Air | BlockType::Water | BlockType::Leaves | BlockType::GrassTuft | BlockType::Boundary)
     }
 
     /// Returns true if this block is semi-transparent (rendered with alpha blending after opaque blocks).
@@ -67,6 +68,7 @@ impl BlockType {
             BlockType::GlowStone => [1.0, 0.9, 0.5],
             BlockType::Ice => [0.6, 0.8, 0.95],  // Light blue tint
             BlockType::Snow => [0.95, 0.95, 0.98],  // Nearly white
+            BlockType::GrassTuft => [0.3, 0.8, 0.2], // Green (tinted by noise at mesh time)
             BlockType::Boundary => [0.0, 0.0, 0.0], // Never rendered
         }
     }
@@ -86,6 +88,7 @@ impl BlockType {
             BlockType::GlowStone => "Glowstone",
             BlockType::Ice => "Ice",
             BlockType::Snow => "Snow",
+            BlockType::GrassTuft => "Grass Tuft",
             BlockType::Boundary => "Boundary",
         }
     }
@@ -105,7 +108,8 @@ impl BlockType {
             BlockType::GlowStone => 10,
             BlockType::Ice => 11,
             BlockType::Snow => 12,
-            BlockType::Boundary => 13,
+            BlockType::GrassTuft => 14,
+            BlockType::Boundary => 15,
         }
     }
 
@@ -124,7 +128,8 @@ impl BlockType {
             10 => BlockType::GlowStone,
             11 => BlockType::Ice,
             12 => BlockType::Snow,
-            13 => BlockType::Boundary,
+            14 => BlockType::GrassTuft,
+            15 => BlockType::Boundary,
             _ => BlockType::Air,
         }
     }
@@ -133,6 +138,7 @@ impl BlockType {
     pub fn get_light_emission(&self) -> u8 {
         match self {
             BlockType::GlowStone => 15,
+            BlockType::GrassTuft => 0,
             BlockType::Boundary => 0, // Virtual block, no light
             _ => 0,
         }
@@ -176,6 +182,9 @@ impl BlockType {
             // Leaves
             BlockType::Leaves => FaceTextures::all(TEX_LEAVES),
 
+            // Grass tuft (cross model uses grains texture)
+            BlockType::GrassTuft => FaceTextures::all(TEX_GRAINS),
+
             // All other blocks use color fallback
             _ => FaceTextures::all(TEX_NONE),
         }
@@ -197,11 +206,17 @@ impl BlockType {
             BlockType::GlowStone => 0.8,
             BlockType::Ice => 0.5,
             BlockType::Snow => 0.2,
+            BlockType::GrassTuft => 0.1,
             BlockType::Boundary => 0.0,
         }
     }
 
     /// Returns true if this block can be broken
+    /// Returns true if this block uses a cross model (two intersecting quads) instead of a cube.
+    pub fn is_cross_model(&self) -> bool {
+        matches!(self, BlockType::GrassTuft)
+    }
+
     pub fn is_breakable(&self) -> bool {
         !matches!(self, BlockType::Air | BlockType::Water | BlockType::Boundary)
     }
@@ -550,6 +565,109 @@ pub fn create_water_face_vertices(
             Vertex { position: [x, y + 1.0, z], color, normal: [-1.0, 0.0, 0.0], light_level, alpha: wave_factors[3], uv: uvs[3], tex_index, ao: edge_factors[3] },
         ],
     }
+}
+
+// ============================================================================
+// Cross Model Constants (grass tufts, foliage)
+// ============================================================================
+
+/// Minimum scale factor for cross model quads (1.0 = full block size)
+pub const CROSS_MODEL_SCALE_MIN: f32 = 0.7;
+/// Maximum scale factor for cross model quads
+pub const CROSS_MODEL_SCALE_MAX: f32 = 1.0;
+/// Maximum offset applied to quad endpoints for angle variation (in blocks).
+/// Higher values make the crossing angle deviate more from 90 degrees.
+pub const CROSS_MODEL_OFFSET_MAX: f32 = 0.25;
+
+/// Creates vertices for a cross model (two intersecting quads forming an X shape).
+/// Used for grass tufts and similar foliage. Each quad is rendered double-sided.
+/// `tint` is the RGB color tint applied to the texture.
+/// `hash` is a deterministic seed derived from world position for per-instance variation.
+pub fn create_cross_model_vertices(pos: Vector3<f32>, light_level: f32, tex_index: u32, uvs: [[f32; 2]; 4], tint: [f32; 3], hash: u32) -> ([Vertex; 16], [u16; 24]) {
+    let x = pos.x;
+    let y = pos.y;
+    let z = pos.z;
+    let ao = 1.0;
+    let alpha = 1.0;
+
+    // Derive deterministic random values from hash
+    // Scale: varies quad size within CROSS_MODEL_SCALE_MIN..CROSS_MODEL_SCALE_MAX
+    let scale_frac = ((hash >> 0) & 0xFF) as f32 / 255.0;
+    let scale = CROSS_MODEL_SCALE_MIN + scale_frac * (CROSS_MODEL_SCALE_MAX - CROSS_MODEL_SCALE_MIN);
+    // Offsets: shift each quad endpoint for angle variation
+    let off1_frac = (((hash >> 8) & 0xFF) as f32 / 255.0) * 2.0 - 1.0;  // -1..1
+    let off2_frac = (((hash >> 16) & 0xFF) as f32 / 255.0) * 2.0 - 1.0; // -1..1
+    let off1 = off1_frac * CROSS_MODEL_OFFSET_MAX;
+    let off2 = off2_frac * CROSS_MODEL_OFFSET_MAX;
+
+    // Center the scaled quad within the block
+    let inset = (1.0 - scale) * 0.5;
+    let lo = inset;
+    let hi = 1.0 - inset;
+    let h = scale; // quad height = scale
+
+    // Quad 1 endpoints on XZ plane (diagonal + offset for angle variation)
+    // Corner A near (0,0), corner B near (1,1), with offset shifting the z components
+    let a1x = x + lo;
+    let a1z = z + lo + off1;
+    let b1x = x + hi;
+    let b1z = z + hi + off1;
+    // Quad 2 endpoints (other diagonal + independent offset)
+    let a2x = x + hi;
+    let a2z = z + lo + off2;
+    let b2x = x + lo;
+    let b2z = z + hi + off2;
+
+    let y_lo = y;
+    let y_hi = y + h;
+
+    // Compute face normals from cross product for correct lighting
+    fn face_normal(ax: f32, az: f32, bx: f32, bz: f32, h: f32) -> [f32; 3] {
+        // edge1 = B - A along bottom, edge2 = up vector
+        let dx = bx - ax;
+        let dz = bz - az;
+        // normal = edge1 × up = (dx, 0, dz) × (0, h, 0) = (-dz*h, 0, dx*h)
+        let len = (dz * dz + dx * dx).sqrt() * h;
+        if len < 1e-6 { return [0.0, 1.0, 0.0]; }
+        [-dz * h / len, 0.0, dx * h / len]
+    }
+
+    let n1 = face_normal(a1x, a1z, b1x, b1z, h);
+    let n1_back = [-n1[0], -n1[1], -n1[2]];
+    let n2 = face_normal(a2x, a2z, b2x, b2z, h);
+    let n2_back = [-n2[0], -n2[1], -n2[2]];
+
+    let vertices = [
+        // Quad 1 front
+        Vertex { position: [a1x, y_lo, a1z], color: tint, normal: n1, light_level, alpha, uv: uvs[0], tex_index, ao },
+        Vertex { position: [b1x, y_lo, b1z], color: tint, normal: n1, light_level, alpha, uv: uvs[1], tex_index, ao },
+        Vertex { position: [b1x, y_hi, b1z], color: tint, normal: n1, light_level, alpha, uv: uvs[2], tex_index, ao },
+        Vertex { position: [a1x, y_hi, a1z], color: tint, normal: n1, light_level, alpha, uv: uvs[3], tex_index, ao },
+        // Quad 1 back (reversed winding)
+        Vertex { position: [b1x, y_lo, b1z], color: tint, normal: n1_back, light_level, alpha, uv: uvs[0], tex_index, ao },
+        Vertex { position: [a1x, y_lo, a1z], color: tint, normal: n1_back, light_level, alpha, uv: uvs[1], tex_index, ao },
+        Vertex { position: [a1x, y_hi, a1z], color: tint, normal: n1_back, light_level, alpha, uv: uvs[2], tex_index, ao },
+        Vertex { position: [b1x, y_hi, b1z], color: tint, normal: n1_back, light_level, alpha, uv: uvs[3], tex_index, ao },
+        // Quad 2 front
+        Vertex { position: [a2x, y_lo, a2z], color: tint, normal: n2, light_level, alpha, uv: uvs[0], tex_index, ao },
+        Vertex { position: [b2x, y_lo, b2z], color: tint, normal: n2, light_level, alpha, uv: uvs[1], tex_index, ao },
+        Vertex { position: [b2x, y_hi, b2z], color: tint, normal: n2, light_level, alpha, uv: uvs[2], tex_index, ao },
+        Vertex { position: [a2x, y_hi, a2z], color: tint, normal: n2, light_level, alpha, uv: uvs[3], tex_index, ao },
+        // Quad 2 back (reversed winding)
+        Vertex { position: [b2x, y_lo, b2z], color: tint, normal: n2_back, light_level, alpha, uv: uvs[0], tex_index, ao },
+        Vertex { position: [a2x, y_lo, a2z], color: tint, normal: n2_back, light_level, alpha, uv: uvs[1], tex_index, ao },
+        Vertex { position: [a2x, y_hi, a2z], color: tint, normal: n2_back, light_level, alpha, uv: uvs[2], tex_index, ao },
+        Vertex { position: [b2x, y_hi, b2z], color: tint, normal: n2_back, light_level, alpha, uv: uvs[3], tex_index, ao },
+    ];
+
+    let indices = [
+        0, 1, 2, 2, 3, 0,       // Quad 1 front
+        4, 5, 6, 6, 7, 4,       // Quad 1 back
+        8, 9, 10, 10, 11, 8,    // Quad 2 front
+        12, 13, 14, 14, 15, 12, // Quad 2 back
+    ];
+
+    (vertices, indices)
 }
 
 pub fn create_cube_vertices(pos: Vector3<f32>, block_type: BlockType, light_level: f32) -> Vec<Vertex> {
