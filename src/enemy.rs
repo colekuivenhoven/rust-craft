@@ -1,4 +1,4 @@
-use crate::block::Vertex;
+use crate::block::{Vertex, LineVertex};
 use crate::chunk::CHUNK_SIZE;
 use crate::texture::TEX_NONE;
 use crate::world::World;
@@ -711,7 +711,7 @@ fn create_slime_vertices(enemy: &Enemy, squash: f32, color: [f32; 3]) -> Vec<Ver
 
     let eye_fwd = half_w + 0.002;
     let eye_up = half_h * 0.3;
-    let eye_spread = size * 0.12;
+    let eye_spread = size * 0.3;
 
     let left_offset = rotate_yaw(eye_fwd, eye_up, eye_spread, yaw);
     add_rotated_cube(
@@ -770,6 +770,49 @@ pub fn generate_enemy_indices(num_cubes: usize) -> Vec<u16> {
         }
     }
     indices
+}
+
+/// Generate LineVertex wireframe for enemy collision AABBs (debug visualization)
+pub fn create_enemy_collision_outlines(enemies: &[Enemy]) -> Vec<LineVertex> {
+    let mut verts = Vec::new();
+    for enemy in enemies {
+        if !enemy.alive { continue; }
+        let radius = enemy.size * 0.4;
+        let height = enemy.size;
+        let px = enemy.position.x;
+        let py = enemy.position.y;
+        let pz = enemy.position.z;
+
+        let x0 = px - radius;
+        let x1 = px + radius;
+        let y0 = py;
+        let y1 = py + height;
+        let z0 = pz - radius;
+        let z1 = pz + radius;
+
+        // 4 vertical edges
+        verts.extend_from_slice(&[
+            LineVertex { position: [x0, y0, z0] }, LineVertex { position: [x0, y1, z0] },
+            LineVertex { position: [x1, y0, z0] }, LineVertex { position: [x1, y1, z0] },
+            LineVertex { position: [x0, y0, z1] }, LineVertex { position: [x0, y1, z1] },
+            LineVertex { position: [x1, y0, z1] }, LineVertex { position: [x1, y1, z1] },
+        ]);
+        // 4 bottom edges
+        verts.extend_from_slice(&[
+            LineVertex { position: [x0, y0, z0] }, LineVertex { position: [x1, y0, z0] },
+            LineVertex { position: [x1, y0, z0] }, LineVertex { position: [x1, y0, z1] },
+            LineVertex { position: [x1, y0, z1] }, LineVertex { position: [x0, y0, z1] },
+            LineVertex { position: [x0, y0, z1] }, LineVertex { position: [x0, y0, z0] },
+        ]);
+        // 4 top edges
+        verts.extend_from_slice(&[
+            LineVertex { position: [x0, y1, z0] }, LineVertex { position: [x1, y1, z0] },
+            LineVertex { position: [x1, y1, z0] }, LineVertex { position: [x1, y1, z1] },
+            LineVertex { position: [x1, y1, z1] }, LineVertex { position: [x0, y1, z1] },
+            LineVertex { position: [x0, y1, z1] }, LineVertex { position: [x0, y1, z0] },
+        ]);
+    }
+    verts
 }
 
 // ── Geometry helpers ─────────────────────────────────────────

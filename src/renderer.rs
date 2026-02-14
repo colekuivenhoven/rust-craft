@@ -5,7 +5,7 @@ use crate::camera::{Camera, CameraController, CameraUniform, Projection, Frustum
 use crate::chunk::{CHUNK_SIZE, CHUNK_HEIGHT};
 use crate::crafting::CraftingSystem;
 use crate::dropped_item::DroppedItemManager;
-use crate::enemy::{EnemyManager, create_enemy_vertices, generate_enemy_indices};
+use crate::enemy::{EnemyManager, create_enemy_vertices, generate_enemy_indices, create_enemy_collision_outlines};
 use crate::bitmap_font;
 use crate::particle::ParticleManager;
 use crate::player::Player;
@@ -122,6 +122,7 @@ pub struct State {
     // Debug mode
     show_chunk_outlines: bool,
     noclip_mode: bool,
+    show_enemy_hitboxes: bool,
     
     // Underwater effect (Post-Processing)
     camera_underwater: bool,
@@ -1357,6 +1358,7 @@ impl State {
             // Debug mode
             show_chunk_outlines: false,
             noclip_mode: false,
+            show_enemy_hitboxes: false,
             // Underwater effect
             camera_underwater: false,
             underwater_pipeline,
@@ -1772,6 +1774,36 @@ impl State {
             fps_scale,
             fps_scale,
             noclip_color,
+            screen_w,
+            screen_h,
+        );
+
+        // === Enemy Hitbox Toggle Indicator (below Noclip) ===
+        let (hitbox_text, hitbox_color, hitbox_bg_color) = if self.show_enemy_hitboxes {
+            ("F3 - ENEMY HITBOX: ON", [0.5, 1.0, 0.5, 1.0], [0.0, 0.2, 0.0, 0.6])
+        } else {
+            ("F3 - ENEMY HITBOX: OFF", [1.0, 1.0, 1.0, 0.9], [0.0, 0.0, 0.0, 0.5])
+        };
+        let hitbox_y = noclip_y + fps_char_h + 8.0;
+        let hitbox_text_width = hitbox_text.len() as f32 * fps_char_w;
+        bitmap_font::push_rect_px(
+            &mut verts,
+            fps_x - 4.0,
+            hitbox_y - 4.0,
+            hitbox_text_width + 8.0,
+            fps_char_h + 8.0,
+            hitbox_bg_color,
+            screen_w,
+            screen_h,
+        );
+        bitmap_font::draw_text_quads(
+            &mut verts,
+            hitbox_text,
+            fps_x,
+            hitbox_y,
+            fps_scale,
+            fps_scale,
+            hitbox_color,
             screen_w,
             screen_h,
         );
@@ -2331,6 +2363,13 @@ impl State {
                         if is_pressed {
                             self.noclip_mode = !self.noclip_mode;
                             println!("Noclip: {}", if self.noclip_mode { "ON" } else { "OFF" });
+                        }
+                        true
+                    }
+                    KeyCode::F3 => {
+                        if is_pressed {
+                            self.show_enemy_hitboxes = !self.show_enemy_hitboxes;
+                            println!("Enemy hitboxes: {}", if self.show_enemy_hitboxes { "ON" } else { "OFF" });
                         }
                         true
                     }
@@ -3348,6 +3387,47 @@ impl State {
                 chunk_outline_pass.set_bind_group(0, &self.camera_bind_group, &[]);
                 chunk_outline_pass.set_vertex_buffer(0, chunk_outline_buffer.slice(..));
                 chunk_outline_pass.draw(0..chunk_outline_vertices.len() as u32, 0..1);
+            }
+        }
+
+        // Render enemy collision hitbox outlines if debug mode is enabled
+        if self.show_enemy_hitboxes {
+            let hitbox_verts = create_enemy_collision_outlines(&self.enemy_manager.enemies);
+            if !hitbox_verts.is_empty() {
+                let mut hitbox_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("Enemy Hitbox Outline Render Pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: world_render_target,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &self.depth_view,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+
+                let hitbox_buffer =
+                    self.device
+                        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                            label: Some("Enemy Hitbox Vertex Buffer"),
+                            contents: bytemuck::cast_slice(&hitbox_verts),
+                            usage: wgpu::BufferUsages::VERTEX,
+                        });
+
+                hitbox_pass.set_pipeline(&self.chunk_outline_pipeline);
+                hitbox_pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                hitbox_pass.set_vertex_buffer(0, hitbox_buffer.slice(..));
+                hitbox_pass.draw(0..hitbox_verts.len() as u32, 0..1);
             }
         }
 
