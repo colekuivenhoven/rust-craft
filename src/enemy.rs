@@ -17,6 +17,7 @@ const SPAWN_MIN_DIST: f32 = 20.0;
 const SPAWN_MAX_DIST: f32 = 40.0;
 const SLIME_SIZE: f32 = 0.8;
 const SLIME_DAMAGE: f32 = 8.0;
+const SUFFOCATION_DPS: f32 = 10.0;
 const SAVE_PATH: &str = "saves/enemies.dat";
 const ENEMY_FILE_VERSION: u8 = 1;
 
@@ -44,12 +45,10 @@ pub struct Enemy {
     pub on_ground: bool,
     pub kind: EnemyKind,
     pub facing_yaw: f32,
+    target_yaw: f32,
     bounce_timer: f32,
     was_on_ground: bool,
     rng_state: u32,
-    last_land_x: f32,
-    last_land_z: f32,
-    stuck_count: u8,
 }
 
 impl Enemy {
@@ -72,12 +71,10 @@ impl Enemy {
                 color: [r, g, b],
             },
             facing_yaw: 0.0,
+            target_yaw: 0.0,
             bounce_timer: 0.0,
             was_on_ground: false,
             rng_state: seed,
-            last_land_x: position.x,
-            last_land_z: position.z,
-            stuck_count: 0,
         }
     }
 
@@ -97,10 +94,18 @@ impl Enemy {
         let to_player = player_pos - self.position;
         let dist_to_player = to_player.magnitude();
 
-        // Face toward player when chasing
-        if dist_to_player < DETECTION_RANGE {
-            self.facing_yaw = to_player.z.atan2(to_player.x);
+        // Face toward movement direction (set target_yaw from horizontal velocity)
+        let hspeed = (self.velocity.x * self.velocity.x + self.velocity.z * self.velocity.z).sqrt();
+        if hspeed > 0.5 {
+            self.target_yaw = self.velocity.z.atan2(self.velocity.x);
         }
+
+        // Smoothly interpolate facing_yaw toward target_yaw
+        let mut delta = self.target_yaw - self.facing_yaw;
+        // Wrap to [-PI, PI] for shortest rotation path
+        while delta > std::f32::consts::PI { delta -= std::f32::consts::TAU; }
+        while delta < -std::f32::consts::PI { delta += std::f32::consts::TAU; }
+        self.facing_yaw += delta * (6.0 * dt).min(1.0);
 
         // Bounce AI: only decide when on ground
         self.bounce_timer -= dt;
@@ -110,7 +115,6 @@ impl Enemy {
 
         // Gravity
         self.velocity.y += GRAVITY * dt;
-        // Clamp terminal velocity
         if self.velocity.y < -30.0 {
             self.velocity.y = -30.0;
         }
@@ -118,35 +122,8 @@ impl Enemy {
         // Apply velocity
         let new_pos = self.position + self.velocity * dt;
 
-        // Collision detection
-        self.apply_collisions(new_pos, world);
-
-        // Track repeated landings at the same position (stuck detection)
-        if self.on_ground && !self.was_on_ground {
-            let dx = (self.position.x - self.last_land_x).abs();
-            let dz = (self.position.z - self.last_land_z).abs();
-            if dx < 0.5 && dz < 0.5 {
-                self.stuck_count = self.stuck_count.saturating_add(1);
-            } else {
-                self.stuck_count = 0;
-            }
-            self.last_land_x = self.position.x;
-            self.last_land_z = self.position.z;
-
-            // After 3 consecutive bounces landing in the same spot, escape
-            if self.stuck_count >= 3 {
-                let radius = self.size * 0.4;
-                let height = self.size;
-                if self.is_stuck(radius, height, world) {
-                    if let Some(clear) = self.find_nearest_clear(world) {
-                        self.position = clear;
-                        self.velocity = Vector3::new(0.0, 0.0, 0.0);
-                        self.on_ground = false;
-                    }
-                }
-                self.stuck_count = 0;
-            }
-        }
+        // Collision detection + depenetration
+        self.apply_collisions(new_pos, world, dt);
 
         // Squash/stretch animation
         self.update_squash(dt);
@@ -170,32 +147,29 @@ impl Enemy {
             let speed = pseudo_rand_range(&mut self.rng_state, WANDER_SPEED * 0.5, WANDER_SPEED);
             self.velocity.x = angle.cos() * speed;
             self.velocity.z = angle.sin() * speed;
-            self.facing_yaw = angle;
             self.bounce_timer = pseudo_rand_range(&mut self.rng_state, 1.0, 3.0);
         }
     }
 
-    fn apply_collisions(&mut self, new_pos: Point3<f32>, world: &World) {
-        let radius = self.size * 0.4;
-        let height = self.size;
+    fn apply_collisions(&mut self, new_pos: Point3<f32>, world: &World, dt: f32) {
+        let r = self.size * 0.4;
+        let h = self.size;
 
-        // --- X axis collision ---
+        // --- X axis: move then check full AABB ---
         if self.velocity.x != 0.0 {
-            let test_x = Point3::new(new_pos.x, self.position.y, self.position.z);
-            if self.check_horizontal_collision(test_x, radius, height, world) {
-                self.velocity.x = 0.0;
-            } else {
+            if !aabb_overlaps_solid(new_pos.x, self.position.y, self.position.z, r, h, world) {
                 self.position.x = new_pos.x;
+            } else {
+                self.velocity.x = 0.0;
             }
         }
 
-        // --- Z axis collision (using updated X) ---
+        // --- Z axis (using updated X): move then check full AABB ---
         if self.velocity.z != 0.0 {
-            let test_z = Point3::new(self.position.x, self.position.y, new_pos.z);
-            if self.check_horizontal_collision(test_z, radius, height, world) {
-                self.velocity.z = 0.0;
-            } else {
+            if !aabb_overlaps_solid(self.position.x, self.position.y, new_pos.z, r, h, world) {
                 self.position.z = new_pos.z;
+            } else {
+                self.velocity.z = 0.0;
             }
         }
 
@@ -203,78 +177,46 @@ impl Enemy {
         self.was_on_ground = self.on_ground;
         self.on_ground = false;
 
-        // Build check positions using the CORRECTED X/Z position
-        let check_positions = [
-            (self.position.x, self.position.z),
-            (self.position.x + radius * 0.7, self.position.z),
-            (self.position.x - radius * 0.7, self.position.z),
-            (self.position.x, self.position.z + radius * 0.7),
-            (self.position.x, self.position.z - radius * 0.7),
-        ];
-
-        let old_feet_y = self.position.y;
-
         if self.velocity.y <= 0.0 {
-            // Falling: check ground
-            let feet_y = new_pos.y;
-            let mut highest_ground = f32::NEG_INFINITY;
-            let mut found_ground = false;
-
-            for (cx, cz) in &check_positions {
-                let block_y = feet_y.floor() as i32;
-                let bx = cx.floor() as i32;
-                let bz = cz.floor() as i32;
-                let block = world.get_block_world(bx, block_y, bz);
-                if block.is_solid() {
-                    let block_top = (block_y + 1) as f32;
-                    // Only land if we were above this block before
-                    if feet_y < block_top && old_feet_y >= block_top - 0.01 {
-                        highest_ground = highest_ground.max(block_top);
-                        found_ground = true;
-                    }
-                }
-            }
-
-            if found_ground {
-                self.position.y = highest_ground;
-                self.velocity.y = 0.0;
-                self.on_ground = true;
-                // Apply friction when landing
-                self.velocity.x *= 0.5;
-                self.velocity.z *= 0.5;
-            } else {
+            // Falling: check if new Y overlaps solid
+            if !aabb_overlaps_solid(self.position.x, new_pos.y, self.position.z, r, h, world) {
                 self.position.y = new_pos.y;
 
-                // Standing hysteresis check - prevent gliding off edges
-                let standing_feet_y = self.position.y - 0.05;
-                for (cx, cz) in &check_positions {
-                    let bx = cx.floor() as i32;
-                    let bz = cz.floor() as i32;
-                    let block_y = standing_feet_y.floor() as i32;
-                    let block = world.get_block_world(bx, block_y, bz);
-                    if block.is_solid() {
-                        let block_top = (block_y + 1) as f32;
-                        if (self.position.y - block_top).abs() < 0.05 {
-                            self.on_ground = true;
-                            self.position.y = block_top;
-                            break;
+                // Hysteresis: check slightly below to maintain ground contact
+                let test_y = self.position.y - 0.05;
+                if aabb_overlaps_solid(self.position.x, test_y, self.position.z, r, h, world) {
+                    let block_top = (test_y.floor() as i32 + 1) as f32;
+                    if (self.position.y - block_top).abs() < 0.05 {
+                        self.on_ground = true;
+                        self.position.y = block_top;
+                    }
+                }
+            } else {
+                // Hit ground: find highest solid block top under feet
+                let min_bx = (self.position.x - r).floor() as i32;
+                let max_bx = (self.position.x + r).floor() as i32;
+                let min_bz = (self.position.z - r).floor() as i32;
+                let max_bz = (self.position.z + r).floor() as i32;
+                let feet_by = new_pos.y.floor() as i32;
+
+                let mut highest = new_pos.y;
+                for bx in min_bx..=max_bx {
+                    for bz in min_bz..=max_bz {
+                        if world.get_block_world(bx, feet_by, bz).is_solid() {
+                            let top = (feet_by + 1) as f32;
+                            if top > highest { highest = top; }
                         }
                     }
                 }
+                self.position.y = highest;
+                self.velocity.y = 0.0;
+                self.on_ground = true;
+                self.velocity.x *= 0.5;
+                self.velocity.z *= 0.5;
             }
         } else {
-            // Rising: check ceiling at multiple points
-            let mut hit_ceiling = false;
-            for (cx, cz) in &check_positions {
-                let head_y = (new_pos.y + height).floor() as i32;
-                let bx = cx.floor() as i32;
-                let bz = cz.floor() as i32;
-                if world.get_block_world(bx, head_y, bz).is_solid() {
-                    hit_ceiling = true;
-                    break;
-                }
-            }
-            if hit_ceiling {
+            // Rising: ceiling check with full AABB
+            if aabb_overlaps_solid(self.position.x, new_pos.y, self.position.z, r, h, world) {
                 self.velocity.y = 0.0;
             } else {
                 self.position.y = new_pos.y;
@@ -288,98 +230,86 @@ impl Enemy {
             self.on_ground = true;
         }
 
-        // Anti-stuck: if center of enemy is embedded in a solid block, escape immediately
-        let center_bx = self.position.x.floor() as i32;
-        let center_by = (self.position.y + height * 0.5).floor() as i32;
-        let center_bz = self.position.z.floor() as i32;
-        if world.get_block_world(center_bx, center_by, center_bz).is_solid() {
-            if let Some(clear) = self.find_nearest_clear(world) {
-                self.position = clear;
-                self.velocity = Vector3::new(0.0, 0.0, 0.0);
-                self.on_ground = false;
-                self.stuck_count = 0;
-            }
-        }
+        // --- Depenetration: push out of any overlapping solid blocks ---
+        self.depenetrate(r, h, world, dt);
     }
 
-    fn check_horizontal_collision(
-        &self, pos: Point3<f32>, radius: f32, height: f32, world: &World,
-    ) -> bool {
-        // Check at 3 heights: feet, middle, head
-        let heights = [0.1, height * 0.5, height - 0.1];
-        // Check in all 4 cardinal directions at radius distance
-        let offsets = [
-            (radius, 0.0),
-            (-radius, 0.0),
-            (0.0, radius),
-            (0.0, -radius),
-        ];
+    /// Per-frame depenetration: iteratively resolve overlaps with solid blocks.
+    /// Pushes the enemy out along the axis of minimum penetration.
+    /// If still stuck after iterations, apply suffocation damage.
+    fn depenetrate(&mut self, r: f32, h: f32, world: &World, dt: f32) {
+        for _ in 0..4 {
+            let min_bx = (self.position.x - r).floor() as i32;
+            let max_bx = (self.position.x + r).floor() as i32;
+            let min_by = self.position.y.floor() as i32;
+            let max_by = (self.position.y + h - 0.001).floor() as i32;
+            let min_bz = (self.position.z - r).floor() as i32;
+            let max_bz = (self.position.z + r).floor() as i32;
 
-        for &h in &heights {
-            for &(ox, oz) in &offsets {
-                let bx = (pos.x + ox).floor() as i32;
-                let by = (pos.y + h).floor() as i32;
-                let bz = (pos.z + oz).floor() as i32;
-                if world.get_block_world(bx, by, bz).is_solid() {
-                    return true;
-                }
-            }
-        }
-        false
-    }
+            // Find the solid block with the smallest penetration to resolve first
+            let mut best: Option<(f32, f32, f32, f32)> = None; // (pen, push_x, push_y, push_z)
 
-    /// Check if the enemy is blocked on at least 2 horizontal sides (boxed in)
-    fn is_stuck(&self, radius: f32, _height: f32, world: &World) -> bool {
-        let by = (self.position.y + 0.1).floor() as i32;
-        let sides = [
-            (radius + 0.1, 0.0),
-            (-(radius + 0.1), 0.0),
-            (0.0, radius + 0.1),
-            (0.0, -(radius + 0.1)),
-        ];
-        let mut blocked = 0;
-        for &(ox, oz) in &sides {
-            let bx = (self.position.x + ox).floor() as i32;
-            let bz = (self.position.z + oz).floor() as i32;
-            if world.get_block_world(bx, by, bz).is_solid() {
-                blocked += 1;
-            }
-        }
-        blocked >= 2
-    }
+            for bx in min_bx..=max_bx {
+                for by in min_by..=max_by {
+                    for bz in min_bz..=max_bz {
+                        if !world.get_block_world(bx, by, bz).is_solid() {
+                            continue;
+                        }
 
-    /// Search in expanding rings for the nearest clear position
-    /// (solid ground below, 2 air blocks above)
-    fn find_nearest_clear(&self, world: &World) -> Option<Point3<f32>> {
-        let base_x = self.position.x.floor() as i32;
-        let base_y = self.position.y.floor() as i32;
-        let base_z = self.position.z.floor() as i32;
+                        // Compute actual overlap on each axis
+                        let overlap_x = (self.position.x + r).min((bx + 1) as f32)
+                            - (self.position.x - r).max(bx as f32);
+                        let overlap_y = (self.position.y + h).min((by + 1) as f32)
+                            - self.position.y.max(by as f32);
+                        let overlap_z = (self.position.z + r).min((bz + 1) as f32)
+                            - (self.position.z - r).max(bz as f32);
 
-        // Search expanding rings: radius 0..6, y offsets -3..+8
-        for r in 0..7_i32 {
-            for dx in -r..=r {
-                for dz in -r..=r {
-                    // Only check the ring perimeter (skip interior, already checked)
-                    if r > 0 && dx.abs() != r && dz.abs() != r {
-                        continue;
-                    }
-                    let x = base_x + dx;
-                    let z = base_z + dz;
-                    // Scan vertically for a valid landing spot
-                    for dy in -3..=8_i32 {
-                        let y = base_y + dy;
-                        if y < 1 { continue; }
-                        let ground_solid = world.get_block_world(x, y - 1, z).is_solid();
-                        let feet_clear = !world.get_block_world(x, y, z).is_solid();
-                        let head_clear = !world.get_block_world(x, y + 1, z).is_solid();
-                        if ground_solid && feet_clear && head_clear {
-                            return Some(Point3::new(x as f32 + 0.5, y as f32, z as f32 + 0.5));
+                        if overlap_x <= 0.0 || overlap_y <= 0.0 || overlap_z <= 0.0 {
+                            continue;
+                        }
+
+                        // Push along axis of minimum penetration
+                        let (pen, px, py, pz) = if overlap_x <= overlap_y && overlap_x <= overlap_z {
+                            let sign = if self.position.x > bx as f32 + 0.5 { 1.0 } else { -1.0 };
+                            (overlap_x, overlap_x * sign, 0.0, 0.0)
+                        } else if overlap_y <= overlap_z {
+                            let sign = if self.position.y + h * 0.5 > by as f32 + 0.5 { 1.0 } else { -1.0 };
+                            (overlap_y, 0.0, overlap_y * sign, 0.0)
+                        } else {
+                            let sign = if self.position.z > bz as f32 + 0.5 { 1.0 } else { -1.0 };
+                            (overlap_z, 0.0, 0.0, overlap_z * sign)
+                        };
+
+                        match &best {
+                            None => best = Some((pen, px, py, pz)),
+                            Some((bp, _, _, _)) if pen < *bp => best = Some((pen, px, py, pz)),
+                            _ => {}
                         }
                     }
                 }
             }
+
+            match best {
+                Some((_, px, py, pz)) => {
+                    self.position.x += px;
+                    self.position.y += py;
+                    self.position.z += pz;
+                    if px != 0.0 { self.velocity.x = 0.0; }
+                    if py > 0.0 { self.velocity.y = 0.0; self.on_ground = true; }
+                    if py < 0.0 { self.velocity.y = 0.0; }
+                    if pz != 0.0 { self.velocity.z = 0.0; }
+                }
+                None => return, // No overlap, done
+            }
         }
-        None
+
+        // Still stuck after 4 depenetration iterations — suffocate
+        if aabb_overlaps_solid(self.position.x, self.position.y, self.position.z, r, h, world) {
+            self.health -= SUFFOCATION_DPS * dt;
+            if self.health <= 0.0 {
+                self.alive = false;
+            }
+        }
     }
 
     fn update_squash(&mut self, dt: f32) {
@@ -477,12 +407,10 @@ impl Enemy {
                         color: [cr, cg, cb],
                     },
                     facing_yaw,
+                    target_yaw: facing_yaw,
                     bounce_timer: 0.0,
                     was_on_ground: false,
                     rng_state,
-                    last_land_x: px,
-                    last_land_z: pz,
-                    stuck_count: 0,
                 })
             }
             _ => Err(std::io::Error::new(
@@ -551,6 +479,9 @@ impl EnemyManager {
             enemy.update(dt, player_pos, world);
         }
 
+        // Enemy-enemy AABB collision: bounce off each other
+        self.resolve_enemy_collisions();
+
         // Remove dead enemies
         self.enemies.retain(|e| e.alive);
 
@@ -572,24 +503,87 @@ impl EnemyManager {
         let spawn_x = player_pos.x + angle.cos() * distance;
         let spawn_z = player_pos.z + angle.sin() * distance;
 
-        // Find ground: scan downward
+        // Find ground: scan downward, requiring 2 blocks of clearance on all sides
         let start_y = player_pos.y as i32 + 20;
+        let bx = spawn_x.floor() as i32;
+        let bz = spawn_z.floor() as i32;
         let mut spawn_y = None;
-        for y in (1..start_y).rev() {
-            let bx = spawn_x.floor() as i32;
-            let bz = spawn_z.floor() as i32;
-            if world.get_block_world(bx, y, bz).is_solid()
-                && !world.get_block_world(bx, y + 1, bz).is_solid()
-                && !world.get_block_world(bx, y + 2, bz).is_solid()
-            {
-                spawn_y = Some((y + 1) as f32);
-                break;
+        'outer: for y in (1..start_y).rev() {
+            if !world.get_block_world(bx, y, bz).is_solid() {
+                continue;
             }
+            // Ground found at y, enemy feet at y+1
+            // Check 2 blocks of vertical clearance in a 3x3 column (2 blocks on each side)
+            for check_x in (bx - 2)..=(bx + 2) {
+                for check_z in (bz - 2)..=(bz + 2) {
+                    if world.get_block_world(check_x, y + 1, check_z).is_solid()
+                        || world.get_block_world(check_x, y + 2, check_z).is_solid()
+                    {
+                        continue 'outer;
+                    }
+                }
+            }
+            spawn_y = Some((y + 1) as f32);
+            break;
         }
 
         if let Some(y) = spawn_y {
             let pos = Point3::new(spawn_x, y, spawn_z);
             self.enemies.push(Enemy::new_slime(pos, seed));
+        }
+    }
+
+    fn resolve_enemy_collisions(&mut self) {
+        let len = self.enemies.len();
+        for i in 0..len {
+            for j in (i + 1)..len {
+                if !self.enemies[i].alive || !self.enemies[j].alive {
+                    continue;
+                }
+                let ri = self.enemies[i].size * 0.4;
+                let hi = self.enemies[i].size;
+                let rj = self.enemies[j].size * 0.4;
+                let hj = self.enemies[j].size;
+
+                let pi = self.enemies[i].position;
+                let pj = self.enemies[j].position;
+
+                // AABB overlap test
+                let overlap_x = (ri + rj) - (pi.x - pj.x).abs();
+                let overlap_z = (ri + rj) - (pi.z - pj.z).abs();
+                let overlap_y_min = pi.y.max(pj.y);
+                let overlap_y_max = (pi.y + hi).min(pj.y + hj);
+                let overlap_y = overlap_y_max - overlap_y_min;
+
+                if overlap_x <= 0.0 || overlap_z <= 0.0 || overlap_y <= 0.0 {
+                    continue;
+                }
+
+                // Push apart along the axis of least overlap
+                let dx = pi.x - pj.x;
+                let dz = pi.z - pj.z;
+
+                if overlap_x < overlap_z {
+                    // Resolve along X
+                    let sign = if dx >= 0.0 { 1.0 } else { -1.0 };
+                    let push = overlap_x * 0.5;
+                    self.enemies[i].position.x += sign * push;
+                    self.enemies[j].position.x -= sign * push;
+                    // Bounce velocities
+                    let bounce_speed = 3.0;
+                    self.enemies[i].velocity.x = sign * bounce_speed;
+                    self.enemies[j].velocity.x = -sign * bounce_speed;
+                } else {
+                    // Resolve along Z
+                    let sign = if dz >= 0.0 { 1.0 } else { -1.0 };
+                    let push = overlap_z * 0.5;
+                    self.enemies[i].position.z += sign * push;
+                    self.enemies[j].position.z -= sign * push;
+                    let bounce_speed = 3.0;
+                    self.enemies[i].velocity.z = sign * bounce_speed;
+                    self.enemies[j].velocity.z = -sign * bounce_speed;
+                }
+            }
         }
     }
 
@@ -813,6 +807,30 @@ pub fn create_enemy_collision_outlines(enemies: &[Enemy]) -> Vec<LineVertex> {
         ]);
     }
     verts
+}
+
+// ── Collision helpers ────────────────────────────────────────
+
+/// Check if an AABB centered at (px, pz) with feet at py overlaps any solid block.
+/// AABB: [px-r, px+r] x [py, py+h) x [pz-r, pz+r]
+fn aabb_overlaps_solid(px: f32, py: f32, pz: f32, r: f32, h: f32, world: &World) -> bool {
+    let min_bx = (px - r).floor() as i32;
+    let max_bx = (px + r - 0.001).floor() as i32;
+    let min_by = py.floor() as i32;
+    let max_by = (py + h - 0.001).floor() as i32;
+    let min_bz = (pz - r).floor() as i32;
+    let max_bz = (pz + r - 0.001).floor() as i32;
+
+    for bx in min_bx..=max_bx {
+        for by in min_by..=max_by {
+            for bz in min_bz..=max_bz {
+                if world.get_block_world(bx, by, bz).is_solid() {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 // ── Geometry helpers ─────────────────────────────────────────
