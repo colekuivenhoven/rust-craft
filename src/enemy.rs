@@ -21,6 +21,14 @@ const SUFFOCATION_DPS: f32 = 10.0;
 const SAVE_PATH: &str = "saves/enemies.dat";
 const ENEMY_FILE_VERSION: u8 = 1;
 
+// Combat constants
+const DAMAGE_FLASH_DURATION: f32 = 0.3;
+const DEATH_ANIMATION_DURATION: f32 = 1.0;
+const KNOCKBACK_HORIZONTAL: f32 = 8.0;
+const KNOCKBACK_VERTICAL: f32 = 6.0;
+const DEATH_KNOCKBACK_HORIZONTAL: f32 = 12.0;
+const DEATH_KNOCKBACK_VERTICAL: f32 = 8.0;
+
 // ── Enemy types ──────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
@@ -49,6 +57,9 @@ pub struct Enemy {
     bounce_timer: f32,
     was_on_ground: bool,
     rng_state: u32,
+    pub damage_flash: f32,
+    /// -1.0 = alive, >= 0.0 = dying animation progress in seconds
+    pub death_timer: f32,
 }
 
 impl Enemy {
@@ -75,6 +86,8 @@ impl Enemy {
             bounce_timer: 0.0,
             was_on_ground: false,
             rng_state: seed,
+            damage_flash: 0.0,
+            death_timer: -1.0,
         }
     }
 
@@ -86,8 +99,60 @@ impl Enemy {
         )
     }
 
+    /// Apply damage and knockback. Returns true if this hit killed the enemy.
+    pub fn hit(&mut self, damage: f32, knockback_dir: Vector3<f32>) -> bool {
+        if !self.alive || self.death_timer >= 0.0 {
+            return false;
+        }
+        self.health -= damage;
+        self.damage_flash = DAMAGE_FLASH_DURATION;
+
+        if self.health <= 0.0 {
+            self.health = 0.0;
+            self.death_timer = 0.0;
+            self.velocity = Vector3::new(
+                knockback_dir.x * DEATH_KNOCKBACK_HORIZONTAL,
+                DEATH_KNOCKBACK_VERTICAL,
+                knockback_dir.z * DEATH_KNOCKBACK_HORIZONTAL,
+            );
+            true
+        } else {
+            self.velocity = Vector3::new(
+                knockback_dir.x * KNOCKBACK_HORIZONTAL,
+                KNOCKBACK_VERTICAL,
+                knockback_dir.z * KNOCKBACK_HORIZONTAL,
+            );
+            false
+        }
+    }
+
+    pub fn is_dying(&self) -> bool {
+        self.death_timer >= 0.0
+    }
+
     pub fn update(&mut self, dt: f32, player_pos: Point3<f32>, world: &World) {
         if !self.alive {
+            return;
+        }
+
+        // Decay damage flash
+        if self.damage_flash > 0.0 {
+            self.damage_flash = (self.damage_flash - dt).max(0.0);
+        }
+
+        // Death animation: only apply gravity, advance timer, then mark dead
+        if self.death_timer >= 0.0 {
+            self.death_timer += dt;
+            self.velocity.y += GRAVITY * dt;
+            self.position.x += self.velocity.x * dt;
+            self.position.y += self.velocity.y * dt;
+            self.position.z += self.velocity.z * dt;
+            // Drag on horizontal velocity
+            self.velocity.x *= (1.0 - 2.0 * dt).max(0.0);
+            self.velocity.z *= (1.0 - 2.0 * dt).max(0.0);
+            if self.death_timer >= DEATH_ANIMATION_DURATION {
+                self.alive = false;
+            }
             return;
         }
 
@@ -429,6 +494,8 @@ impl Enemy {
                     bounce_timer: 0.0,
                     was_on_ground: false,
                     rng_state,
+                    damage_flash: 0.0,
+                    death_timer: -1.0,
                 })
             }
             _ => Err(std::io::Error::new(
@@ -465,7 +532,8 @@ impl EnemyManager {
         mgr
     }
 
-    pub fn update(&mut self, dt: f32, player_pos: Point3<f32>, world: &World) {
+    /// Update all enemies. Returns (position, color) of enemies that just finished dying.
+    pub fn update(&mut self, dt: f32, player_pos: Point3<f32>, world: &World) -> Vec<(Point3<f32>, [f32; 3])> {
         // Shelve enemies whose chunks are no longer loaded
         let mut to_shelve = Vec::new();
         for (i, enemy) in self.enemies.iter().enumerate() {
@@ -500,6 +568,17 @@ impl EnemyManager {
         // Enemy-enemy AABB collision: bounce off each other
         self.resolve_enemy_collisions();
 
+        // Collect death events before removing dead enemies
+        let mut death_events = Vec::new();
+        for enemy in &self.enemies {
+            if !enemy.alive {
+                let color = match &enemy.kind {
+                    EnemyKind::SlimeCube { color, .. } => *color,
+                };
+                death_events.push((enemy.position, color));
+            }
+        }
+
         // Remove dead enemies
         self.enemies.retain(|e| e.alive);
 
@@ -509,6 +588,8 @@ impl EnemyManager {
             self.try_spawn(player_pos, world);
             self.spawn_timer = 0.0;
         }
+
+        death_events
     }
 
     fn try_spawn(&mut self, player_pos: Point3<f32>, world: &World) {
@@ -603,6 +684,28 @@ impl EnemyManager {
                 }
             }
         }
+    }
+
+    /// Raycast against all alive, non-dying enemies. Returns index of closest hit.
+    pub fn raycast_enemy(&self, origin: Point3<f32>, dir: Vector3<f32>, max_dist: f32) -> Option<usize> {
+        let mut best: Option<(usize, f32)> = None;
+        for (i, enemy) in self.enemies.iter().enumerate() {
+            if !enemy.alive || enemy.is_dying() { continue; }
+            let r = enemy.size * 0.4;
+            let h = enemy.size;
+            let aabb_min = Point3::new(enemy.position.x - r, enemy.position.y, enemy.position.z - r);
+            let aabb_max = Point3::new(enemy.position.x + r, enemy.position.y + h, enemy.position.z + r);
+            if let Some(t) = ray_aabb_intersect(origin, dir, aabb_min, aabb_max) {
+                if t >= 0.0 && t <= max_dist {
+                    match &best {
+                        None => best = Some((i, t)),
+                        Some((_, bt)) if t < *bt => best = Some((i, t)),
+                        _ => {}
+                    }
+                }
+            }
+        }
+        best.map(|(i, _)| i)
     }
 
     pub fn check_player_damage(&self, player_pos: Point3<f32>) -> f32 {
@@ -700,6 +803,14 @@ pub fn create_enemy_vertices(enemy: &Enemy) -> Vec<Vertex> {
 fn create_slime_vertices(enemy: &Enemy, squash: f32, color: [f32; 3]) -> Vec<Vertex> {
     let mut vertices = Vec::with_capacity(5 * 24);
 
+    // Tint body color red when taking damage
+    let flash_t = (enemy.damage_flash / DAMAGE_FLASH_DURATION).clamp(0.0, 1.0);
+    let body_color = [
+        color[0] + (1.0 - color[0]) * flash_t,
+        color[1] * (1.0 - flash_t * 0.8),
+        color[2] * (1.0 - flash_t * 0.8),
+    ];
+
     let size = enemy.size;
     let half_w = size * 0.5 * (1.0 - squash * 0.5);
     let half_h = size * 0.5 * (1.0 + squash);
@@ -707,38 +818,53 @@ fn create_slime_vertices(enemy: &Enemy, squash: f32, color: [f32; 3]) -> Vec<Ver
     let pos = enemy.position;
     let yaw = enemy.facing_yaw;
 
+    // Death pitch: rotate to fall on back
+    let death_pitch = if enemy.death_timer >= 0.0 {
+        let progress = (enemy.death_timer / DEATH_ANIMATION_DURATION).min(1.0);
+        // Ease-out for natural fall
+        let eased = 1.0 - (1.0 - progress) * (1.0 - progress);
+        eased * std::f32::consts::FRAC_PI_2
+    } else {
+        0.0
+    };
+
     // Body
-    add_rotated_cube(
+    add_rotated_cube_pitched(
         &mut vertices,
         pos, Vector3::new(0.0, half_h, 0.0),
         half_w, half_h, half_d,
-        color, yaw,
+        body_color, yaw, death_pitch,
     );
 
     // Eyes
     let eye_w = size * 0.08;
     let eye_h = size * 0.10;
     let eye_d = size * 0.03;
-    let eye_color = [0.05, 0.05, 0.05];
-
     let eye_fwd = half_w + 0.002;
     let eye_up = half_h * 0.3;
     let eye_spread = size * 0.3;
 
+    // Tint eyes red too during damage flash
+    let eye_color = [
+        0.05 + 0.95 * flash_t,
+        0.05 * (1.0 - flash_t * 0.8),
+        0.05 * (1.0 - flash_t * 0.8),
+    ];
+
     let left_offset = rotate_yaw(eye_fwd, eye_up, eye_spread, yaw);
-    add_rotated_cube(
+    add_rotated_cube_pitched(
         &mut vertices,
         pos, Vector3::new(left_offset[0], half_h + left_offset[1], left_offset[2]),
         eye_d, eye_h, eye_w,
-        eye_color, yaw,
+        eye_color, yaw, death_pitch,
     );
 
     let right_offset = rotate_yaw(eye_fwd, eye_up, -eye_spread, yaw);
-    add_rotated_cube(
+    add_rotated_cube_pitched(
         &mut vertices,
         pos, Vector3::new(right_offset[0], half_h + right_offset[1], right_offset[2]),
         eye_d, eye_h, eye_w,
-        eye_color, yaw,
+        eye_color, yaw, death_pitch,
     );
 
     // Pupils
@@ -749,19 +875,19 @@ fn create_slime_vertices(enemy: &Enemy, squash: f32, color: [f32; 3]) -> Vec<Ver
     let pupil_up = eye_up + eye_h * 0.2;
 
     let left_pupil = rotate_yaw(pupil_fwd, pupil_up, eye_spread, yaw);
-    add_rotated_cube(
+    add_rotated_cube_pitched(
         &mut vertices,
         pos, Vector3::new(left_pupil[0], half_h + left_pupil[1], left_pupil[2]),
         pupil_d, pupil_size, pupil_size,
-        pupil_color, yaw,
+        pupil_color, yaw, death_pitch,
     );
 
     let right_pupil = rotate_yaw(pupil_fwd, pupil_up, -eye_spread, yaw);
-    add_rotated_cube(
+    add_rotated_cube_pitched(
         &mut vertices,
         pos, Vector3::new(right_pupil[0], half_h + right_pupil[1], right_pupil[2]),
         pupil_d, pupil_size, pupil_size,
-        pupil_color, yaw,
+        pupil_color, yaw, death_pitch,
     );
 
     vertices
@@ -827,6 +953,44 @@ pub fn create_enemy_collision_outlines(enemies: &[Enemy]) -> Vec<LineVertex> {
     verts
 }
 
+// ── Ray-AABB intersection (slab method) ─────────────────────
+
+fn ray_aabb_intersect(
+    origin: Point3<f32>,
+    dir: Vector3<f32>,
+    aabb_min: Point3<f32>,
+    aabb_max: Point3<f32>,
+) -> Option<f32> {
+    let mut tmin = f32::NEG_INFINITY;
+    let mut tmax = f32::INFINITY;
+
+    for i in 0..3 {
+        let o = match i { 0 => origin.x, 1 => origin.y, _ => origin.z };
+        let d = match i { 0 => dir.x, 1 => dir.y, _ => dir.z };
+        let bmin = match i { 0 => aabb_min.x, 1 => aabb_min.y, _ => aabb_min.z };
+        let bmax = match i { 0 => aabb_max.x, 1 => aabb_max.y, _ => aabb_max.z };
+
+        if d.abs() < 1e-9 {
+            // Ray parallel to slab — miss if origin not within slab
+            if o < bmin || o > bmax {
+                return None;
+            }
+        } else {
+            let inv_d = 1.0 / d;
+            let mut t1 = (bmin - o) * inv_d;
+            let mut t2 = (bmax - o) * inv_d;
+            if t1 > t2 { std::mem::swap(&mut t1, &mut t2); }
+            tmin = tmin.max(t1);
+            tmax = tmax.min(t2);
+            if tmin > tmax {
+                return None;
+            }
+        }
+    }
+
+    Some(tmin)
+}
+
 // ── Collision helpers ────────────────────────────────────────
 
 /// Check if an AABB centered at (px, pz) with feet at py overlaps any solid block.
@@ -859,7 +1023,9 @@ fn rotate_yaw(x: f32, y: f32, z: f32, yaw: f32) -> [f32; 3] {
     [x * c - z * s, y, x * s + z * c]
 }
 
-fn add_rotated_cube(
+/// Adds a rotated cube with optional pitch rotation (tilt backward for death animation).
+/// Pitch rotates around the local X axis (perpendicular to facing direction) at the enemy's feet.
+fn add_rotated_cube_pitched(
     vertices: &mut Vec<Vertex>,
     center: Point3<f32>,
     offset: Vector3<f32>,
@@ -868,10 +1034,12 @@ fn add_rotated_cube(
     half_d: f32,
     color: [f32; 3],
     yaw: f32,
+    pitch: f32,
 ) {
-    let cx = center.x + offset.x;
-    let cy = center.y + offset.y;
-    let cz = center.z + offset.z;
+    // First apply yaw rotation to the offset to get the cube center relative to feet
+    let cx = offset.x;
+    let cy = offset.y;
+    let cz = offset.z;
 
     let local_corners = [
         (-half_w, -half_h, -half_d),
@@ -886,11 +1054,51 @@ fn add_rotated_cube(
 
     let mut corners = Vec::with_capacity(8);
     for (lx, ly, lz) in local_corners {
-        let r = rotate_yaw(lx, ly, lz, yaw);
-        corners.push([cx + r[0], cy + r[1], cz + r[2]]);
+        // Position relative to enemy feet (before any rotation)
+        let px = cx + lx;
+        let py = cy + ly;
+        let pz = cz + lz;
+
+        // Apply yaw rotation first
+        let r = rotate_yaw(px, py, pz, yaw);
+
+        // Then apply pitch rotation (tilt backward around the perpendicular-to-facing axis)
+        // Pitch rotates in the plane of (facing direction, up), pivoting at feet (y=0)
+        let final_pos = if pitch.abs() > 0.001 {
+            rotate_pitch(r[0], r[1], r[2], yaw, pitch)
+        } else {
+            r
+        };
+
+        corners.push([center.x + final_pos[0], center.y + final_pos[1], center.z + final_pos[2]]);
     }
 
     push_cube_verts(vertices, corners, color);
+}
+
+/// Rotate a point around the axis perpendicular to the facing direction (yaw),
+/// in the vertical plane. This tilts the enemy backward for death animation.
+fn rotate_pitch(x: f32, y: f32, z: f32, yaw: f32, pitch: f32) -> [f32; 3] {
+    // The "backward" direction in world space based on yaw
+    let fwd_x = yaw.cos();
+    let fwd_z = yaw.sin();
+
+    // Project point onto the facing axis to get the "forward" component
+    let forward_dist = x * fwd_x + z * fwd_z;
+    // The "right" component is perpendicular and stays unchanged
+    let right_dist = -x * fwd_z + z * fwd_x;
+
+    // Rotate (forward_dist, y) by pitch angle
+    let cp = pitch.cos();
+    let sp = pitch.sin();
+    let new_forward = forward_dist * cp - y * sp;
+    let new_y = forward_dist * sp + y * cp;
+
+    // Convert back to world space
+    let new_x = new_forward * fwd_x - right_dist * fwd_z;
+    let new_z = new_forward * fwd_z + right_dist * fwd_x;
+
+    [new_x, new_y, new_z]
 }
 
 fn push_cube_verts(vertices: &mut Vec<Vertex>, corners: Vec<[f32; 3]>, color: [f32; 3]) {

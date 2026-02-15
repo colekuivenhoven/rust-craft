@@ -117,6 +117,39 @@ impl ParticleManager {
         }
     }
 
+    /// Spawn particles when an enemy dies (larger burst than block break)
+    pub fn spawn_enemy_death(&mut self, position: Point3<f32>, color: [f32; 3]) {
+        let mut rng = rand::thread_rng();
+        let center = Point3::new(position.x, position.y + 0.4, position.z);
+
+        for _ in 0..40 {
+            let velocity = Vector3::new(
+                rng.gen_range(-5.0..5.0),
+                rng.gen_range(3.0..8.0),
+                rng.gen_range(-5.0..5.0),
+            );
+            let offset = Vector3::new(
+                rng.gen_range(-0.5..0.5),
+                rng.gen_range(-0.3..0.3),
+                rng.gen_range(-0.5..0.5),
+            );
+            let spawn_pos = Point3::new(
+                center.x + offset.x,
+                center.y + offset.y,
+                center.z + offset.z,
+            );
+            let lifetime = rng.gen_range(0.4..1.0);
+            let size = rng.gen_range(0.06..0.12);
+            let color_var = rng.gen_range(-0.1..0.1);
+            let varied_color = [
+                (color[0] + color_var).clamp(0.0, 1.0),
+                (color[1] + color_var).clamp(0.0, 1.0),
+                (color[2] + color_var).clamp(0.0, 1.0),
+            ];
+            self.particles.push(Particle::new(spawn_pos, velocity, varied_color, lifetime, size));
+        }
+    }
+
     /// Update all particles
     pub fn update(&mut self, dt: f32) {
         for particle in &mut self.particles {

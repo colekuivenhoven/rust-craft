@@ -12,7 +12,7 @@ use crate::player::Player;
 use crate::texture::{TextureAtlas, get_face_uvs, TEX_DESTROY_BASE};
 use crate::water::WaterSimulation;
 use crate::world::World;
-use cgmath::{Point3, Vector3};
+use cgmath::{Point3, Vector3, InnerSpace};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
@@ -158,6 +158,10 @@ pub struct State {
     breaking_pipeline: wgpu::RenderPipeline,
     breaking_state: Option<BreakingState>,
     left_mouse_held: bool,
+    // Melee combat
+    hit_cooldown: f32,
+    hit_indicator_timer: f32,
+    crosshair_vertex_count: u32,
     // Cached GPU buffers for chunks - avoids recreating every frame
     chunk_buffers: HashMap<(i32, i32), ChunkBuffers>,
 }
@@ -701,13 +705,17 @@ impl State {
         });
 
         // Crosshair vertices (will be updated on resize for aspect ratio correction)
-        let crosshair_vertices = Self::build_crosshair_vertices(aspect_ratio);
+        // Allocate enough space for crosshair (12) + hit indicator circle (24 segments * 6 = 144)
+        let crosshair_vertices = Self::build_crosshair_vertices(aspect_ratio, false);
+        let max_crosshair_bytes = 156 * std::mem::size_of::<UiVertex>();
 
-        let crosshair_vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        let crosshair_vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Crosshair Vertex Buffer"),
-            contents: bytemuck::cast_slice(&crosshair_vertices),
+            size: max_crosshair_bytes as u64,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
         });
+        queue.write_buffer(&crosshair_vertex_buffer, 0, bytemuck::cast_slice(&crosshair_vertices));
 
         // HUD vertex buffer (hotbar + text). We'll rebuild it each frame.
         let hud_vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -1389,6 +1397,10 @@ impl State {
             breaking_pipeline,
             breaking_state: None,
             left_mouse_held: false,
+            // Melee combat
+            hit_cooldown: 0.0,
+            hit_indicator_timer: 0.0,
+            crosshair_vertex_count: 12,
             // Cached GPU buffers
             chunk_buffers: HashMap::new(),
         }
@@ -1630,7 +1642,9 @@ impl State {
             );
 
             // Rebuild crosshair vertices with new aspect ratio
-            let crosshair_vertices = Self::build_crosshair_vertices(aspect_ratio);
+            let hit_active = self.hit_indicator_timer > 0.0;
+            let crosshair_vertices = Self::build_crosshair_vertices(aspect_ratio, hit_active);
+            self.crosshair_vertex_count = crosshair_vertices.len() as u32;
             self.queue.write_buffer(
                 &self.crosshair_vertex_buffer,
                 0,
@@ -1639,7 +1653,7 @@ impl State {
         }
     }
 
-    fn build_crosshair_vertices(aspect_ratio: f32) -> Vec<UiVertex> {
+    fn build_crosshair_vertices(aspect_ratio: f32, hit_active: bool) -> Vec<UiVertex> {
         let crosshair_size = 0.06;
         let crosshair_thickness = 0.01;
         let crosshair_color = [1.0, 1.0, 1.0, 0.7];
@@ -1648,7 +1662,7 @@ impl State {
         let h_size = crosshair_size / aspect_ratio;
         let h_thick = crosshair_thickness / aspect_ratio;
 
-        vec![
+        let mut verts = vec![
             // Horizontal bar (X scaled for aspect ratio)
             UiVertex { position: [-h_size, -crosshair_thickness], color: crosshair_color },
             UiVertex { position: [h_size, -crosshair_thickness], color: crosshair_color },
@@ -1663,7 +1677,69 @@ impl State {
             UiVertex { position: [-h_thick, -crosshair_size], color: crosshair_color },
             UiVertex { position: [h_thick, crosshair_size], color: crosshair_color },
             UiVertex { position: [-h_thick, crosshair_size], color: crosshair_color },
-        ]
+        ];
+
+        // Red hit indicator circle
+        if hit_active {
+            let hit_color = [1.0, 0.2, 0.2, 0.9];
+            let radius = 0.10;
+            let thickness = 0.008;
+            let segments = 24;
+
+            for i in 0..segments {
+                let angle0 = (i as f32 / segments as f32) * std::f32::consts::TAU;
+                let angle1 = ((i + 1) as f32 / segments as f32) * std::f32::consts::TAU;
+
+                let inner_r = radius - thickness * 0.5;
+                let outer_r = radius + thickness * 0.5;
+
+                // Inner and outer points for this segment (aspect-corrected X)
+                let ix0 = inner_r * angle0.cos() / aspect_ratio;
+                let iy0 = inner_r * angle0.sin();
+                let ox0 = outer_r * angle0.cos() / aspect_ratio;
+                let oy0 = outer_r * angle0.sin();
+                let ix1 = inner_r * angle1.cos() / aspect_ratio;
+                let iy1 = inner_r * angle1.sin();
+                let ox1 = outer_r * angle1.cos() / aspect_ratio;
+                let oy1 = outer_r * angle1.sin();
+
+                // Two triangles forming the quad for this segment
+                verts.push(UiVertex { position: [ix0, iy0], color: hit_color });
+                verts.push(UiVertex { position: [ox0, oy0], color: hit_color });
+                verts.push(UiVertex { position: [ox1, oy1], color: hit_color });
+                verts.push(UiVertex { position: [ix0, iy0], color: hit_color });
+                verts.push(UiVertex { position: [ox1, oy1], color: hit_color });
+                verts.push(UiVertex { position: [ix1, iy1], color: hit_color });
+            }
+        }
+
+        verts
+    }
+
+    /// Project a world-space point to screen pixel coordinates.
+    /// Returns None if the point is behind the camera.
+    fn world_to_screen(&self, world_pos: Point3<f32>) -> Option<(f32, f32)> {
+        let view = self.camera.get_view_matrix();
+        let proj = self.projection.calc_matrix();
+        let vp = proj * view;
+
+        // Transform to clip space
+        let p = vp * cgmath::Vector4::new(world_pos.x, world_pos.y, world_pos.z, 1.0);
+        if p.w <= 0.0 {
+            return None; // Behind camera
+        }
+
+        // Perspective divide to NDC
+        let ndc_x = p.x / p.w;
+        let ndc_y = p.y / p.w;
+
+        // NDC to pixel coordinates
+        let screen_w = self.size.width as f32;
+        let screen_h = self.size.height as f32;
+        let px = (ndc_x + 1.0) * 0.5 * screen_w;
+        let py = (1.0 - ndc_y) * 0.5 * screen_h;
+
+        Some((px, py))
     }
 
     fn rebuild_hud_vertices(&mut self) {
@@ -2060,6 +2136,84 @@ impl State {
                         count_color,
                         screen_w,
                         screen_h,
+                    );
+                }
+            }
+        }
+
+        // === Enemy Floating Health Bars ===
+        for enemy in &self.enemy_manager.enemies {
+            if !enemy.alive { continue; }
+            // Only show health bar if enemy has taken damage
+            if enemy.health >= enemy.max_health && enemy.death_timer < 0.0 { continue; }
+
+            // Project position above enemy head
+            let bar_world_pos = Point3::new(
+                enemy.position.x,
+                enemy.position.y + enemy.size + 0.6,
+                enemy.position.z,
+            );
+            if let Some((sx, sy)) = self.world_to_screen(bar_world_pos) {
+                // Skip if off-screen
+                if sx < -100.0 || sx > screen_w + 100.0 || sy < -50.0 || sy > screen_h + 50.0 {
+                    continue;
+                }
+
+                // Scale bar size based on distance
+                let dist = {
+                    let dx = enemy.position.x - self.camera.position.x;
+                    let dy = enemy.position.y - self.camera.position.y;
+                    let dz = enemy.position.z - self.camera.position.z;
+                    (dx * dx + dy * dy + dz * dz).sqrt()
+                };
+                let scale = (24.0 / dist.max(2.0)).clamp(0.3, 4.5);
+
+                let bar_w = 60.0 * scale;
+                let bar_h = 12.0 * scale;
+                let border = 1.0 * scale;
+                let bar_x = sx - bar_w * 0.5;
+                let bar_y = sy - bar_h * 0.5;
+
+                // Dark background
+                bitmap_font::push_rect_px(
+                    &mut verts, bar_x, bar_y, bar_w, bar_h,
+                    [0.0, 0.0, 0.0, 0.5], screen_w, screen_h,
+                );
+
+                // White border
+                let bc = [1.0, 1.0, 1.0, 0.7];
+                bitmap_font::push_rect_px(&mut verts, bar_x, bar_y, bar_w, border, bc, screen_w, screen_h);
+                bitmap_font::push_rect_px(&mut verts, bar_x, bar_y + bar_h - border, bar_w, border, bc, screen_w, screen_h);
+                bitmap_font::push_rect_px(&mut verts, bar_x, bar_y, border, bar_h, bc, screen_w, screen_h);
+                bitmap_font::push_rect_px(&mut verts, bar_x + bar_w - border, bar_y, border, bar_h, bc, screen_w, screen_h);
+
+                // Red health fill
+                let health_pct = (enemy.health / enemy.max_health).clamp(0.0, 1.0);
+                let fill_x = bar_x + border;
+                let fill_y = bar_y + border;
+                let fill_max_w = bar_w - border * 2.0;
+                let fill_h = bar_h - border * 2.0;
+                let fill_w = fill_max_w * health_pct;
+                if fill_w > 0.0 {
+                    bitmap_font::push_rect_px(
+                        &mut verts, fill_x, fill_y, fill_w, fill_h,
+                        [0.8, 0.1, 0.1, 0.9], screen_w, screen_h,
+                    );
+                }
+
+                // Health percentage text (only if bar is large enough)
+                if scale > 0.5 {
+                    let text_scale = 1.0 * scale;
+                    let pct_text = format!("{}%", (health_pct * 100.0).round() as u32);
+                    let char_w = 6.0 * text_scale;
+                    let char_h = 7.0 * text_scale;
+                    let text_w = pct_text.len() as f32 * char_w;
+                    let text_x = sx - text_w * 0.5;
+                    let text_y = bar_y + (bar_h - char_h) * 0.5;
+                    bitmap_font::draw_text_quads(
+                        &mut verts, &pct_text, text_x, text_y,
+                        text_scale, text_scale,
+                        [1.0, 1.0, 1.0, 0.95], screen_w, screen_h,
                     );
                 }
             }
@@ -2498,9 +2652,53 @@ impl State {
             return;
         }
 
-        // Get currently targeted block
         let direction = self.camera.get_direction();
+
+        // Check if cursor is aimed at an enemy (prioritize over block breaking)
+        let enemy_hit_idx = self.enemy_manager.raycast_enemy(
+            self.camera.position, direction, self.player.reach_distance,
+        );
+
+        if let Some(idx) = enemy_hit_idx {
+            // Cursor is on an enemy - cancel any block breaking
+            self.breaking_state = None;
+
+            // Attempt melee hit if cooldown is ready
+            if self.hit_cooldown <= 0.0 {
+                // Calculate damage: 1.0 base + block durability if holding an item
+                let damage = match self.player.inventory.get_selected_item() {
+                    Some(item) => 1.0 + item.block_type.get_durability(),
+                    None => 1.0,
+                };
+
+                // Calculate knockback direction (horizontal, from player toward enemy)
+                let enemy_pos = self.enemy_manager.enemies[idx].position;
+                let to_enemy = Vector3::new(
+                    enemy_pos.x - self.camera.position.x,
+                    0.0,
+                    enemy_pos.z - self.camera.position.z,
+                );
+                let knockback_dir = if to_enemy.magnitude() > 0.001 {
+                    to_enemy.normalize()
+                } else {
+                    Vector3::new(direction.x, 0.0, direction.z).normalize()
+                };
+
+                self.enemy_manager.enemies[idx].hit(damage, knockback_dir);
+                self.hit_cooldown = 0.4;
+                self.hit_indicator_timer = 0.2;
+            }
+            return;
+        }
+
+        // No enemy targeted - check for block breaking
         let target = self.player.raycast_block(direction, &self.world);
+
+        // If no block targeted either, attempt a melee swing into the air
+        if target.is_none() && self.hit_cooldown <= 0.0 {
+            // Show the hit indicator even when swinging at nothing
+            // (no damage applied, just visual feedback of the swing)
+        }
 
         match (&mut self.breaking_state, target) {
             (Some(state), Some((x, y, z, _))) => {
@@ -2682,8 +2880,11 @@ impl State {
         // Update water simulation
         self.water_simulation.update(&mut self.world, dt);
 
-        // Update enemies
-        self.enemy_manager.update(dt, self.player.position, &self.world);
+        // Update enemies and spawn death particles
+        let death_events = self.enemy_manager.update(dt, self.player.position, &self.world);
+        for (pos, color) in death_events {
+            self.particle_manager.spawn_enemy_death(pos, color);
+        }
 
         // Update birds
         self.bird_manager.update(dt, self.player.position, &self.world);
@@ -2720,8 +2921,29 @@ impl State {
         self.targeted_block = self.player.raycast_block(direction, &self.world)
             .map(|(x, y, z, _)| (x, y, z));
 
-        // Update block breaking
+        // Update block breaking / melee combat
         self.update_block_breaking(dt);
+
+        // Decay hit indicator and cooldown timers
+        if self.hit_cooldown > 0.0 {
+            self.hit_cooldown = (self.hit_cooldown - dt).max(0.0);
+        }
+        if self.hit_indicator_timer > 0.0 {
+            self.hit_indicator_timer = (self.hit_indicator_timer - dt).max(0.0);
+        }
+
+        // Rebuild crosshair with hit indicator state
+        {
+            let aspect = self.size.width as f32 / self.size.height as f32;
+            let hit_active = self.hit_indicator_timer > 0.0;
+            let crosshair_verts = Self::build_crosshair_vertices(aspect, hit_active);
+            self.crosshair_vertex_count = crosshair_verts.len() as u32;
+            self.queue.write_buffer(
+                &self.crosshair_vertex_buffer,
+                0,
+                bytemuck::cast_slice(&crosshair_verts),
+            );
+        }
 
         // Update camera uniform and frustum
         self.camera_uniform
@@ -3546,7 +3768,7 @@ impl State {
             ui_pass.set_pipeline(&self.ui_pipeline);
             ui_pass.set_bind_group(0, &self.ui_bind_group, &[]);
             ui_pass.set_vertex_buffer(0, self.crosshair_vertex_buffer.slice(..));
-            ui_pass.draw(0..12, 0..1); // 12 vertices for crosshair (2 triangles per bar * 2 bars)
+            ui_pass.draw(0..self.crosshair_vertex_count, 0..1);
 
             // Hotbar HUD
             ui_pass.set_vertex_buffer(0, self.hud_vertex_buffer.slice(..));

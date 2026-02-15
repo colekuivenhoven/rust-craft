@@ -1,0 +1,4 @@
+This looks pretty good, but I notice some issues/tweaks needed:
+- enemy slime cubes eyes seem to now be misplaced after these changes you made. They should be on the slime cubes front-facing face.
+- I want a "hit" to be able to be attempted even if an enemy isn't in range (unless the cursor is over a breakable block and in range). Thus I want the red circle to show whenever a hit is attempted.
+- Enemy health bars should always show, even if at 100%.
