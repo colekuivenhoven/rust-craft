@@ -113,6 +113,24 @@ impl Enemy {
             self.bounce(dist_to_player, to_player);
         }
 
+        // Air steering: nudge horizontal velocity toward target while airborne
+        if !self.on_ground {
+            let steer_strength = 4.0;
+            if dist_to_player < DETECTION_RANGE {
+                // Steer toward player
+                let dir = Vector3::new(to_player.x, 0.0, to_player.z);
+                if dir.magnitude() > 0.1 {
+                    let dir = dir.normalize();
+                    self.velocity.x += dir.x * steer_strength * dt;
+                    self.velocity.z += dir.z * steer_strength * dt;
+                }
+            } else {
+                // Slight random drift using current target_yaw
+                self.velocity.x += self.target_yaw.cos() * steer_strength * 0.5 * dt;
+                self.velocity.z += self.target_yaw.sin() * steer_strength * 0.5 * dt;
+            }
+        }
+
         // Gravity
         self.velocity.y += GRAVITY * dt;
         if self.velocity.y < -30.0 {
