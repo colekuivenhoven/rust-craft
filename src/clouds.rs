@@ -60,6 +60,8 @@ impl CloudManager {
                 let noise_val = self.noise.get([
                     (world_x as f64 + noise_offset_x) * self.config.noise_scale,
                     (world_z as f64 + noise_offset_z) * self.config.noise_scale,
+                    // (px as f64 + noise_offset_x) * self.config.noise_scale,
+                    // (pz as f64 + noise_offset_z) * self.config.noise_scale,
                 ]);
 
                 // Convert noise from [-1, 1] to [0, 1]

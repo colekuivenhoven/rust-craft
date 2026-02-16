@@ -95,11 +95,11 @@ impl From<FogConfig> for FogUniform {
 impl Default for CloudConfig {
     fn default() -> Self {
         Self {
-            height: 150.0,
+            height: 200.0,
             pixel_size: 8.0,
-            threshold: 0.75,
-            noise_scale: 0.025,
-            noise_offset_change_speed: 1.0,
+            threshold: 0.65,
+            noise_scale: 0.005,
+            noise_offset_change_speed: 0.01,
         }
     }
 }
