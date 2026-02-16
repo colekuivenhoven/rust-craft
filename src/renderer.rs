@@ -77,6 +77,11 @@ pub struct State {
     camera_bind_group: wgpu::BindGroup,
     projection: Projection,
     frustum: Frustum,
+    // Fog settings
+    fog_config: crate::config::FogConfig,
+    fog_buffer: wgpu::Buffer,
+    fog_bind_group_layout: wgpu::BindGroupLayout,
+    fog_bind_group: wgpu::BindGroup,
     world: World,
     player: Player,
     spawn_point: Point3<f32>,
@@ -164,6 +169,12 @@ pub struct State {
     crosshair_vertex_count: u32,
     // Cached GPU buffers for chunks - avoids recreating every frame
     chunk_buffers: HashMap<(i32, i32), ChunkBuffers>,
+    // Cloud rendering
+    cloud_manager: crate::clouds::CloudManager,
+    cloud_pipeline: wgpu::RenderPipeline,
+    cloud_vertex_buffer: wgpu::Buffer,
+    cloud_index_buffer: wgpu::Buffer,
+    cloud_index_count: u32,
 }
 
 impl State {
@@ -265,6 +276,43 @@ impl State {
             label: Some("camera_bind_group"),
         });
 
+        // Fog uniform setup - load from config file
+        let config_path = std::path::Path::new("config.toml");
+        let fog_config = crate::config::FogConfig::load_or_create(config_path);
+        let fog_uniform: crate::config::FogUniform = fog_config.into();
+
+        // Cloud config setup - load from config file
+        let cloud_config = crate::config::CloudConfig::load_or_create(config_path);
+
+        let fog_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Fog Buffer"),
+            contents: bytemuck::cast_slice(&[fog_uniform]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        let fog_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+            label: Some("fog_bind_group_layout"),
+        });
+
+        let fog_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &fog_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: fog_buffer.as_entire_binding(),
+            }],
+            label: Some("fog_bind_group"),
+        });
+
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/shader.wgsl").into()),
@@ -276,7 +324,7 @@ impl State {
         let render_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("Render Pipeline Layout"),
-                bind_group_layouts: &[&camera_bind_group_layout, &texture_atlas.bind_group_layout],
+                bind_group_layouts: &[&camera_bind_group_layout, &texture_atlas.bind_group_layout, &fog_bind_group_layout],
                 push_constant_ranges: &[],
             });
 
@@ -517,10 +565,10 @@ impl State {
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/water_shader.wgsl").into()),
         });
 
-        // Water pipeline layout includes camera bind group and depth texture bind group
+        // Water pipeline layout includes camera bind group, depth texture bind group, and fog bind group
         let water_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Water Pipeline Layout"),
-            bind_group_layouts: &[&camera_bind_group_layout, &water_bind_group_layout],
+            bind_group_layouts: &[&camera_bind_group_layout, &water_bind_group_layout, &fog_bind_group_layout],
             push_constant_ranges: &[],
         });
 
@@ -851,6 +899,87 @@ impl State {
             },
             multiview: None,
             cache: None,
+        });
+
+        // Cloud Pipeline
+        let cloud_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Cloud Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/cloud_shader.wgsl").into()),
+        });
+
+        let cloud_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Cloud Pipeline Layout"),
+            bind_group_layouts: &[&camera_bind_group_layout, &fog_bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
+        let cloud_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Cloud Pipeline"),
+            layout: Some(&cloud_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &cloud_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[Vertex::desc()],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &cloud_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: Some(wgpu::BlendState {
+                        color: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::SrcAlpha,
+                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                        alpha: wgpu::BlendComponent::OVER,
+                    }),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: Some(wgpu::Face::Back),
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: false,  // Don't write depth for transparent clouds
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            multiview: None,
+            cache: None,
+        });
+
+        // Initialize cloud manager and buffers (use same render distance as world)
+        let cloud_manager = crate::clouds::CloudManager::new(18, cloud_config);
+
+        // Create empty cloud buffers (will be updated each frame)
+        let cloud_vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Cloud Vertex Buffer"),
+            size: 1024 * 1024, // 1MB initial size
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let cloud_index_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Cloud Index Buffer"),
+            size: 512 * 1024, // 512KB initial size
+            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
         });
 
         // Breaking overlay pipeline
@@ -1344,6 +1473,10 @@ impl State {
             camera_bind_group,
             projection,
             frustum,
+            fog_config,
+            fog_buffer,
+            fog_bind_group_layout,
+            fog_bind_group,
             world,
             player,
             spawn_point,
@@ -1421,6 +1554,12 @@ impl State {
             crosshair_vertex_count: 12,
             // Cached GPU buffers
             chunk_buffers: HashMap::new(),
+            // Clouds
+            cloud_manager,
+            cloud_pipeline,
+            cloud_vertex_buffer,
+            cloud_index_buffer,
+            cloud_index_count: 0,
         }
     }
 
@@ -2910,6 +3049,42 @@ impl State {
         // Update fish
         self.fish_manager.update(dt, self.player.position, &self.world);
 
+        // Update clouds and regenerate buffers
+        self.cloud_manager.update(self.player.position, self.world.get_render_distance());
+        let (cloud_vertices, cloud_indices) = self.cloud_manager.get_geometry();
+
+        if !cloud_vertices.is_empty() {
+            use wgpu::util::DeviceExt;
+
+            let vertex_data = bytemuck::cast_slice(&cloud_vertices);
+            let index_data = bytemuck::cast_slice(&cloud_indices);
+
+            // Recreate buffers if they're too small
+            if vertex_data.len() as u64 > self.cloud_vertex_buffer.size() {
+                self.cloud_vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Cloud Vertex Buffer"),
+                    contents: vertex_data,
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                });
+            } else {
+                self.queue.write_buffer(&self.cloud_vertex_buffer, 0, vertex_data);
+            }
+
+            if index_data.len() as u64 > self.cloud_index_buffer.size() {
+                self.cloud_index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Cloud Index Buffer"),
+                    contents: index_data,
+                    usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+                });
+            } else {
+                self.queue.write_buffer(&self.cloud_index_buffer, 0, index_data);
+            }
+
+            self.cloud_index_count = cloud_indices.len() as u32;
+        } else {
+            self.cloud_index_count = 0;
+        }
+
         // Update dropped items and collect any that touch the player
         let collected_items = self.dropped_item_manager.update(dt, self.player.position, &self.world);
         for item in collected_items {
@@ -3127,6 +3302,7 @@ impl State {
             render_pass.set_pipeline(&self.render_pipeline);
             render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
             render_pass.set_bind_group(1, &self.texture_atlas.bind_group, &[]);
+            render_pass.set_bind_group(2, &self.fog_bind_group, &[]);
 
             // Render chunks using cached GPU buffers with frustum culling
             for (&(cx, cz), buffers) in self.chunk_buffers.iter() {
@@ -3410,6 +3586,7 @@ impl State {
             water_pass.set_pipeline(&self.water_pipeline);
             water_pass.set_bind_group(0, &self.camera_bind_group, &[]);
             water_pass.set_bind_group(1, &self.water_bind_group, &[]);
+            water_pass.set_bind_group(2, &self.fog_bind_group, &[]);
 
             // Render water using cached GPU buffers with frustum culling
             for (&(cx, cz), buffers) in self.chunk_buffers.iter() {
@@ -3467,6 +3644,7 @@ impl State {
             transparent_pass.set_pipeline(&self.transparent_pipeline);
             transparent_pass.set_bind_group(0, &self.camera_bind_group, &[]);
             transparent_pass.set_bind_group(1, &self.texture_atlas.bind_group, &[]);
+            transparent_pass.set_bind_group(2, &self.fog_bind_group, &[]);
 
             // Render semi-transparent blocks using cached GPU buffers with frustum culling
             for (&(cx, cz), buffers) in self.chunk_buffers.iter() {
@@ -3497,7 +3675,39 @@ impl State {
             }
         }
 
-        // --- PASS 4: OVERLAYS (Breaking, Outlines, Debug) ---
+        // --- PASS 4: RENDER CLOUDS ---
+        if self.cloud_index_count > 0 {
+            let mut cloud_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Cloud Render Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: world_render_target,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load, // Keep existing color
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Load, // Keep existing depth
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+
+            cloud_pass.set_pipeline(&self.cloud_pipeline);
+            cloud_pass.set_bind_group(0, &self.camera_bind_group, &[]);
+            cloud_pass.set_bind_group(1, &self.fog_bind_group, &[]);
+            cloud_pass.set_vertex_buffer(0, self.cloud_vertex_buffer.slice(..));
+            cloud_pass.set_index_buffer(self.cloud_index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+            cloud_pass.draw_indexed(0..self.cloud_index_count, 0, 0..1);
+        }
+
+        // --- PASS 5: OVERLAYS (Breaking, Outlines, Debug) ---
         // Render breaking overlay if actively breaking a block
         if let Some(ref breaking_state) = self.breaking_state {
             let (bx, by, bz) = breaking_state.block_pos;
@@ -3671,7 +3881,7 @@ impl State {
             }
         }
 
-        // --- PASS 5: POST-PROCESSING (Motion Blur + Underwater + Damage) ---
+        // --- PASS 6: POST-PROCESSING (Motion Blur + Underwater + Damage) ---
         // Texture routing:
         //   Neither:           blur scene_texture -> swap_chain
         //   Underwater only:   blur scene_texture -> post_process, underwater post_process -> swap_chain
@@ -3763,7 +3973,7 @@ impl State {
             damage_pass.draw(0..3, 0..1);
         }
 
-        // --- PASS 6: UI (Crosshair & HUD) ---
+        // --- PASS 7: UI (Crosshair & HUD) ---
         // Always render UI directly to Swap Chain so it stays sharp and on top
         {
             let mut ui_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {

@@ -2,38 +2,6 @@
 
 A Minecraft-inspired voxel game built in Rust. Features procedural world generation, destructible blocks, and inventory management.
 
-## Features
-
-### Core Gameplay
-- **Procedural World Generation**: Infinite terrain generated using 3D Perlin noise with multiple octaves
-- **Destructible Blocks**: Break and place blocks in the world
-- **Inventory System**: 9-slot hotbar with item stacking (max 64 per stack)
-
-### Block Types
-- **Grass**: Surface blocks in high-altitude areas
-- **Dirt**: Sub-surface blocks below grass
-- **Stone**: Deep underground blocks
-- **Sand**: Coastal and underwater blocks
-- **Water**: Dynamic flowing water
-- **Wood**: Tree trunks from procedurally generated trees
-- **Leaves**: Tree foliage
-- **Planks**: Crafted from wood
-- **Cobblestone**: Crafted from stone
-- **Glowstone**: Spawns naturally in caves
-
-## Controls
-
-### Movement
-- **W/A/S/D**: Move forward/left/backward/right
-- **Space**: Jump
-- **Mouse**: Look around
-
-### Interaction
-- **Left Click**: Break block (adds to inventory), or recapture mouse if released
-- **Right Click**: Place block from selected hotbar slot
-- **1-9 (or scroll wheel)**: Select hotbar slot
-- **Escape**: Release mouse cursor (allows window resizing)
-
 ## Installation & Running
 
 ### Prerequisites

@@ -30,6 +30,17 @@ var depth_sampler: sampler;
 @group(1) @binding(2)
 var<uniform> wave: WaveUniform;
 
+// Fog uniform
+struct FogUniform {
+    start: f32,
+    end: f32,
+    enabled: f32,
+    use_square_fog: f32,
+};
+
+@group(2) @binding(0)
+var<uniform> fog: FogUniform;
+
 struct VertexInput {
     @location(0) position: vec3<f32>,
     @location(1) color: vec3<f32>,
@@ -343,6 +354,30 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     // Increase alpha slightly where there's foam for better visibility
     let foam_alpha_boost = total_foam * 0.15;
+    let water_alpha = min(alpha + foam_alpha_boost, 0.95);
 
-    return vec4<f32>(lit_color, min(alpha + foam_alpha_boost, 0.95));
+    // Apply distance fog as alpha/transparency (same as main shader)
+    var final_alpha = water_alpha;
+
+    if (fog.enabled > 0.5) {
+        let offset = in.frag_pos - camera.view_position.xyz;
+
+        // Choose distance calculation based on use_square_fog setting
+        var distance: f32;
+        if (fog.use_square_fog > 0.5) {
+            // Chebyshev distance: square fog pattern that follows chunk grid
+            distance = max(abs(offset.x), abs(offset.z));
+        } else {
+            // Euclidean distance: circular fog pattern
+            distance = length(offset);
+        }
+
+        // Calculate fog factor (0.0 = no fog/fully visible, 1.0 = full fog/fully transparent)
+        let fog_factor = clamp((distance - fog.start) / (fog.end - fog.start), 0.0, 1.0);
+
+        // Apply fog to alpha - distant water becomes transparent
+        final_alpha = water_alpha * (1.0 - fog_factor);
+    }
+
+    return vec4<f32>(lit_color, final_alpha);
 }

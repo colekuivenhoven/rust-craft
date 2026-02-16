@@ -6,6 +6,10 @@ use crate::lighting;
 use rayon::prelude::*;
 use std::collections::HashMap;
 
+//* —— Rebuild/Recal Variables —————————————————————————————————————————————————————————————————————
+pub const MAX_LIGHT_RECALCS: usize = 2;
+pub const MAX_MESH_REBUILDS: usize = 4;
+
 pub struct World {
     pub chunks: HashMap<(i32, i32), Chunk>,
     render_distance: i32,
@@ -24,6 +28,10 @@ impl World {
         // Generate initial chunks synchronously for immediate spawn
         world.generate_initial_chunks(0, 0);
         world
+    }
+
+    pub fn get_render_distance(&self) -> i32 {
+        self.render_distance
     }
 
     /// Generate initial chunks synchronously (only used at startup for immediate spawn)
@@ -232,8 +240,7 @@ impl World {
             .collect();
 
         // Limit full light recalcs per frame to avoid stuttering
-        let max_light_recalcs = 2;
-        for pos in light_dirty_positions.iter().take(max_light_recalcs) {
+        for pos in light_dirty_positions.iter().take(MAX_LIGHT_RECALCS) {
             if let Some(chunk) = self.chunks.get_mut(pos) {
                 lighting::calculate_chunk_lighting(chunk);
             }
@@ -242,16 +249,15 @@ impl World {
         // Cross-chunk propagation scoped to only dirty chunks and their neighbors
         if !light_dirty_positions.is_empty() {
             let recalced: Vec<(i32, i32)> = light_dirty_positions.iter()
-                .take(max_light_recalcs).cloned().collect();
+                .take(MAX_LIGHT_RECALCS).cloned().collect();
             self.propagate_cross_chunk_lighting(&recalced);
         }
 
         // Rebuild meshes for dirty chunks (limit per frame to avoid stuttering)
-        let max_mesh_rebuilds = 4;
         let dirty_chunk_positions: Vec<(i32, i32)> = self.chunks.iter()
             .filter(|(_, c)| c.dirty)
             .map(|(&pos, _)| pos)
-            .take(max_mesh_rebuilds)
+            .take(MAX_MESH_REBUILDS)
             .collect();
 
         for pos in dirty_chunk_positions {

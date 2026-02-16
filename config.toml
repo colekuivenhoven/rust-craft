@@ -1,0 +1,16 @@
+# Craft Game Configuration
+# This file is automatically loaded at startup
+# Edit values and restart the game to apply changes (no rebuild needed!)
+
+# Fog Settings
+enabled = true                        # Enable/disable fog
+start = 200.0                         # Distance where fog begins
+end = 300.0                           # Distance where fog becomes fully opaque
+use_square_fog = false                # true = square fog (Chebyshev distance), false = circular fog (Euclidean distance)
+
+# Cloud Settings
+height = 150.0                        # Y-coordinate where clouds generate
+pixel_size = 8.0                      # Size of each cloud pixel (larger = more pixelated)
+threshold = 0.75                      # Noise threshold for cloud presence (0.0-1.0, higher = fewer clouds)
+noise_scale = 0.01                    # Scale of noise pattern (lower = larger cloud formations)
+noise_offset_change_speed = 0.01      # Speed of cloud animation/drift (higher = faster drifting clouds)

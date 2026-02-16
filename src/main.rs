@@ -4,6 +4,8 @@ mod camera;
 mod chunk;
 mod chunk_loader;
 mod chunk_storage;
+mod clouds;
+mod config;
 mod crafting;
 mod dropped_item;
 mod enemy;
