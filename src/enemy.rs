@@ -851,41 +851,38 @@ fn create_slime_vertices(enemy: &Enemy, squash: f32, color: [f32; 3]) -> Vec<Ver
         0.05 * (1.0 - flash_t * 0.8),
     ];
 
-    let left_offset = rotate_yaw(eye_fwd, eye_up, eye_spread, yaw);
+    // Pass unrotated offsets — add_rotated_cube_pitched handles yaw+pitch internally
     add_rotated_cube_pitched(
         &mut vertices,
-        pos, Vector3::new(left_offset[0], half_h + left_offset[1], left_offset[2]),
+        pos, Vector3::new(eye_fwd, half_h + eye_up, eye_spread),
         eye_d, eye_h, eye_w,
         eye_color, yaw, death_pitch,
     );
 
-    let right_offset = rotate_yaw(eye_fwd, eye_up, -eye_spread, yaw);
     add_rotated_cube_pitched(
         &mut vertices,
-        pos, Vector3::new(right_offset[0], half_h + right_offset[1], right_offset[2]),
+        pos, Vector3::new(eye_fwd, half_h + eye_up, -eye_spread),
         eye_d, eye_h, eye_w,
         eye_color, yaw, death_pitch,
     );
 
-    // Pupils
+    // Pupils — same: unrotated offsets
     let pupil_size = size * 0.04;
     let pupil_d = size * 0.01;
     let pupil_color = [0.95, 0.95, 0.95];
     let pupil_fwd = eye_fwd + 0.002;
     let pupil_up = eye_up + eye_h * 0.2;
 
-    let left_pupil = rotate_yaw(pupil_fwd, pupil_up, eye_spread, yaw);
     add_rotated_cube_pitched(
         &mut vertices,
-        pos, Vector3::new(left_pupil[0], half_h + left_pupil[1], left_pupil[2]),
+        pos, Vector3::new(pupil_fwd, half_h + pupil_up, eye_spread),
         pupil_d, pupil_size, pupil_size,
         pupil_color, yaw, death_pitch,
     );
 
-    let right_pupil = rotate_yaw(pupil_fwd, pupil_up, -eye_spread, yaw);
     add_rotated_cube_pitched(
         &mut vertices,
-        pos, Vector3::new(right_pupil[0], half_h + right_pupil[1], right_pupil[2]),
+        pos, Vector3::new(pupil_fwd, half_h + pupil_up, -eye_spread),
         pupil_d, pupil_size, pupil_size,
         pupil_color, yaw, death_pitch,
     );

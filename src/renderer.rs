@@ -578,21 +578,39 @@ impl State {
 
         let world = World::new(18); // Sets render_distance
 
-        // Find a safe spawn point: scan from top down at (0, 0) for a solid, non-water
-        // block exposed to the sky, then spawn 2 blocks above it
+        // Find a safe spawn point: scan from top down for a solid block with 2 blocks
+        // of non-solid space above it. Try (0,0) first, then nearby positions.
         let spawn_point = {
-            let spawn_x = 0;
-            let spawn_z = 0;
-            let mut spawn_y = 35.0_f32; // fallback
-            for y in (1..CHUNK_HEIGHT).rev() {
-                let block = world.get_block_world(spawn_x, y as i32, spawn_z);
-                let block_above = world.get_block_world(spawn_x, y as i32 + 1, spawn_z);
-                if block.is_solid() && block_above == BlockType::Air {
-                    spawn_y = y as f32 + 3.0; // 2 blocks above surface + player eye height offset
-                    break;
+            let mut spawn_y = None;
+            let mut spawn_x = 0i32;
+            let mut spawn_z = 0i32;
+
+            'search: for &(sx, sz) in &[
+                (0, 0), (1, 0), (0, 1), (-1, 0), (0, -1),
+                (2, 0), (0, 2), (-2, 0), (0, -2),
+                (4, 4), (-4, 4), (4, -4), (-4, -4),
+                (8, 0), (0, 8), (-8, 0), (0, -8),
+            ] {
+                for y in (1..CHUNK_HEIGHT - 2).rev() {
+                    let block = world.get_block_world(sx, y as i32, sz);
+                    let above1 = world.get_block_world(sx, y as i32 + 1, sz);
+                    let above2 = world.get_block_world(sx, y as i32 + 2, sz);
+                    if block.is_solid()
+                        && !above1.is_solid()
+                        && above1 != BlockType::Water
+                        && !above2.is_solid()
+                        && above2 != BlockType::Water
+                    {
+                        spawn_x = sx;
+                        spawn_z = sz;
+                        spawn_y = Some(y as f32 + 3.0);
+                        break 'search;
+                    }
                 }
             }
-            Point3::new(spawn_x as f32 + 0.5, spawn_y, spawn_z as f32 + 0.5)
+
+            let sy = spawn_y.unwrap_or(35.0);
+            Point3::new(spawn_x as f32 + 0.5, sy, spawn_z as f32 + 0.5)
         };
 
         camera.position = spawn_point;
@@ -1654,9 +1672,9 @@ impl State {
     }
 
     fn build_crosshair_vertices(aspect_ratio: f32, hit_active: bool) -> Vec<UiVertex> {
-        let crosshair_size = 0.06;
+        let crosshair_size = 0.03;
         let crosshair_thickness = 0.01;
-        let crosshair_color = [1.0, 1.0, 1.0, 0.7];
+        let crosshair_color = [1.0, 1.0, 1.0, 0.5];
 
         // Correct X coordinates for aspect ratio to maintain 1:1 ratio
         let h_size = crosshair_size / aspect_ratio;
