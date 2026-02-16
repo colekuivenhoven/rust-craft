@@ -18,7 +18,7 @@ pub struct CloudManager {
 
 impl CloudManager {
     pub fn new(render_distance: i32, config: CloudConfig) -> Self {
-        let plane_size = render_distance as f32 * CHUNK_SIZE * 2.0;
+        let plane_size = render_distance as f32 * CHUNK_SIZE * 3.0;
         Self {
             noise: Perlin::new(12345), // Fixed seed for consistent clouds
             vertices: Vec::new(),
@@ -39,7 +39,7 @@ impl CloudManager {
         self.time_offset += self.config.noise_offset_change_speed;
 
         // Calculates plane bounds centered on player
-        let half_size = self.plane_size / 2.0;
+        let half_size = self.plane_size / 3.0;
         let start_x = player_pos.x - half_size;
         let start_z = player_pos.z - half_size;
 
@@ -60,8 +60,6 @@ impl CloudManager {
                 let noise_val = self.noise.get([
                     (world_x as f64 + noise_offset_x) * self.config.noise_scale,
                     (world_z as f64 + noise_offset_z) * self.config.noise_scale,
-                    // (px as f64 + noise_offset_x) * self.config.noise_scale,
-                    // (pz as f64 + noise_offset_z) * self.config.noise_scale,
                 ]);
 
                 // Convert noise from [-1, 1] to [0, 1]
