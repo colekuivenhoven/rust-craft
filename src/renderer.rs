@@ -1,11 +1,11 @@
-use crate::bird::{BirdManager, create_bird_vertices, generate_bird_indices};
-use crate::fish::{FishManager, create_fish_vertices, generate_fish_indices};
+use crate::entities::bird::{BirdManager, create_bird_vertices, generate_bird_indices};
+use crate::entities::fish::{FishManager, create_fish_vertices, generate_fish_indices};
 use crate::block::{BlockType, Vertex, UiVertex, LineVertex, create_cube_vertices, create_block_outline, create_face_vertices, create_scaled_cube_vertices, create_particle_vertices, create_shadow_vertices, CUBE_INDICES};
 use crate::camera::{Camera, CameraController, CameraUniform, Projection, Frustum};
 use crate::chunk::{CHUNK_SIZE, CHUNK_HEIGHT};
 use crate::crafting::CraftingSystem;
 use crate::dropped_item::DroppedItemManager;
-use crate::enemy::{EnemyManager, create_enemy_vertices, generate_enemy_indices, create_enemy_collision_outlines};
+use crate::entities::enemy::{EnemyManager, create_enemy_vertices, generate_enemy_indices, create_enemy_collision_outlines};
 use crate::bitmap_font;
 use crate::particle::ParticleManager;
 use crate::player::Player;
@@ -664,7 +664,7 @@ impl State {
         camera.position = spawn_point;
         let player = Player::new(spawn_point);
         let water_simulation = WaterSimulation::new(0.5);
-        let enemy_manager = EnemyManager::new(10.0, 10);
+        let enemy_manager = EnemyManager::new(10.0, 50);
         let bird_manager = BirdManager::new();
         let fish_manager = FishManager::new();
         let dropped_item_manager = DroppedItemManager::new();
@@ -2307,7 +2307,7 @@ impl State {
             // Project position above enemy head
             let bar_world_pos = Point3::new(
                 enemy.position.x,
-                enemy.position.y + enemy.size + 0.6,
+                enemy.position.y + enemy.height + 0.6,
                 enemy.position.z,
             );
             if let Some((sx, sy)) = self.world_to_screen(bar_world_pos) {
@@ -3754,6 +3754,7 @@ impl State {
                 breaking_pass.set_pipeline(&self.breaking_pipeline);
                 breaking_pass.set_bind_group(0, &self.camera_bind_group, &[]);
                 breaking_pass.set_bind_group(1, &self.texture_atlas.bind_group, &[]);
+                breaking_pass.set_bind_group(2, &self.fog_bind_group, &[]);
                 breaking_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
                 breaking_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint16);
                 breaking_pass.draw_indexed(0..overlay_indices.len() as u32, 0, 0..1);

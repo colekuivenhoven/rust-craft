@@ -1,4 +1,4 @@
-mod bird;
+mod bitmap_font;
 mod block;
 mod camera;
 mod chunk;
@@ -8,9 +8,7 @@ mod clouds;
 mod config;
 mod crafting;
 mod dropped_item;
-mod enemy;
-mod fish;
-mod bitmap_font;
+mod entities;
 mod inventory;
 mod lighting;
 mod particle;
@@ -20,6 +18,7 @@ mod texture;
 mod water;
 mod world;
 
+use std::io::{self, Read};
 use std::sync::Arc;
 use winit::{
     application::ApplicationHandler,
@@ -28,6 +27,12 @@ use winit::{
     keyboard::{KeyCode, PhysicalKey},
     window::{Window, WindowId},
 };
+
+fn wait_for_keypress() {
+    eprintln!("\nPress any key to exit...");
+    let mut buf = [0u8; 1];
+    let _ = io::stdin().read(&mut buf);
+}
 
 fn main() {
     // Initialize rayon thread pool with larger stack size for chunk generation
@@ -42,10 +47,11 @@ fn main() {
         .format_timestamp_millis()
         .init();
 
-    // Set up panic hook to log panics
+    // Set up panic hook to log panics and wait for keypress
     std::panic::set_hook(Box::new(|panic_info| {
         log::error!("PANIC: {}", panic_info);
         eprintln!("PANIC: {}", panic_info);
+        wait_for_keypress();
     }));
 
     log::info!("Starting Craft...");
@@ -56,6 +62,8 @@ fn main() {
     let mut app = App::default();
     if let Err(e) = event_loop.run_app(&mut app) {
         log::error!("Event loop error: {}", e);
+        eprintln!("Event loop error: {}", e);
+        wait_for_keypress();
     }
 }
 

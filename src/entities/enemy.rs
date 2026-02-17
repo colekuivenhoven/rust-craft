@@ -2,6 +2,7 @@ use crate::block::{Vertex, LineVertex};
 use crate::chunk::CHUNK_SIZE;
 use crate::texture::TEX_NONE;
 use crate::world::World;
+use super::humanoid::{self, HumanoidState, create_humanoid_vertices, update_humanoid, humanoid_size_w, humanoid_size_h};
 use cgmath::{Point3, Vector3, InnerSpace};
 use std::collections::HashMap;
 use std::fs::{self, File};
@@ -37,6 +38,9 @@ pub enum EnemyKind {
         squash: f32,
         color: [f32; 3],
     },
+    Humanoid {
+        state: HumanoidState,
+    },
 }
 
 // ── Enemy ────────────────────────────────────────────────────
@@ -45,7 +49,8 @@ pub enum EnemyKind {
 pub struct Enemy {
     pub position: Point3<f32>,
     pub velocity: Vector3<f32>,
-    pub size: f32,
+    pub size: f32,      // horizontal extent (radius = size * 0.4)
+    pub height: f32,    // vertical extent
     pub health: f32,
     pub max_health: f32,
     pub attack_damage: f32,
@@ -72,6 +77,7 @@ impl Enemy {
             position,
             velocity: Vector3::new(0.0, 0.0, 0.0),
             size: SLIME_SIZE,
+            height: SLIME_SIZE,
             health: 20.0,
             max_health: 20.0,
             attack_damage: SLIME_DAMAGE,
@@ -80,6 +86,30 @@ impl Enemy {
             kind: EnemyKind::SlimeCube {
                 squash: 0.0,
                 color: [r, g, b],
+            },
+            facing_yaw: 0.0,
+            target_yaw: 0.0,
+            bounce_timer: 0.0,
+            was_on_ground: false,
+            rng_state: seed,
+            damage_flash: 0.0,
+            death_timer: -1.0,
+        }
+    }
+
+    pub fn new_humanoid(position: Point3<f32>, seed: u32) -> Self {
+        Self {
+            position,
+            velocity: Vector3::new(0.0, 0.0, 0.0),
+            size: humanoid_size_w(),
+            height: humanoid_size_h(),
+            health: 30.0,
+            max_health: 30.0,
+            attack_damage: humanoid::humanoid_damage(),
+            alive: true,
+            on_ground: false,
+            kind: EnemyKind::Humanoid {
+                state: HumanoidState::new(seed),
             },
             facing_yaw: 0.0,
             target_yaw: 0.0,
@@ -139,6 +169,56 @@ impl Enemy {
         if self.damage_flash > 0.0 {
             self.damage_flash = (self.damage_flash - dt).max(0.0);
         }
+
+        // Humanoid uses its own AI/animation system
+        if matches!(self.kind, EnemyKind::Humanoid { .. }) {
+            // Death animation
+            if self.death_timer >= 0.0 {
+                self.death_timer += dt;
+                self.velocity.y += GRAVITY * dt;
+                self.position.x += self.velocity.x * dt;
+                self.position.y += self.velocity.y * dt;
+                self.position.z += self.velocity.z * dt;
+                self.velocity.x *= (1.0 - 2.0 * dt).max(0.0);
+                self.velocity.z *= (1.0 - 2.0 * dt).max(0.0);
+                if self.death_timer >= DEATH_ANIMATION_DURATION {
+                    self.alive = false;
+                }
+            }
+
+            if let EnemyKind::Humanoid { ref mut state } = self.kind {
+                // Skip AI movement during knockback so velocity isn't overwritten
+                if self.damage_flash <= 0.0 {
+                    update_humanoid(
+                        &mut self.position, &mut self.velocity,
+                        &mut self.facing_yaw, &mut self.target_yaw,
+                        self.alive, self.death_timer, state,
+                        dt, player_pos, world,
+                    );
+                }
+                state.was_on_ground = state.on_ground;
+            }
+
+            // Apply velocity + collisions
+            if self.death_timer < 0.0 {
+                // Fix: Apply gravity to humanoid
+                self.velocity.y += GRAVITY * dt;
+                if self.velocity.y < -30.0 {
+                    self.velocity.y = -30.0;
+                }
+
+                let new_pos = self.position + self.velocity * dt;
+                self.apply_collisions(new_pos, world, dt);
+                
+                // Feed ground state back to humanoid
+                if let EnemyKind::Humanoid { ref mut state } = self.kind {
+                    state.on_ground = self.on_ground;
+                }
+            }
+            return;
+        }
+
+        // ── SlimeCube update path ──
 
         // Death animation: only apply gravity, advance timer, then mark dead
         if self.death_timer >= 0.0 {
@@ -236,7 +316,7 @@ impl Enemy {
 
     fn apply_collisions(&mut self, new_pos: Point3<f32>, world: &World, dt: f32) {
         let r = self.size * 0.4;
-        let h = self.size;
+        let h = self.height;
 
         // --- X axis: move then check full AABB ---
         if self.velocity.x != 0.0 {
@@ -294,8 +374,12 @@ impl Enemy {
                 self.position.y = highest;
                 self.velocity.y = 0.0;
                 self.on_ground = true;
-                self.velocity.x *= 0.5;
-                self.velocity.z *= 0.5;
+                // Humanoids use smooth accel/decel, so only apply landing friction once.
+                // Slimes need per-frame friction to stop between bounces.
+                if !matches!(self.kind, EnemyKind::Humanoid { .. }) || !self.was_on_ground {
+                    self.velocity.x *= 0.5;
+                    self.velocity.z *= 0.5;
+                }
             }
         } else {
             // Rising: ceiling check with full AABB
@@ -396,14 +480,15 @@ impl Enemy {
     }
 
     fn update_squash(&mut self, dt: f32) {
-        let EnemyKind::SlimeCube { ref mut squash, .. } = self.kind;
-        if self.on_ground && !self.was_on_ground {
-            *squash = -0.4;
-        } else if !self.on_ground && self.velocity.y > 0.0 {
-            let target = 0.3 * (self.velocity.y / 10.0).clamp(0.0, 1.0);
-            *squash = *squash + (target - *squash) * dt * 12.0;
+        if let EnemyKind::SlimeCube { ref mut squash, .. } = self.kind {
+            if self.on_ground && !self.was_on_ground {
+                *squash = -0.4;
+            } else if !self.on_ground && self.velocity.y > 0.0 {
+                let target = 0.3 * (self.velocity.y / 10.0).clamp(0.0, 1.0);
+                *squash = *squash + (target - *squash) * dt * 12.0;
+            }
+            *squash += (0.0 - *squash) * dt * 8.0;
         }
-        *squash += (0.0 - *squash) * dt * 8.0;
     }
 
     // ── Serialization ────────────────────────────────────────
@@ -412,6 +497,7 @@ impl Enemy {
         // Kind tag
         let kind_id: u8 = match &self.kind {
             EnemyKind::SlimeCube { .. } => 0,
+            EnemyKind::Humanoid { .. } => 1,
         };
         w.write_all(&[kind_id])?;
 
@@ -426,14 +512,20 @@ impl Enemy {
         // Facing yaw
         w.write_all(&self.facing_yaw.to_le_bytes())?;
 
-        // RNG state (for deterministic color reproduction)
+        // RNG state
         w.write_all(&self.rng_state.to_le_bytes())?;
 
-        // Color (stored directly since it's derived from seed but we want exact match)
-        let EnemyKind::SlimeCube { color, .. } = &self.kind;
-        w.write_all(&color[0].to_le_bytes())?;
-        w.write_all(&color[1].to_le_bytes())?;
-        w.write_all(&color[2].to_le_bytes())?;
+        // Kind-specific data
+        match &self.kind {
+            EnemyKind::SlimeCube { color, .. } => {
+                w.write_all(&color[0].to_le_bytes())?;
+                w.write_all(&color[1].to_le_bytes())?;
+                w.write_all(&color[2].to_le_bytes())?;
+            }
+            EnemyKind::Humanoid { .. } => {
+                // No extra data needed; HumanoidState is reconstructed from seed
+            }
+        }
 
         Ok(())
     }
@@ -480,6 +572,7 @@ impl Enemy {
                     position: Point3::new(px, py, pz),
                     velocity: Vector3::new(0.0, 0.0, 0.0),
                     size: SLIME_SIZE,
+                    height: SLIME_SIZE,
                     health,
                     max_health: 20.0,
                     attack_damage: SLIME_DAMAGE,
@@ -488,6 +581,30 @@ impl Enemy {
                     kind: EnemyKind::SlimeCube {
                         squash: 0.0,
                         color: [cr, cg, cb],
+                    },
+                    facing_yaw,
+                    target_yaw: facing_yaw,
+                    bounce_timer: 0.0,
+                    was_on_ground: false,
+                    rng_state,
+                    damage_flash: 0.0,
+                    death_timer: -1.0,
+                })
+            }
+            1 => {
+                // Humanoid: reconstruct state from seed
+                Ok(Self {
+                    position: Point3::new(px, py, pz),
+                    velocity: Vector3::new(0.0, 0.0, 0.0),
+                    size: humanoid_size_w(),
+                    height: humanoid_size_h(),
+                    health,
+                    max_health: 30.0,
+                    attack_damage: humanoid::humanoid_damage(),
+                    alive: true,
+                    on_ground: false,
+                    kind: EnemyKind::Humanoid {
+                        state: HumanoidState::new(rng_state),
                     },
                     facing_yaw,
                     target_yaw: facing_yaw,
@@ -574,6 +691,7 @@ impl EnemyManager {
             if !enemy.alive {
                 let color = match &enemy.kind {
                     EnemyKind::SlimeCube { color, .. } => *color,
+                    EnemyKind::Humanoid { .. } => [0.87, 0.75, 0.63], // Skin color
                 };
                 death_events.push((enemy.position, color));
             }
@@ -612,9 +730,9 @@ impl EnemyManager {
                 continue;
             }
             // Ground found at y, enemy feet at y+1
-            // Check 2 blocks of vertical clearance in a 3x3 column (2 blocks on each side)
-            for check_x in (bx - 2)..=(bx + 2) {
-                for check_z in (bz - 2)..=(bz + 2) {
+            // Check 2 blocks of vertical clearance in a 3x3 column around spawn
+            for check_x in (bx - 1)..=(bx + 1) {
+                for check_z in (bz - 1)..=(bz + 1) {
                     if world.get_block_world(check_x, y + 1, check_z).is_solid()
                         || world.get_block_world(check_x, y + 2, check_z).is_solid()
                     {
@@ -628,7 +746,13 @@ impl EnemyManager {
 
         if let Some(y) = spawn_y {
             let pos = Point3::new(spawn_x, y, spawn_z);
-            self.enemies.push(Enemy::new_slime(pos, seed));
+            // 50% chance to spawn humanoid, 50% slime
+            let roll = pseudo_rand_range(&mut self.next_seed, 0.0, 1.0);
+            if roll < 0.75 {
+                self.enemies.push(Enemy::new_humanoid(pos, seed));
+            } else {
+                self.enemies.push(Enemy::new_slime(pos, seed));
+            }
         }
     }
 
@@ -640,9 +764,9 @@ impl EnemyManager {
                     continue;
                 }
                 let ri = self.enemies[i].size * 0.4;
-                let hi = self.enemies[i].size;
+                let hi = self.enemies[i].height;
                 let rj = self.enemies[j].size * 0.4;
-                let hj = self.enemies[j].size;
+                let hj = self.enemies[j].height;
 
                 let pi = self.enemies[i].position;
                 let pj = self.enemies[j].position;
@@ -692,7 +816,7 @@ impl EnemyManager {
         for (i, enemy) in self.enemies.iter().enumerate() {
             if !enemy.alive || enemy.is_dying() { continue; }
             let r = enemy.size * 0.4;
-            let h = enemy.size;
+            let h = enemy.height;
             let aabb_min = Point3::new(enemy.position.x - r, enemy.position.y, enemy.position.z - r);
             let aabb_max = Point3::new(enemy.position.x + r, enemy.position.y + h, enemy.position.z + r);
             if let Some(t) = ray_aabb_intersect(origin, dir, aabb_min, aabb_max) {
@@ -708,14 +832,35 @@ impl EnemyManager {
         best.map(|(i, _)| i)
     }
 
-    pub fn check_player_damage(&self, player_pos: Point3<f32>) -> f32 {
+    pub fn check_player_damage(&mut self, player_pos: Point3<f32>) -> f32 {
         let mut total_damage = 0.0;
-        for enemy in &self.enemies {
-            if !enemy.alive { continue; }
-            let dist = (enemy.position - player_pos).magnitude();
-            let touch_dist = enemy.size * 0.5 + 0.25;
-            if dist < touch_dist {
-                total_damage += enemy.attack_damage;
+        for enemy in &mut self.enemies {
+            if !enemy.alive || enemy.is_dying() { continue; }
+            match &mut enemy.kind {
+                EnemyKind::SlimeCube { .. } => {
+                    let dist = (enemy.position - player_pos).magnitude();
+                    let touch_dist = enemy.size * 0.5 + 0.25;
+                    if dist < touch_dist {
+                        total_damage += enemy.attack_damage;
+                    }
+                }
+                EnemyKind::Humanoid { ref mut state } => {
+                    // Only deal damage during active punch, once per swing
+                    if state.punch_timer > 0.0 && !state.punch_hit_applied {
+                        // Check if in the extension phase (~25-60% of the punch)
+                        let phase_t = 1.0 - (state.punch_timer / 0.4);
+                        if phase_t > 0.25 && phase_t < 0.65 {
+                            let dx = player_pos.x - enemy.position.x;
+                            let dz = player_pos.z - enemy.position.z;
+                            let horiz_dist = (dx * dx + dz * dz).sqrt();
+                            let vert_dist = (player_pos.y - enemy.position.y).abs();
+                            if horiz_dist < 2.5 && vert_dist < enemy.height {
+                                total_damage += enemy.attack_damage;
+                                state.punch_hit_applied = true;
+                            }
+                        }
+                    }
+                }
             }
         }
         total_damage
@@ -796,6 +941,15 @@ pub fn create_enemy_vertices(enemy: &Enemy) -> Vec<Vertex> {
     match &enemy.kind {
         EnemyKind::SlimeCube { squash, color } => {
             create_slime_vertices(enemy, *squash, *color)
+        }
+        EnemyKind::Humanoid { state } => {
+            create_humanoid_vertices(
+                enemy.position,
+                enemy.facing_yaw,
+                &state.pose,
+                enemy.damage_flash,
+                enemy.death_timer,
+            )
         }
     }
 }
@@ -913,7 +1067,7 @@ pub fn create_enemy_collision_outlines(enemies: &[Enemy]) -> Vec<LineVertex> {
     for enemy in enemies {
         if !enemy.alive { continue; }
         let radius = enemy.size * 0.4;
-        let height = enemy.size;
+        let height = enemy.height;
         let px = enemy.position.x;
         let py = enemy.position.y;
         let pz = enemy.position.z;
