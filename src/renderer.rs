@@ -664,7 +664,7 @@ impl State {
         camera.position = spawn_point;
         let player = Player::new(spawn_point);
         let water_simulation = WaterSimulation::new(0.5);
-        let enemy_manager = EnemyManager::new(10.0, 50);
+        let enemy_manager = EnemyManager::new(20.0, 50); // spawn frequency (seconds), max enemies
         let bird_manager = BirdManager::new();
         let fish_manager = FishManager::new();
         let dropped_item_manager = DroppedItemManager::new();

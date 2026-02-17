@@ -730,15 +730,11 @@ impl EnemyManager {
                 continue;
             }
             // Ground found at y, enemy feet at y+1
-            // Check 2 blocks of vertical clearance in a 3x3 column around spawn
-            for check_x in (bx - 1)..=(bx + 1) {
-                for check_z in (bz - 1)..=(bz + 1) {
-                    if world.get_block_world(check_x, y + 1, check_z).is_solid()
-                        || world.get_block_world(check_x, y + 2, check_z).is_solid()
-                    {
-                        continue 'outer;
-                    }
-                }
+            // Check 2 blocks of vertical clearance at the spawn column
+            if world.get_block_world(bx, y + 1, bz).is_solid()
+                || world.get_block_world(bx, y + 2, bz).is_solid()
+            {
+                continue;
             }
             spawn_y = Some((y + 1) as f32);
             break;

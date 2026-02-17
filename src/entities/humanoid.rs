@@ -257,7 +257,7 @@ pub fn update_humanoid(
         velocity.z -= velocity.z * brake;
         if state.punch_cooldown <= 0.0 && state.punch_timer <= 0.0 {
             set_anim(state, HumanoidAnim::Punching);
-            state.punch_timer = 0.5;
+            state.punch_timer = 1.5; // Punch duration
             state.punch_cooldown = PUNCH_COOLDOWN;
         }
     } else if dist < DETECTION_RANGE {
@@ -453,6 +453,8 @@ fn compute_pose(anim: HumanoidAnim, phase: f32) -> HumanoidPose {
             p.body_pitch = 0.3; // Lean forward
             p.head_pitch = -0.2; // Look up
             p.bob_y = bob;
+
+            p.eyelid_left = 0.4; p.eyelid_right = 0.4;
         }
         HumanoidAnim::Jumping => {
             p.left_shoulder = -0.5; p.right_shoulder = -0.5;
@@ -464,7 +466,8 @@ fn compute_pose(anim: HumanoidAnim, phase: f32) -> HumanoidPose {
             p.bob_y = 0.2;
         }
         HumanoidAnim::Punching => {
-            let t = (phase * 2.0).clamp(0.0, 1.0);
+            const PHASE_SPEED: f32 = 1.2; // Animation speed
+            let t = (phase * PHASE_SPEED).clamp(0.0, 1.0);
             
             // Punch mechanics
             let arm_pitch;
@@ -477,12 +480,12 @@ fn compute_pose(anim: HumanoidAnim, phase: f32) -> HumanoidPose {
                 let wt = t / 0.3;
                 arm_pitch = -0.5 * wt;
                 forearm_pitch = -2.2 * wt; 
-                body_twist = -0.4 * wt;
-                hip_twist = -0.2 * wt;
+                body_twist = -1.0 * wt;
+                hip_twist = -0.4 * wt;
             } else if t < 0.5 {
                 // Thrust
                 let st = (t - 0.3) / 0.2;
-                arm_pitch = -0.5 + (2.0) * st; 
+                arm_pitch = -0.5 - (2.0) * st; 
                 forearm_pitch = -2.2 * (1.0 - st); 
                 body_twist = -0.4 + (0.9) * st; 
                 hip_twist = -0.2 + (0.4) * st;
@@ -495,7 +498,8 @@ fn compute_pose(anim: HumanoidAnim, phase: f32) -> HumanoidPose {
                 hip_twist = 0.2 * (1.0 - rt);
             }
 
-            p.left_shoulder = 0.5; p.left_elbow = -2.2; // Guard
+            p.left_shoulder = 0.5; 
+            p.left_elbow = -2.2; // Guard
             p.left_arm_spread = 0.5;
 
             p.right_shoulder = arm_pitch;
