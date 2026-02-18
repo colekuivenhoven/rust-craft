@@ -86,9 +86,51 @@ const LIP_D: f32 = 0.02;
 
 // ── Colors ──────────────────────────────────────────────────
 const SKIN_COLOR: [f32; 3] = [0.51, 0.32, 0.21];
+const SKIN_COLOR_DARK: [f32; 3] = [0.41, 0.22, 0.11];
 const EYE_WHITE: [f32; 3] = [0.95, 0.95, 0.95];
 const EYE_DARK: [f32; 3] = [0.12, 0.08, 0.06];
 const LIP_COLOR: [f32; 3] = [0.72, 0.45, 0.42];
+const HAIR_COLOR: [f32; 3] = [0.10, 0.07, 0.04];
+const CLOTH_COLOR: [f32; 3] = [0.82, 0.74, 0.42]; // Faded yellow
+const BELT_COLOR: [f32; 3] = [0.45, 0.28, 0.12];  // Brown leather
+
+// ── Breechcloth Dimensions ───────────────────────────────────
+const BELT_W: f32 = HIPS_W + 0.02;
+const BELT_H: f32 = 0.04;
+const BELT_D: f32 = HIPS_D + 0.02;
+
+const CLOTH_W: f32 = HIPS_W * 0.5; // Half waist width
+const CLOTH_D: f32 = 0.025;         // Thin cloth slab
+
+// ── Hair & Eyebrow Dimensions ────────────────────────────────
+const EYEBROW_W: f32 = 0.09;
+const EYEBROW_H: f32 = 0.02;
+const EYEBROW_D: f32 = 0.015;
+
+const HAIR_CAP_W: f32 = 0.32;  // Slightly wider than HEAD_W
+const HAIR_CAP_H: f32 = 0.05;
+const HAIR_CAP_D: f32 = 0.20;  // Covers back portion of head top only
+
+const HAIR_BACK_W: f32 = 0.30;
+const HAIR_BACK_D: f32 = 0.06;
+
+const HAIR_SIDE_W: f32 = 0.09;
+const HAIR_SIDE_D: f32 = 0.09;
+
+// ── Feather Headband Dimensions ──────────────────────────────
+//const BAND_COLOR: [f32; 3] = [0.88, 0.42, 0.42]; // Light red
+//const BAND_COLOR: [f32; 3] = [0.88, 0.76, 0.42]; // mustard yellow
+const BAND_COLOR: [f32; 3] = [0.88, 0.12, 0.12]; // blood red
+const BAND_W: f32 = HEAD_W + 0.01;
+const BAND_H: f32 = 0.025;
+const BAND_D: f32 = HEAD_D + 0.01;
+
+const FEATHER_COLOR: [f32; 3] = [0.96, 0.96, 0.96]; // White
+const FEATHER_QUILL_COLOR: [f32; 3] = [0.72, 0.72, 0.72]; // Light grey
+const FEATHER_W: f32 = 0.06;
+const FEATHER_H: f32 = 0.2;
+const FEATHER_D: f32 = 0.02;
+const FEATHER_QUILL_W: f32 = 0.012;
 
 // ── AI constants ────────────────────────────────────────────
 const WALK_SPEED: f32 = 2.0;
@@ -106,6 +148,42 @@ const OBSTACLE_CHECK_DIST: f32 = 1.6;
 const ACCEL_RATE: f32 = 6.0;  // How fast humanoid accelerates/decelerates (higher = snappier)
 
 // ── Animation ───────────────────────────────────────────────
+
+struct AnimValue {
+    pub value: f32,
+    peak: f32,
+}
+
+impl AnimValue {
+    fn new() -> Self { Self { value: 0.0, peak: 0.0 } }
+
+    // Sets value to amt * pt, and remembers amt as the peak for reset()
+    fn update(&mut self, amt: f32, pt: f32) {
+        self.peak = amt;
+        self.value = amt * pt;
+    }
+
+    // Lerps value from `start` to `end` over pt (0.0 → 1.0)
+    fn update_from(&mut self, start: f32, end: f32, pt: f32) {
+        self.peak = end;
+        self.value = start + (end - start) * pt;
+    }
+
+    // Eases value back from peak to 0 over pt (0.0 → 1.0)
+    fn reset(&mut self, pt: f32) {
+        self.value = self.peak * (1.0 - pt);
+    }
+}
+
+struct BodySegmentState {
+    pub pitch: AnimValue,
+    pub yaw: AnimValue,
+    pub roll: AnimValue,
+}
+
+impl BodySegmentState {
+    fn new() -> Self { Self { pitch: AnimValue::new(), yaw: AnimValue::new(), roll: AnimValue::new() } }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum HumanoidAnim {
@@ -148,6 +226,9 @@ pub struct HumanoidPose {
     // Eyelids (0.0 = Open, 1.0 = Closed)
     pub eyelid_left: f32,
     pub eyelid_right: f32,
+
+    // Eyebrow anger (0.0 = neutral, 1.0 = fully furrowed inward)
+    pub brow_anger: f32,
 }
 
 impl Default for HumanoidPose {
@@ -163,6 +244,7 @@ impl Default for HumanoidPose {
             body_pitch: 0.0, torso_yaw: 0.0, hips_yaw: 0.0,
             bob_y: 0.0,
             eyelid_left: 0.0, eyelid_right: 0.0,
+            brow_anger: 0.0,
         }
     }
 }
@@ -183,6 +265,7 @@ pub struct HumanoidState {
     pub punch_timer: f32,
     pub punch_cooldown: f32,
     pub punch_hit_applied: bool,
+    pub punch_right: bool,
     pub wander_state: WanderState,
     pub wander_timer: f32,
     pub wander_dir: f32,
@@ -202,6 +285,7 @@ impl HumanoidState {
             punch_timer: 0.0,
             punch_cooldown: 0.0,
             punch_hit_applied: false,
+            punch_right: true,
             wander_state: WanderState::Standing,
             wander_timer: pseudo_rand_range_s(seed, WANDER_PAUSE_MIN, WANDER_PAUSE_MAX),
             wander_dir: pseudo_rand_range_s(seed.wrapping_add(1), 0.0, std::f32::consts::TAU),
@@ -257,7 +341,7 @@ pub fn update_humanoid(
         velocity.z -= velocity.z * brake;
         if state.punch_cooldown <= 0.0 && state.punch_timer <= 0.0 {
             set_anim(state, HumanoidAnim::Punching);
-            state.punch_timer = 1.5; // Punch duration
+            state.punch_timer = 0.5; // Punch duration. should be 0.5
             state.punch_cooldown = PUNCH_COOLDOWN;
         }
     } else if dist < DETECTION_RANGE {
@@ -353,7 +437,10 @@ fn set_anim(state: &mut HumanoidState, anim: HumanoidAnim) {
         state.prev_anim = state.anim;
         state.anim = anim;
         state.blend_timer = BLEND_DURATION;
-        if anim == HumanoidAnim::Punching { state.anim_phase = 0.0; }
+        if anim == HumanoidAnim::Punching { 
+            state.anim_phase = 0.0; 
+            state.punch_right = !state.punch_right; // Alternate each punch
+        }
     }
 }
 
@@ -370,11 +457,11 @@ fn update_animation(state: &mut HumanoidState, dt: f32) {
     };
     state.anim_phase += dt * speed;
 
-    let target = compute_pose(state.anim, state.anim_phase);
+    let target = compute_pose(state.anim, state.anim_phase, state.punch_right);
     let blend_t = if state.blend_timer > 0.0 { state.blend_timer / BLEND_DURATION } else { 0.0 };
 
     if blend_t > 0.001 {
-        let prev = compute_pose(state.prev_anim, state.anim_phase);
+        let prev = compute_pose(state.prev_anim, state.anim_phase, state.punch_right);
         state.pose = lerp_pose(&prev, &target, 1.0 - blend_t);
     } else {
         state.pose = target;
@@ -382,7 +469,7 @@ fn update_animation(state: &mut HumanoidState, dt: f32) {
 }
 
 // ── Animations/Poses Logic ──────────────────────────────────────────────
-fn compute_pose(anim: HumanoidAnim, phase: f32) -> HumanoidPose {
+fn compute_pose(anim: HumanoidAnim, phase: f32, punch_right: bool) -> HumanoidPose {
     let mut p = HumanoidPose::default();
     match anim {
         HumanoidAnim::Idle => {
@@ -402,7 +489,7 @@ fn compute_pose(anim: HumanoidAnim, phase: f32) -> HumanoidPose {
             p.eyelid_right = is_blinking;
         }
         HumanoidAnim::Walking => {
-            let sway = 1.0;
+            let sway = 0.5;
             let lh = phase.sin() * sway;
             let rh = (phase + std::f32::consts::PI).sin() * sway;
             
@@ -455,6 +542,7 @@ fn compute_pose(anim: HumanoidAnim, phase: f32) -> HumanoidPose {
             p.bob_y = bob;
 
             p.eyelid_left = 0.4; p.eyelid_right = 0.4;
+            p.brow_anger = 0.5;
         }
         HumanoidAnim::Jumping => {
             p.left_shoulder = -0.5; p.right_shoulder = -0.5;
@@ -466,57 +554,77 @@ fn compute_pose(anim: HumanoidAnim, phase: f32) -> HumanoidPose {
             p.bob_y = 0.2;
         }
         HumanoidAnim::Punching => {
-            const PHASE_SPEED: f32 = 1.2; // Animation speed
+            const PHASE_SPEED: f32 = 2.0; // Animation speed. should be 2.0
             let t = (phase * PHASE_SPEED).clamp(0.0, 1.0);
             
-            // Punch mechanics
-            let arm_pitch;
-            let forearm_pitch; 
-            let body_twist;
-            let hip_twist;
-            
+            // Punch mechanics.
+            let mut arm = BodySegmentState::new();
+            let mut forearm = BodySegmentState::new();
+            let mut body = BodySegmentState::new();
+            let mut hip = BodySegmentState::new();
+
+            // Windup
             if t < 0.3 {
-                // Windup
                 let wt = t / 0.3;
-                arm_pitch = -0.5 * wt;
-                forearm_pitch = -2.2 * wt; 
-                body_twist = -1.0 * wt;
-                hip_twist = -0.4 * wt;
-            } else if t < 0.5 {
-                // Thrust
+
+                arm.pitch.update(1.0, wt);
+                arm.yaw.update(1.0, wt);
+                forearm.pitch.update_from(0.0, -2.2, wt);
+                body.roll.update_from(0.0, -1.0, wt);
+                hip.roll.update_from(0.0, -0.4, wt);
+            } 
+            // Thrust
+            else if t < 0.5 {
                 let st = (t - 0.3) / 0.2;
-                arm_pitch = -0.5 - (2.0) * st; 
-                forearm_pitch = -2.2 * (1.0 - st); 
-                body_twist = -0.4 + (0.9) * st; 
-                hip_twist = -0.2 + (0.4) * st;
-            } else {
-                // Recover
+
+                arm.pitch.update_from(1.0, -2.0, st);
+                arm.yaw.update_from(1.0, 1.5, st);
+                forearm.pitch.update_from(-2.2, -0.5, st);
+                body.roll.update_from(-1.0, 0.5, st);
+                hip.roll.update_from(-0.4, 0.2, st);
+            } 
+            // Recover
+            else {
                 let rt = (t - 0.5) / 0.5;
-                arm_pitch = 1.5 * (1.0 - rt);
-                forearm_pitch = 0.0;
-                body_twist = 0.5 * (1.0 - rt);
-                hip_twist = 0.2 * (1.0 - rt);
+
+                arm.pitch.update_from(-2.0, 0.0, rt);
+                arm.yaw.update_from(1.5, 0.0, rt);
+                forearm.pitch.update_from(-0.5, 0.0, rt);
+                body.roll.update_from(0.5, 0.0, rt);
+                hip.roll.update_from(0.2, 0.0, rt);
             }
 
-            p.left_shoulder = 0.5; 
-            p.left_elbow = -2.2; // Guard
-            p.left_arm_spread = 0.5;
+            let twist_sign = if punch_right { 1.0 } else { -1.0 };
 
-            p.right_shoulder = arm_pitch;
-            p.right_elbow = forearm_pitch;
-            p.right_arm_spread = 0.1;
+            if punch_right {
+                p.right_shoulder = arm.pitch.value;
+                p.right_elbow = forearm.pitch.value;
+                p.right_arm_spread = arm.yaw.value * twist_sign;
+                p.left_shoulder = 0.5;
+                p.left_elbow = -2.2;
+                p.left_arm_spread = 0.5;
+            } else {
+                p.left_shoulder = arm.pitch.value;
+                p.left_elbow = forearm.pitch.value;
+                p.left_arm_spread = -arm.yaw.value * twist_sign;
+                p.right_shoulder = 0.5;
+                p.right_elbow = -2.2;
+                p.right_arm_spread = 0.5;
+            }
 
-            // Step into punch: Rotate hips and legs
-            p.torso_yaw = body_twist;
-            p.hips_yaw = hip_twist;
-            
+            // Body twist
+            p.torso_yaw = body.roll.value * twist_sign;
+            p.hips_yaw = hip.roll.value * twist_sign;
+
             // Plant feet widely
             p.left_hip = 0.4;
             p.right_hip = -0.4;
             p.left_knee = 0.3;
             p.right_knee = 0.5;
             
+            // Eyelids
             p.eyelid_left = 0.6; p.eyelid_right = 0.6;
+            p.brow_anger = 0.5;
         }
         HumanoidAnim::Death => {
             let t = (phase * 0.8).min(1.0);
@@ -553,6 +661,7 @@ fn lerp_pose(a: &HumanoidPose, b: &HumanoidPose, t: f32) -> HumanoidPose {
         bob_y: lerp(a.bob_y, b.bob_y, t),
         eyelid_left: lerp(a.eyelid_left, b.eyelid_left, t),
         eyelid_right: lerp(a.eyelid_right, b.eyelid_right, t),
+        brow_anger: lerp(a.brow_anger, b.brow_anger, t),
     }
 }
 
@@ -570,6 +679,7 @@ pub fn create_humanoid_vertices(
 
     let flash_t = (damage_flash / 0.3).clamp(0.0, 1.0);
     let skin = tint(SKIN_COLOR, flash_t);
+    let skin_dark = tint(SKIN_COLOR_DARK, flash_t);
     let lip = tint(LIP_COLOR, flash_t);
 
     let death_pitch = if death_timer >= 0.0 { pose.body_pitch } else { 0.0 };
@@ -633,7 +743,7 @@ pub fn create_humanoid_vertices(
         let lid_drop = EYELID_H * pose.eyelid_left;
         add_body_cube(&mut verts, p, head_total_yaw, body_lean, death_pitch, pose.head_pitch,
             -eye_spread, eye_y + EYELID_H * 0.5 - lid_drop * 0.5, eye_fwd + 0.006, 
-            EYE_OUTER_W, lid_drop, EYELID_D, skin);
+            EYE_OUTER_W + 0.01, lid_drop, EYELID_D, skin_dark);
     }
 
     // Right eye
@@ -645,11 +755,12 @@ pub fn create_humanoid_vertices(
         eye_spread, eye_y - 0.005, eye_fwd + 0.005, 
         EYE_INNER_W, EYE_INNER_H, EYE_INNER_D, EYE_DARK);
 
+    // Right eyelid
     if pose.eyelid_right > 0.01 {
         let lid_drop = EYELID_H * pose.eyelid_right;
         add_body_cube(&mut verts, p, head_total_yaw, body_lean, death_pitch, pose.head_pitch,
             eye_spread, eye_y + EYELID_H * 0.5 - lid_drop * 0.5, eye_fwd + 0.006, 
-            EYE_OUTER_W, lid_drop, EYELID_D, skin);
+            EYE_OUTER_W + 0.01, lid_drop, EYELID_D, skin_dark);
     }
 
     // Lips & Ears
@@ -677,6 +788,80 @@ pub fn create_humanoid_vertices(
         pose.right_shoulder, pose.right_arm_spread, pose.right_elbow,
         false, skin);
 
+    // ─── Hair & Eyebrows ───
+    let hair = tint(HAIR_COLOR, flash_t);
+
+    // Eyebrows: split into two halves so inner/outer can be offset for angry tilt
+    let brow_y = eye_y + EYE_OUTER_H * 0.5 + EYEBROW_H * 0.5 + 0.008;
+    let half_brow_w = EYEBROW_W * 0.5;
+    let anger_tilt = pose.brow_anger * 0.018;
+
+    // Left eyebrow (outer half rises, inner half dips)
+    add_body_cube(&mut verts, p, head_total_yaw, body_lean, death_pitch, pose.head_pitch,
+        -eye_spread - half_brow_w * 0.5, brow_y + anger_tilt, eye_fwd,
+        half_brow_w, EYEBROW_H, EYEBROW_D, hair);
+    add_body_cube(&mut verts, p, head_total_yaw, body_lean, death_pitch, pose.head_pitch,
+        -eye_spread + half_brow_w * 0.5, brow_y - anger_tilt, eye_fwd,
+        half_brow_w, EYEBROW_H, EYEBROW_D, hair);
+
+    // Right eyebrow (inner half dips, outer half rises)
+    add_body_cube(&mut verts, p, head_total_yaw, body_lean, death_pitch, pose.head_pitch,
+        eye_spread - half_brow_w * 0.5, brow_y - anger_tilt, eye_fwd,
+        half_brow_w, EYEBROW_H, EYEBROW_D, hair);
+    add_body_cube(&mut verts, p, head_total_yaw, body_lean, death_pitch, pose.head_pitch,
+        eye_spread + half_brow_w * 0.5, brow_y + anger_tilt, eye_fwd,
+        half_brow_w, EYEBROW_H, EYEBROW_D, hair);
+
+    // ─── Feather Headband ───
+    // Band sits flush above the eyebrows, wraps around the full head
+    let band_y = brow_y + EYEBROW_H * 0.5 + BAND_H * 0.5 + 0.01;
+    add_body_cube(&mut verts, p, head_total_yaw, body_lean, death_pitch, pose.head_pitch,
+        0.0, band_y, 0.0,
+        BAND_W, BAND_H, BAND_D, tint(BAND_COLOR, flash_t));
+
+    // Feather: white vane sitting on front of headband
+    let feather_bottom = band_y + BAND_H * 0.5;
+    let feather_cy = feather_bottom + FEATHER_H * 0.5;
+    let feather_z = HEAD_D * 0.5 + FEATHER_D * 0.5;
+    add_body_cube(&mut verts, p, head_total_yaw, body_lean, death_pitch, pose.head_pitch,
+        0.0, feather_cy, feather_z,
+        FEATHER_W, FEATHER_H, FEATHER_D, tint(FEATHER_COLOR, flash_t));
+
+    // Quill: grey spine from feather bottom up to 75% of its height, on the front face
+    let quill_h = FEATHER_H * 0.75;
+    let quill_cy = feather_bottom + quill_h * 0.5;
+    add_body_cube(&mut verts, p, head_total_yaw, body_lean, death_pitch, pose.head_pitch,
+        0.0, quill_cy, feather_z + FEATHER_D * 0.5 + 0.003,
+        FEATHER_QUILL_W, quill_h, 0.006, tint(FEATHER_QUILL_COLOR, flash_t));
+
+    // Hair cap (top of head, set back so it doesn't overhang the face)
+    let head_top = head_cy + HEAD_H * 0.5;
+    add_body_cube(&mut verts, p, head_total_yaw, body_lean, death_pitch, pose.head_pitch,
+        0.0, head_top + HAIR_CAP_H * 0.5, -HEAD_D * 0.1,
+        HAIR_CAP_W, HAIR_CAP_H, HAIR_CAP_D, hair);
+
+    // Back curtain: wide slab hanging from back of head down to just above shoulders
+    let hair_back_top = head_cy + HEAD_H * 0.1;
+    let hair_back_bottom = shoulder_y + 0.06;
+    let hair_back_h = hair_back_top - hair_back_bottom;
+    let hair_back_cy = (hair_back_top + hair_back_bottom) * 0.5;
+    add_body_cube(&mut verts, p, torso_yaw, body_lean, death_pitch, 0.0,
+        0.0, hair_back_cy, -(HEAD_D * 0.5 + HAIR_BACK_D * 0.5),
+        HAIR_BACK_W, hair_back_h, HAIR_BACK_D, hair);
+
+    // Side strands: hang from sides of head down to just above shoulders
+    let side_top = head_cy + HEAD_H * 0.1;
+    let side_bottom = shoulder_y + 0.06;
+    let side_h = side_top - side_bottom;
+    let side_cy = (side_top + side_bottom) * 0.5;
+    let side_x = HEAD_W * 0.5 + HAIR_SIDE_W * 0.4;
+    add_body_cube(&mut verts, p, torso_yaw, body_lean, death_pitch, 0.0,
+        -side_x, side_cy, -HEAD_D * 0.15,
+        HAIR_SIDE_W, side_h, HAIR_SIDE_D, hair);
+    add_body_cube(&mut verts, p, torso_yaw, body_lean, death_pitch, 0.0,
+        side_x, side_cy, -HEAD_D * 0.15,
+        HAIR_SIDE_W, side_h, HAIR_SIDE_D, hair);
+
     // ─── Legs ───
     
     let hip_joint_y = upper_leg_top;
@@ -691,6 +876,28 @@ pub fn create_humanoid_vertices(
         hip_joint_y, leg_x,
         pose.right_hip, pose.right_knee, pose.right_foot,
         false, skin);
+
+    // ─── Breechcloth ───
+    let cloth = tint(CLOTH_COLOR, flash_t);
+    let belt_col = tint(BELT_COLOR, flash_t);
+
+    // Belt: thin band at the waistline (hips_top), rotates with hips
+    add_body_cube(&mut verts, p, hips_yaw, body_lean, death_pitch, 0.0,
+        0.0, hips_top + BELT_H * 0.5, 0.0,
+        BELT_W, BELT_H, BELT_D, belt_col);
+
+    // Front and back flaps: hang from belt down to halfway through the upper leg
+    let cloth_h = HIPS_H + UPPER_LEG_H * 0.5;
+    let cloth_cy = hips_top - cloth_h * 0.5;
+    let cloth_z = HIPS_D * 0.5 + CLOTH_D * 0.5;
+
+    add_body_cube(&mut verts, p, hips_yaw, body_lean, death_pitch, 0.0,
+        0.0, cloth_cy, cloth_z,
+        CLOTH_W, cloth_h, CLOTH_D, cloth);
+
+    add_body_cube(&mut verts, p, hips_yaw, body_lean, death_pitch, 0.0,
+        0.0, cloth_cy, -cloth_z,
+        CLOTH_W, cloth_h, CLOTH_D, cloth);
 
     verts
 }
