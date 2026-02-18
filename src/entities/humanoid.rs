@@ -137,7 +137,7 @@ const WALK_SPEED: f32 = 2.0;
 const RUN_SPEED: f32 = 5.5;
 const DETECTION_RANGE: f32 = 18.0;
 const ATTACK_RANGE: f32 = 2.0;
-const PUNCH_DAMAGE: f32 = 6.0;
+const PUNCH_DAMAGE: f32 = 200.0;
 const PUNCH_COOLDOWN: f32 = 0.8;
 const JUMP_VEL: f32 = 8.0;
 const WANDER_PAUSE_MIN: f32 = 2.0;
@@ -341,8 +341,9 @@ pub fn update_humanoid(
         velocity.z -= velocity.z * brake;
         if state.punch_cooldown <= 0.0 && state.punch_timer <= 0.0 {
             set_anim(state, HumanoidAnim::Punching);
-            state.punch_timer = 0.5; // Punch duration. should be 0.5
+            state.punch_timer = 0.5;
             state.punch_cooldown = PUNCH_COOLDOWN;
+            state.punch_hit_applied = false;
         }
     } else if dist < DETECTION_RANGE {
         // Run

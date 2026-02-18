@@ -844,7 +844,7 @@ impl EnemyManager {
                     // Only deal damage during active punch, once per swing
                     if state.punch_timer > 0.0 && !state.punch_hit_applied {
                         // Check if in the extension phase (~25-60% of the punch)
-                        let phase_t = 1.0 - (state.punch_timer / 0.4);
+                        let phase_t = 1.0 - (state.punch_timer / 0.5);
                         if phase_t > 0.25 && phase_t < 0.65 {
                             let dx = player_pos.x - enemy.position.x;
                             let dz = player_pos.z - enemy.position.z;
