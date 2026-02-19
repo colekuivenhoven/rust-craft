@@ -1,6 +1,8 @@
 use crate::entities::bird::{BirdManager, create_bird_vertices, generate_bird_indices};
 use crate::entities::fish::{FishManager, create_fish_vertices, generate_fish_indices};
-use crate::block::{BlockType, Vertex, UiVertex, LineVertex, create_cube_vertices, create_block_outline, create_face_vertices, create_scaled_cube_vertices, create_particle_vertices, create_shadow_vertices, CUBE_INDICES};
+use crate::block::{BlockType, Vertex, UiVertex, ModalVertex, LineVertex, create_cube_vertices, create_block_outline, create_face_vertices, create_scaled_cube_vertices, create_particle_vertices, create_shadow_vertices, CUBE_INDICES};
+use crate::modal::Modal;
+use crate::audio::AudioManager;
 use crate::camera::{Camera, CameraController, CameraUniform, Projection, Frustum};
 use crate::chunk::{CHUNK_SIZE, CHUNK_HEIGHT};
 use crate::crafting::CraftingSystem;
@@ -175,6 +177,32 @@ pub struct State {
     cloud_vertex_buffer: wgpu::Buffer,
     cloud_index_buffer: wgpu::Buffer,
     cloud_index_count: u32,
+
+    // ── Pause / Modal ─────────────────────────────────────────────────────
+    pub paused: bool,
+    pause_modal: Modal,
+    /// Current cursor position in pixel space (set via CursorMoved events)
+    cursor_pos_px: (f32, f32),
+
+    // Pause-background blur pipeline (reads scene_texture)
+    pause_blur_pipeline:    wgpu::RenderPipeline,
+    pause_blur_bind_group_layout: wgpu::BindGroupLayout,
+    pause_blur_bind_group:  wgpu::BindGroup,
+
+    // Modal sand-texture pipeline
+    modal_sand_pipeline:    wgpu::RenderPipeline,
+    modal_sand_bind_group_layout: wgpu::BindGroupLayout,
+    modal_sand_bind_group:  wgpu::BindGroup,
+    modal_sand_texture:     wgpu::Texture,
+    modal_sand_sampler:     wgpu::Sampler,
+
+    // Modal GPU draw buffers (rebuilt each frame while paused)
+    modal_sand_vertex_buffer: wgpu::Buffer,
+    modal_ui_vertex_buffer:   wgpu::Buffer,
+    modal_ui_vertex_count:    u32,
+
+    // Audio
+    audio: Option<AudioManager>,
 }
 
 impl State {
@@ -1457,6 +1485,259 @@ impl State {
             ],
         });
 
+        // ── PAUSE BLUR PIPELINE ───────────────────────────────────────────────
+        // Reads scene_texture, applies a Gaussian blur + darkening,
+        // then outputs to the swap chain as the pause backdrop.
+
+        let pause_blur_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Pause Blur Shader"),
+            source: wgpu::ShaderSource::Wgsl(
+                include_str!("shaders/pause_blur_shader.wgsl").into(),
+            ),
+        });
+
+        let pause_blur_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Pause Blur BGL"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+            });
+
+        let pause_blur_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Pause Blur BG"),
+            layout: &pause_blur_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&scene_texture_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&scene_sampler),
+                },
+            ],
+        });
+
+        let pause_blur_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Pause Blur Pipeline Layout"),
+                bind_group_layouts: &[&pause_blur_bind_group_layout],
+                push_constant_ranges: &[],
+            });
+
+        let pause_blur_pipeline =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("Pause Blur Pipeline"),
+                layout: Some(&pause_blur_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &pause_blur_shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &pause_blur_shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: config.format,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: None,
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    unclipped_depth: false,
+                    conservative: false,
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState { count: 1, mask: !0, alpha_to_coverage_enabled: false },
+                multiview: None,
+                cache: None,
+            });
+
+        // ── MODAL SAND TEXTURE ────────────────────────────────────────────────
+        // Load sand.png as a standalone repeat-sampled texture.
+
+        let sand_img = image::open("assets/textures/blocks/sand.png")
+            .expect("Cannot open assets/textures/blocks/sand.png")
+            .to_rgba8();
+        let (sand_w, sand_h) = sand_img.dimensions();
+        let sand_data = sand_img.into_raw();
+
+        let modal_sand_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Modal Sand Texture"),
+            size: wgpu::Extent3d { width: sand_w, height: sand_h, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            wgpu::ImageCopyTexture {
+                texture: &modal_sand_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &sand_data,
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(4 * sand_w),
+                rows_per_image: Some(sand_h),
+            },
+            wgpu::Extent3d { width: sand_w, height: sand_h, depth_or_array_layers: 1 },
+        );
+        let modal_sand_texture_view =
+            modal_sand_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let modal_sand_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Modal Sand Sampler"),
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            address_mode_w: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+
+        let modal_sand_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Modal Sand BGL"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+            });
+
+        let modal_sand_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Modal Sand BG"),
+            layout: &modal_sand_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&modal_sand_texture_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&modal_sand_sampler),
+                },
+            ],
+        });
+
+        let modal_sand_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Modal Sand Pipeline Layout"),
+                bind_group_layouts: &[&modal_sand_bind_group_layout],
+                push_constant_ranges: &[],
+            });
+
+        let modal_sand_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Modal Sand Shader"),
+            source: wgpu::ShaderSource::Wgsl(
+                include_str!("shaders/modal_sand_shader.wgsl").into(),
+            ),
+        });
+
+        let modal_sand_pipeline =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("Modal Sand Pipeline"),
+                layout: Some(&modal_sand_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &modal_sand_shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[ModalVertex::desc()],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &modal_sand_shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: config.format,
+                        blend: Some(wgpu::BlendState {
+                            color: wgpu::BlendComponent {
+                                src_factor: wgpu::BlendFactor::SrcAlpha,
+                                dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                                operation: wgpu::BlendOperation::Add,
+                            },
+                            alpha: wgpu::BlendComponent::OVER,
+                        }),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: None,
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    unclipped_depth: false,
+                    conservative: false,
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState { count: 1, mask: !0, alpha_to_coverage_enabled: false },
+                multiview: None,
+                cache: None,
+            });
+
+        // ── Modal GPU buffers ─────────────────────────────────────────────────
+        // Pre-allocate; rebuilt each frame while paused.
+        let modal_sand_vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Modal Sand Vertex Buffer"),
+            size: (std::mem::size_of::<ModalVertex>() * 6) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let modal_ui_vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Modal UI Vertex Buffer"),
+            size: (std::mem::size_of::<UiVertex>() as u64) * 8_000,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        // ── Pause modal instance ──────────────────────────────────────────────
+        let mut pause_modal = Modal::new("PAUSED", &["RESUME", "QUIT"]);
+        pause_modal.update_layout(size.width as f32, size.height as f32);
+
         Self {
             surface,
             device,
@@ -1560,6 +1841,24 @@ impl State {
             cloud_vertex_buffer,
             cloud_index_buffer,
             cloud_index_count: 0,
+
+            // Pause / Modal
+            paused: false,
+            pause_modal,
+            cursor_pos_px: (0.0, 0.0),
+            pause_blur_pipeline,
+            pause_blur_bind_group_layout,
+            pause_blur_bind_group,
+            modal_sand_pipeline,
+            modal_sand_bind_group_layout,
+            modal_sand_bind_group,
+            modal_sand_texture,
+            modal_sand_sampler,
+            modal_sand_vertex_buffer,
+            modal_ui_vertex_buffer,
+            modal_ui_vertex_count: 0,
+
+            audio: AudioManager::new(),
         }
     }
 
@@ -1590,6 +1889,53 @@ impl State {
 
     pub fn is_mouse_captured(&self) -> bool {
         self.mouse_captured
+    }
+
+    /// Open the pause menu: freeze simulation, release mouse, show modal.
+    pub fn open_pause_menu(&mut self) {
+        self.paused = true;
+        self.pause_modal.visible = true;
+        let sw = self.size.width  as f32;
+        let sh = self.size.height as f32;
+        self.pause_modal.update_layout(sw, sh);
+        self.release_mouse();
+        if let Some(a) = &self.audio {
+            a.play("assets/audio/sounds/modal_open.mp3");
+        }
+    }
+
+    /// Close the pause menu: resume simulation, recapture mouse.
+    pub fn close_pause_menu(&mut self) {
+        self.paused = false;
+        self.pause_modal.visible = false;
+        self.capture_mouse();
+    }
+
+    pub fn is_paused(&self) -> bool { self.paused }
+
+    /// Call with the current cursor pixel position.
+    /// Returns the label of a button that was just clicked, or None.
+    pub fn handle_modal_cursor_moved(&mut self, px: f32, py: f32) {
+        self.cursor_pos_px = (px, py);
+        if self.pause_modal.visible {
+            self.pause_modal.update_hover(px, py);
+        }
+    }
+
+    /// Returns the button label that was clicked (if any).
+    pub fn handle_modal_click(&mut self) -> Option<&'static str> {
+        if self.pause_modal.visible {
+            let (px, py) = self.cursor_pos_px;
+            let hit = self.pause_modal.hit_button(px, py);
+            if hit.is_some() {
+                if let Some(a) = &self.audio {
+                    a.play("assets/audio/sounds/button_click.mp3");
+                }
+            }
+            hit
+        } else {
+            None
+        }
     }
 
     /// Saves all modified chunks and enemies to disk (call before exiting)
@@ -1701,6 +2047,25 @@ impl State {
                 view_formats: &[],
             });
             self.post_process_texture_view = self.post_process_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+            // Recreate Pause Blur Bind Group (reads from scene_texture)
+            self.pause_blur_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Pause Blur BG"),
+                layout: &self.pause_blur_bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&self.scene_texture_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&self.scene_sampler),
+                    },
+                ],
+            });
+
+            // Also recompute modal layout for new screen size
+            self.pause_modal.update_layout(new_size.width as f32, new_size.height as f32);
 
             // Recreate Motion Blur Bind Group (reads from scene_texture)
             self.motion_blur_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -2734,6 +3099,10 @@ impl State {
                 }
                 true
             }
+            WindowEvent::CursorMoved { position, .. } => {
+                self.handle_modal_cursor_moved(position.x as f32, position.y as f32);
+                false // don't consume — other handlers may need it
+            }
             _ => false,
         }
     }
@@ -2952,7 +3321,9 @@ impl State {
 
     pub fn update(&mut self) {
         let now = Instant::now();
-        let dt = (now - self.last_frame).as_secs_f32();
+        // Cap dt to 50 ms (20 fps minimum) so a long first frame or stutter
+        // doesn't let gravity teleport the player through the terrain.
+        let dt = (now - self.last_frame).as_secs_f32().min(0.05);
         self.last_frame = now;
         
         // Update Underwater shader time
@@ -2985,6 +3356,9 @@ impl State {
             self.fps_frame_count = 0;
             self.fps_timer = 0.0;
         }
+
+        // ── Simulation (skipped while paused) ────────────────────────────────
+        if !self.paused {
 
         // Update camera
         self.camera_underwater = self.camera_controller.update_camera(&mut self.camera, dt, &self.world, self.noclip_mode);
@@ -3138,7 +3512,9 @@ impl State {
             );
         }
 
-        // Update camera uniform and frustum
+        } // end if !self.paused
+
+        // Update camera uniform and frustum (always, so the paused scene renders)
         self.camera_uniform
             .update_view_proj(&self.camera, &self.projection);
         self.frustum = Frustum::from_view_proj(
@@ -3974,34 +4350,127 @@ impl State {
             damage_pass.draw(0..3, 0..1);
         }
 
-        // --- PASS 7: UI (Crosshair & HUD) ---
-        // Always render UI directly to Swap Chain so it stays sharp and on top
-        {
-            let mut ui_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("UI Render Pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &swap_chain_view, // Always Screen
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        // If underwater, we just drew the background in Pass 4, so Load. 
-                        // If NOT underwater, the World pass drew to this view in Pass 1, so Load.
-                        load: wgpu::LoadOp::Load, 
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
+        if self.paused {
+            // ── PAUSED: blur backdrop + modal overlay ─────────────────────────
 
-            ui_pass.set_pipeline(&self.ui_pipeline);
-            ui_pass.set_bind_group(0, &self.ui_bind_group, &[]);
-            ui_pass.set_vertex_buffer(0, self.crosshair_vertex_buffer.slice(..));
-            ui_pass.draw(0..self.crosshair_vertex_count, 0..1);
+            // Pass A: Gaussian-blur + darken scene_texture → swap_chain
+            {
+                let mut blur_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("Pause Blur Pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &swap_chain_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load:  wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+                blur_pass.set_pipeline(&self.pause_blur_pipeline);
+                blur_pass.set_bind_group(0, &self.pause_blur_bind_group, &[]);
+                blur_pass.draw(0..3, 0..1);
+            }
 
-            // Hotbar HUD
-            ui_pass.set_vertex_buffer(0, self.hud_vertex_buffer.slice(..));
-            ui_pass.draw(0..self.hud_vertex_count, 0..1);
+            // Build modal geometry on the CPU
+            let sw = self.size.width  as f32;
+            let sh = self.size.height as f32;
+
+            // Sand panel vertices
+            let sand_verts = self.pause_modal.build_sand_vertices(sw, sh);
+            self.queue.write_buffer(
+                &self.modal_sand_vertex_buffer,
+                0,
+                bytemuck::cast_slice(&sand_verts),
+            );
+
+            // UI overlay vertices (border, bevel, buttons, title)
+            let ui_verts = self.pause_modal.build_ui_vertices(sw, sh);
+            self.modal_ui_vertex_count = ui_verts.len() as u32;
+            self.queue.write_buffer(
+                &self.modal_ui_vertex_buffer,
+                0,
+                bytemuck::cast_slice(&ui_verts),
+            );
+
+            // Pass B: Sand-textured modal panel
+            {
+                let mut sand_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("Modal Sand Pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &swap_chain_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load:  wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+                sand_pass.set_pipeline(&self.modal_sand_pipeline);
+                sand_pass.set_bind_group(0, &self.modal_sand_bind_group, &[]);
+                sand_pass.set_vertex_buffer(0, self.modal_sand_vertex_buffer.slice(..));
+                sand_pass.draw(0..sand_verts.len() as u32, 0..1);
+            }
+
+            // Pass C: Solid-color modal UI (border, bevel, buttons, text)
+            if self.modal_ui_vertex_count > 0 {
+                let mut ui_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("Modal UI Pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &swap_chain_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load:  wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+                ui_pass.set_pipeline(&self.ui_pipeline);
+                ui_pass.set_bind_group(0, &self.ui_bind_group, &[]);
+                ui_pass.set_vertex_buffer(0, self.modal_ui_vertex_buffer.slice(..));
+                ui_pass.draw(0..self.modal_ui_vertex_count, 0..1);
+            }
+
+        } else {
+            // ── NORMAL: crosshair + HUD ───────────────────────────────────────
+
+            // --- PASS 7: UI (Crosshair & HUD) ---
+            // Always render UI directly to Swap Chain so it stays sharp and on top
+            {
+                let mut ui_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("UI Render Pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &swap_chain_view, // Always Screen
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            // If underwater, we just drew the background in Pass 4, so Load.
+                            // If NOT underwater, the World pass drew to this view in Pass 1, so Load.
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+
+                ui_pass.set_pipeline(&self.ui_pipeline);
+                ui_pass.set_bind_group(0, &self.ui_bind_group, &[]);
+                ui_pass.set_vertex_buffer(0, self.crosshair_vertex_buffer.slice(..));
+                ui_pass.draw(0..self.crosshair_vertex_count, 0..1);
+
+                // Hotbar HUD
+                ui_pass.set_vertex_buffer(0, self.hud_vertex_buffer.slice(..));
+                ui_pass.draw(0..self.hud_vertex_count, 0..1);
+            }
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));

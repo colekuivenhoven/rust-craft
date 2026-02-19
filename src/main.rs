@@ -11,6 +11,8 @@ mod dropped_item;
 mod entities;
 mod inventory;
 mod lighting;
+mod audio;
+mod modal;
 mod particle;
 mod player;
 mod renderer;
@@ -78,7 +80,8 @@ impl ApplicationHandler for App {
         if self.window.is_none() {
             let window_attributes = Window::default_attributes()
                 .with_title("Craft - Minecraft Clone")
-                .with_inner_size(winit::dpi::PhysicalSize::new(1280, 720));
+                .with_inner_size(winit::dpi::PhysicalSize::new(1280, 720))
+                .with_maximized(true);
 
             let window = Arc::new(event_loop.create_window(window_attributes).unwrap());
             self.window = Some(window.clone());
@@ -106,14 +109,23 @@ impl ApplicationHandler for App {
             return;
         };
 
-        // Handle mouse recapture before other input processing
-        // This must be checked first because state.input() consumes mouse events
+        // Handle left-click: modal buttons → recapture → game input
         if let WindowEvent::MouseInput {
             state: ElementState::Pressed,
             button: MouseButton::Left,
             ..
         } = &event
         {
+            if state.is_paused() {
+                if let Some(label) = state.handle_modal_click() {
+                    match label {
+                        "RESUME" => state.close_pause_menu(),
+                        "QUIT"   => { event_loop.exit(); return; }
+                        _        => {}
+                    }
+                }
+                return; // Consume click while paused
+            }
             if !state.is_mouse_captured() {
                 state.capture_mouse();
                 return; // Don't process this click as game input
@@ -135,8 +147,12 @@ impl ApplicationHandler for App {
                     },
                 ..
             } => {
-                // Release mouse cursor instead of closing game
-                state.release_mouse();
+                // Toggle pause menu
+                if state.is_paused() {
+                    state.close_pause_menu();
+                } else {
+                    state.open_pause_menu();
+                }
             }
             WindowEvent::Resized(physical_size) => {
                 state.resize(physical_size);
