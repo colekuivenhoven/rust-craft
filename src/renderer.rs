@@ -203,6 +203,9 @@ pub struct State {
 
     // Audio
     audio: Option<AudioManager>,
+    /// Looping walking-sound sink; volume is faded in/out each frame.
+    walk_sink:   Option<rodio::Sink>,
+    walk_volume: f32,
 }
 
 impl State {
@@ -1738,6 +1741,16 @@ impl State {
         let mut pause_modal = Modal::new("PAUSED", &["RESUME", "QUIT"]);
         pause_modal.update_layout(size.width as f32, size.height as f32);
 
+        // ── Audio ─────────────────────────────────────────────────────────────
+        // Both the music sink and walk sink must share the same OutputStream so
+        // that they remain connected to the audio device for the life of State.
+        let audio = AudioManager::new();
+        if let Some(a) = &audio {
+            a.play_looping("assets/audio/music/forest_1.mp3");
+        }
+        let walk_sink = audio.as_ref()
+            .and_then(|a| a.create_looping_sink("assets/audio/sounds/walking_loop_sand.mp3"));
+
         Self {
             surface,
             device,
@@ -1858,7 +1871,9 @@ impl State {
             modal_ui_vertex_buffer,
             modal_ui_vertex_count: 0,
 
-            audio: AudioManager::new(),
+            audio,
+            walk_sink,
+            walk_volume: 0.0,
         }
     }
 
@@ -3325,7 +3340,26 @@ impl State {
         // doesn't let gravity teleport the player through the terrain.
         let dt = (now - self.last_frame).as_secs_f32().min(0.05);
         self.last_frame = now;
-        
+
+        // ── Walking sound fade ────────────────────────────────────────────────
+        {
+            let horiz_speed = {
+                let vx = self.camera_controller.velocity.x;
+                let vz = self.camera_controller.velocity.z;
+                (vx * vx + vz * vz).sqrt()
+            };
+            let is_walking = !self.paused
+                && self.camera_controller.on_ground
+                && horiz_speed > 0.5;
+            let target     = if is_walking { 1.0f32 } else { 0.0 };
+            let fade_speed = if is_walking { 4.0f32 } else { 20.0 };
+            self.walk_volume += (target - self.walk_volume) * (fade_speed * dt).min(1.0);
+            self.walk_volume = self.walk_volume.clamp(0.0, 1.0);
+            if let Some(sink) = &self.walk_sink {
+                sink.set_volume(self.walk_volume);
+            }
+        }
+
         // Update Underwater shader time
         let total_time = (now - self.start_time).as_secs_f32();
         self.queue.write_buffer(
