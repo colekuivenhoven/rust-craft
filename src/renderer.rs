@@ -1,7 +1,7 @@
 use crate::entities::bird::{BirdManager, create_bird_vertices, generate_bird_indices};
 use crate::entities::fish::{FishManager, create_fish_vertices, generate_fish_indices};
 use crate::block::{BlockType, Vertex, UiVertex, ModalVertex, LineVertex, create_cube_vertices, create_block_outline, create_face_vertices, create_scaled_cube_vertices, create_particle_vertices, create_shadow_vertices, CUBE_INDICES};
-use crate::modal::Modal;
+use crate::modal::{self, Modal};
 use crate::audio::AudioManager;
 use crate::camera::{Camera, CameraController, CameraUniform, Projection, Frustum};
 use crate::chunk::{CHUNK_SIZE, CHUNK_HEIGHT};
@@ -200,6 +200,9 @@ pub struct State {
     modal_sand_vertex_buffer: wgpu::Buffer,
     modal_ui_vertex_buffer:   wgpu::Buffer,
     modal_ui_vertex_count:    u32,
+
+    // Dropped-item hover (index into dropped_item_manager.items the crosshair is over)
+    hovered_dropped_item: Option<usize>,
 
     // Audio
     audio: Option<AudioManager>,
@@ -1871,6 +1874,8 @@ impl State {
             modal_ui_vertex_buffer,
             modal_ui_vertex_count: 0,
 
+            hovered_dropped_item: None,
+
             audio,
             walk_sink,
             walk_volume: 0.0,
@@ -2756,6 +2761,38 @@ impl State {
             }
         }
 
+        // ── Dropped-item pickup hint ──────────────────────────────────────────
+        // When the crosshair is over a dropped item, show "Right-click to pickup"
+        // just to the right of the crosshair with a dark background box.
+        if self.hovered_dropped_item.is_some() {
+            let label = "Pickup (Right-click)";
+            let scale = 2.0f32;
+            let char_w = 6.0 * scale; // 5px glyph + 1px spacing
+            let char_h = 7.0 * scale;
+            let text_w = label.len() as f32 * char_w;
+            let pad = 10.0f32;
+
+            // Position: 24 px to the right of screen centre, vertically centred
+            let tx = screen_w * 0.5 + 48.0;
+            let ty = screen_h * 0.5 - char_h * 0.5;
+
+            // Dark background
+            modal::push_rect_px(
+                &mut verts,
+                tx - pad, ty - pad,
+                tx + text_w + pad, ty + char_h + pad,
+                [0.0, 0.0, 0.0, 0.4],
+                screen_w, screen_h,
+            );
+            // White text
+            bitmap_font::draw_text_quads(
+                &mut verts, label,
+                tx, ty, scale, scale,
+                [1.0, 1.0, 1.0, 1.0],
+                screen_w, screen_h,
+            );
+        }
+
         self.hud_vertex_count = verts.len() as u32;
         self.queue
             .write_buffer(&self.hud_vertex_buffer, 0, bytemuck::cast_slice(&verts));
@@ -3087,9 +3124,17 @@ impl State {
                 button: MouseButton::Right,
                 ..
             } => {
-                // Only handle block place if mouse is captured (in-game)
                 if self.mouse_captured {
-                    self.handle_block_place();
+                    // Priority: pick up a hovered dropped item before placing a block
+                    if let Some(idx) = self.hovered_dropped_item {
+                        if idx < self.dropped_item_manager.items.len() {
+                            let collected = self.dropped_item_manager.collect_item(idx);
+                            self.player.inventory.add_item(collected.block_type, collected.value);
+                            self.hovered_dropped_item = None;
+                        }
+                    } else {
+                        self.handle_block_place();
+                    }
                 }
                 true
             }
@@ -3343,6 +3388,9 @@ impl State {
 
         // ── Walking sound fade ────────────────────────────────────────────────
         {
+            const START_WALKING_SOUND_FADE_SPEED: f32 = 4.0;
+            const STOP_WALKING_SOUND_FADE_SPEED: f32 = 15.0; // 20.0 is almost instantaneous
+
             let horiz_speed = {
                 let vx = self.camera_controller.velocity.x;
                 let vz = self.camera_controller.velocity.z;
@@ -3351,8 +3399,8 @@ impl State {
             let is_walking = !self.paused
                 && self.camera_controller.on_ground
                 && horiz_speed > 0.5;
-            let target     = if is_walking { 1.0f32 } else { 0.0 };
-            let fade_speed = if is_walking { 4.0f32 } else { 20.0 };
+            let target = if is_walking { 1.0f32 } else { 0.0 };
+            let fade_speed = if is_walking { START_WALKING_SOUND_FADE_SPEED } else { STOP_WALKING_SOUND_FADE_SPEED };
             self.walk_volume += (target - self.walk_volume) * (fade_speed * dt).min(1.0);
             self.walk_volume = self.walk_volume.clamp(0.0, 1.0);
             if let Some(sink) = &self.walk_sink {
@@ -3390,6 +3438,9 @@ impl State {
             self.fps_frame_count = 0;
             self.fps_timer = 0.0;
         }
+
+        // Clear hover when paused; it will be recomputed below when unpaused.
+        self.hovered_dropped_item = None;
 
         // ── Simulation (skipped while paused) ────────────────────────────────
         if !self.paused {
@@ -3493,11 +3544,13 @@ impl State {
             self.cloud_index_count = 0;
         }
 
-        // Update dropped items and collect any that touch the player
-        let collected_items = self.dropped_item_manager.update(dt, self.player.position, &self.world);
-        for item in collected_items {
-            self.player.inventory.add_item(item.block_type, item.value);
-        }
+        // Advance dropped-item physics (no auto-collect; player must right-click)
+        self.dropped_item_manager.update(dt, &self.world);
+
+        // Raycast to find which dropped item (if any) the crosshair is over
+        let look_dir = self.camera.get_direction();
+        self.hovered_dropped_item = self.dropped_item_manager
+            .raycast_item(self.camera.position, look_dir, 5.0);
 
         // Update particles
         self.particle_manager.update(dt);

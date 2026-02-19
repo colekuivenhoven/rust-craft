@@ -1,13 +1,12 @@
-// Pause background blur shader.
-// Renders a full-screen triangle (no vertex buffer), samples scene_texture
-// with a 2-pass-style cross-kernel blur and darkens the result.
-//
+//* Pause background blur shader.
 // Tunables (mirrored as Rust consts in modal.rs):
-//   BLUR_STEP_PX  – pixel radius of each sample step
-//   DARKEN_FACTOR – how much to darken the blurred frame
+//   BLUR_STEP_PX        – pixel radius of each sample step
+//   DARKEN_FACTOR       – how much to darken the blurred frame
+//   DESATURATION_AMOUNT – how much to reduce color saturation (0.0 = none, 1.0 = full grayscale)
 
-const BLUR_STEP_PX: f32 = 3.5;
+const BLUR_STEP_PX: f32 = 1.5;
 const DARKEN_FACTOR: f32 = 0.45;
+const DESATURATION_AMOUNT: f32 = 0.4;
 
 @group(0) @binding(0) var t_scene: texture_2d<f32>;
 @group(0) @binding(1) var s_scene: sampler;
@@ -69,6 +68,14 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     col += textureSample(t_scene, s_scene, uv + vec2( 0.0,     -step3.y)) * 0.02;
     // Total weight ≈ 0.20 + 4×0.14 + 4×0.065 + 4×0.02 = 1.00
 
-    col = vec4<f32>(col.rgb * DARKEN_FACTOR, 1.0);
-    return col;
+    // Calculate luminance using standard Rec. 709 weights
+    let luma_weights = vec3<f32>(0.2126, 0.7152, 0.0722);
+    let luminance = dot(col.rgb, luma_weights);
+    let grayscale = vec3<f32>(luminance, luminance, luminance);
+    
+    // Mix the original color with the grayscale version based on DESATURATION_AMOUNT
+    let desaturated_color = mix(col.rgb, grayscale, vec3<f32>(DESATURATION_AMOUNT));
+
+    // Apply darkening and output
+    return vec4<f32>(desaturated_color * DARKEN_FACTOR, 1.0);
 }
