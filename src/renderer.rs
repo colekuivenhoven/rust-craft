@@ -318,6 +318,10 @@ impl State {
         // Cloud config setup - load from config file
         let cloud_config = crate::config::CloudConfig::load_or_create(config_path);
 
+        // World config setup - load master_seed from config file
+        let world_config = crate::config::WorldConfig::load_or_create(config_path);
+        log::info!("Using master_seed = {}", world_config.master_seed);
+
         let fog_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Fog Buffer"),
             contents: bytemuck::cast_slice(&[fog_uniform]),
@@ -658,7 +662,7 @@ impl State {
             cache: None,
         });
 
-        let world = World::new(18); // Sets render_distance
+        let world = World::new(18, world_config.master_seed);
 
         // Find a safe spawn point: scan from top down for a solid block with 2 blocks
         // of non-solid space above it. Try (0,0) first, then nearby positions.

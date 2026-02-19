@@ -15,15 +15,17 @@ pub struct World {
     render_distance: i32,
     chunk_loader: ChunkLoader,
     last_center: (i32, i32),
+    master_seed: u32,
 }
 
 impl World {
-    pub fn new(render_distance: i32) -> Self {
+    pub fn new(render_distance: i32, master_seed: u32) -> Self {
         let mut world = Self {
             chunks: HashMap::new(),
             render_distance,
-            chunk_loader: ChunkLoader::new(),
+            chunk_loader: ChunkLoader::new(master_seed),
             last_center: (0, 0),
+            master_seed,
         };
         // Generate initial chunks synchronously for immediate spawn
         world.generate_initial_chunks(0, 0);
@@ -46,13 +48,14 @@ impl World {
             .collect();
 
         // Generate chunks in parallel using rayon
+        let master_seed = self.master_seed;
         let generated_chunks: Vec<((i32, i32), Chunk)> = positions
             .par_iter()
             .map(|&(cx, cz)| {
                 let mut chunk = if let Some(loaded) = chunk_storage::load_chunk(cx, cz) {
                     loaded
                 } else {
-                    Chunk::new(cx, cz)
+                    Chunk::new(cx, cz, master_seed)
                 };
                 lighting::calculate_chunk_lighting(&mut chunk);
                 ((cx, cz), chunk)

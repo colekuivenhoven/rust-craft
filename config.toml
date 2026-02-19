@@ -1,6 +1,8 @@
 # Craft Game Configuration
 # This file is automatically loaded at startup
-# Edit values and restart the game to apply changes (no rebuild needed!)
+
+# World Settings
+master_seed = 52994325                # World generation seed
 
 # Fog Settings
 enabled = true                        # Enable/disable fog

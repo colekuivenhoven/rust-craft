@@ -12,31 +12,7 @@ pub const CHUNK_HEIGHT: usize = 128;
 // ============================================================================
 // NOISE SEEDS - Deterministic seeds for reproducible world generation
 // ============================================================================
-
-// Master seed - change this single value to generate a completely different world
-pub const MASTER_SEED: u32 = 52; // default seed = 42
-
-// Derived seeds - each offset creates a unique noise pattern while keeping worlds reproducible
-pub const SEED_BASE_TERRAIN: u32 = MASTER_SEED;
-pub const SEED_DETAIL: u32 = MASTER_SEED.wrapping_add(4);
-pub const SEED_JAGGED: u32 = MASTER_SEED.wrapping_add(5);
-pub const SEED_TEMPERATURE: u32 = MASTER_SEED.wrapping_add(258);
-pub const SEED_HUMIDITY: u32 = MASTER_SEED.wrapping_add(259);
-pub const SEED_CONTINENTALNESS: u32 = MASTER_SEED.wrapping_add(260);
-pub const SEED_MOUNTAIN: u32 = MASTER_SEED.wrapping_add(261);
-pub const SEED_VEIN: u32 = MASTER_SEED.wrapping_add(558);
-pub const SEED_VEIN_DETAIL: u32 = MASTER_SEED.wrapping_add(559);
-pub const SEED_OASIS: u32 = MASTER_SEED.wrapping_add(358);
-pub const SEED_GLACIER: u32 = MASTER_SEED.wrapping_add(359);
-pub const SEED_OCEAN_ISLAND: u32 = MASTER_SEED.wrapping_add(458);
-pub const SEED_SKY_ISLAND: u32 = MASTER_SEED.wrapping_add(158);
-pub const SEED_SKY_ISLAND_MASK: u32 = MASTER_SEED.wrapping_add(159);
-pub const SEED_SKY_ISLAND_DETAIL: u32 = MASTER_SEED.wrapping_add(160);
-pub const SEED_STALACTITE: u32 = MASTER_SEED.wrapping_add(161);
-pub const SEED_HILL: u32 = MASTER_SEED.wrapping_add(162);
-pub const SEED_GLOWSTONE: u32 = MASTER_SEED.wrapping_add(1);
-pub const SEED_LEAF_COLOR: u32 = MASTER_SEED.wrapping_add(700);
-pub const SEED_GRASS_TUFT: u32 = MASTER_SEED.wrapping_add(800);
+// Seeds are derived at runtime from master_seed (loaded from config.toml)
 
 // ============================================================================
 // TERRAIN GENERATION - Base terrain shape and height parameters
@@ -61,7 +37,7 @@ pub const BIOME_SCALE: f64 = 0.0025;            // Base biome noise scale (large
 pub const BIOME_SCALE_MULTIPLIER: f64 = 0.00025; // For continent-sized regions (currently unused)
 
 // Continental scale affects ocean/land distribution
-pub const CONTINENTAL_SCALE_FACTOR: f64 = 0.7;
+pub const CONTINENTAL_SCALE_FACTOR: f64 = 0.2;
 
 // Ocean biome thresholds
 pub const OCEAN_THRESHOLD_DEEP: f64 = 0.25;     // Below this = deep ocean
@@ -351,6 +327,7 @@ pub struct Chunk {
     pub blocks: Box<[[[BlockType; CHUNK_SIZE]; CHUNK_HEIGHT]; CHUNK_SIZE]>,
     pub light_levels: Box<[[[u8; CHUNK_SIZE]; CHUNK_HEIGHT]; CHUNK_SIZE]>,
     pub position: (i32, i32),
+    pub master_seed: u32,
     pub vertices: Vec<Vertex>,
     pub indices: Vec<u16>,
     pub water_vertices: Vec<Vertex>,       // Separate water vertices for transparency pass
@@ -424,7 +401,7 @@ impl<'a> ChunkNeighbors<'a> {
 }
 
 impl Chunk {
-    pub fn new(chunk_x: i32, chunk_z: i32) -> Self {
+    pub fn new(chunk_x: i32, chunk_z: i32, master_seed: u32) -> Self {
         // Allocate large arrays directly on heap to avoid stack overflow
         // Using vec!().into_boxed_slice().try_into() ensures no stack intermediary
         let blocks: Box<[[[BlockType; CHUNK_SIZE]; CHUNK_HEIGHT]; CHUNK_SIZE]> = vec![[[BlockType::Air; CHUNK_SIZE]; CHUNK_HEIGHT]; CHUNK_SIZE]
@@ -440,6 +417,7 @@ impl Chunk {
             blocks,
             light_levels,
             position: (chunk_x, chunk_z),
+            master_seed,
             vertices: Vec::new(),
             indices: Vec::new(),
             water_vertices: Vec::new(),
@@ -451,7 +429,7 @@ impl Chunk {
             mesh_version: 0,
             modified: false,
         };
-        chunk.generate_terrain();
+        chunk.generate_terrain(master_seed);
         chunk
     }
 
@@ -466,6 +444,7 @@ impl Chunk {
             blocks,
             light_levels,
             position: (chunk_x, chunk_z),
+            master_seed: 0, // Not used for saved chunks (blocks already generated)
             vertices: Vec::new(),
             indices: Vec::new(),
             water_vertices: Vec::new(),
@@ -479,33 +458,54 @@ impl Chunk {
         }
     }
 
-    fn generate_terrain(&mut self) {
+    fn generate_terrain(&mut self, master_seed: u32) {
+        // Derive per-feature seeds from master seed
+        let seed_base_terrain      = master_seed;
+        let seed_glowstone         = master_seed.wrapping_add(1);
+        let seed_detail            = master_seed.wrapping_add(4);
+        let seed_jagged            = master_seed.wrapping_add(5);
+        let seed_sky_island        = master_seed.wrapping_add(158);
+        let seed_sky_island_mask   = master_seed.wrapping_add(159);
+        let seed_sky_island_detail = master_seed.wrapping_add(160);
+        let seed_stalactite        = master_seed.wrapping_add(161);
+        let seed_hill              = master_seed.wrapping_add(162);
+        let seed_temperature       = master_seed.wrapping_add(258);
+        let seed_humidity          = master_seed.wrapping_add(259);
+        let seed_continentalness   = master_seed.wrapping_add(260);
+        let seed_mountain          = master_seed.wrapping_add(261);
+        let seed_oasis             = master_seed.wrapping_add(358);
+        let seed_glacier           = master_seed.wrapping_add(359);
+        let seed_ocean_island      = master_seed.wrapping_add(458);
+        let seed_vein              = master_seed.wrapping_add(558);
+        let seed_vein_detail       = master_seed.wrapping_add(559);
+        let seed_grass_tuft        = master_seed.wrapping_add(800);
+
         // === Noise generators ===
-        let perlin = Perlin::new(SEED_BASE_TERRAIN);
-        let detail_perlin = Perlin::new(SEED_DETAIL);
-        let jagged_perlin = Perlin::new(SEED_JAGGED);
+        let perlin = Perlin::new(seed_base_terrain);
+        let detail_perlin = Perlin::new(seed_detail);
+        let jagged_perlin = Perlin::new(seed_jagged);
 
         // Biome noise generators - using large scale for smooth regions
-        let temperature_perlin = Perlin::new(SEED_TEMPERATURE);
-        let humidity_perlin = Perlin::new(SEED_HUMIDITY);
-        let continentalness_perlin = Perlin::new(SEED_CONTINENTALNESS);
-        let mountain_perlin = Perlin::new(SEED_MOUNTAIN);
+        let temperature_perlin = Perlin::new(seed_temperature);
+        let humidity_perlin = Perlin::new(seed_humidity);
+        let continentalness_perlin = Perlin::new(seed_continentalness);
+        let mountain_perlin = Perlin::new(seed_mountain);
 
         // Transition/vein noise - creates organic, connected patterns at biome boundaries
-        let vein_perlin = Perlin::new(SEED_VEIN);
-        let vein_detail = Perlin::new(SEED_VEIN_DETAIL);
+        let vein_perlin = Perlin::new(seed_vein);
+        let vein_detail = Perlin::new(seed_vein_detail);
 
         // Sky island noise generators
-        let sky_island_perlin = Perlin::new(SEED_SKY_ISLAND);
-        let sky_island_mask_perlin = Perlin::new(SEED_SKY_ISLAND_MASK);
-        let sky_island_detail = Perlin::new(SEED_SKY_ISLAND_DETAIL);
+        let sky_island_perlin = Perlin::new(seed_sky_island);
+        let sky_island_mask_perlin = Perlin::new(seed_sky_island_mask);
+        let sky_island_detail = Perlin::new(seed_sky_island_detail);
 
         // Oasis and special feature noise
-        let oasis_perlin = Perlin::new(SEED_OASIS);
-        let glacier_perlin = Perlin::new(SEED_GLACIER);
+        let oasis_perlin = Perlin::new(seed_oasis);
+        let glacier_perlin = Perlin::new(seed_glacier);
 
         // Ocean island noise
-        let island_perlin = Perlin::new(SEED_OCEAN_ISLAND);
+        let island_perlin = Perlin::new(seed_ocean_island);
 
         let world_offset_x = self.position.0 * CHUNK_SIZE as i32;
         let world_offset_z = self.position.1 * CHUNK_SIZE as i32;
@@ -1095,7 +1095,7 @@ impl Chunk {
         }
 
         // === GlowStone in caves ===
-        let glow_perlin = Perlin::new(SEED_GLOWSTONE);
+        let glow_perlin = Perlin::new(seed_glowstone);
         for x in 0..CHUNK_SIZE {
             for z in 0..CHUNK_SIZE {
                 let world_x = (world_offset_x + x as i32) as f64;
@@ -1113,8 +1113,8 @@ impl Chunk {
 
         // === Floating Sky Islands (Desert Only) ===
         // Sky islands appear over desert and ocean biomes
-        let stalactite_perlin = Perlin::new(SEED_STALACTITE);
-        let hill_perlin = Perlin::new(SEED_HILL);
+        let stalactite_perlin = Perlin::new(seed_stalactite);
+        let hill_perlin = Perlin::new(seed_hill);
 
         for x in 0..CHUNK_SIZE {
             for z in 0..CHUNK_SIZE {
@@ -1372,7 +1372,7 @@ impl Chunk {
 
         // === Grass Tufts ===
         // Spawn cross-model grass tufts on grass blocks using noise for natural clustering
-        let tuft_noise = Perlin::new(SEED_GRASS_TUFT);
+        let tuft_noise = Perlin::new(seed_grass_tuft);
         for x in 0..CHUNK_SIZE {
             for z in 0..CHUNK_SIZE {
                 let world_x = (world_offset_x + x as i32) as f64;
@@ -1438,7 +1438,7 @@ impl Chunk {
         let world_offset_z = chunk.position.1 * CHUNK_SIZE as i32;
 
         // Noise for leaf color variation (green ↔ orange)
-        let leaf_color_noise = Perlin::new(SEED_LEAF_COLOR);
+        let leaf_color_noise = Perlin::new(neighbors.center.master_seed.wrapping_add(700));
 
         let face_directions: [(i32, i32, i32); 6] = [
             (0, 0, 1), (0, 0, -1), (0, 1, 0), (0, -1, 0), (1, 0, 0), (-1, 0, 0),

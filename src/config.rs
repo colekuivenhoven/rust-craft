@@ -4,6 +4,52 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
 
+/// World generation configuration
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct WorldConfig {
+    pub master_seed: u32,
+}
+
+impl Default for WorldConfig {
+    fn default() -> Self {
+        Self { master_seed: 52 }
+    }
+}
+
+impl WorldConfig {
+    /// Load configuration from a TOML file, or create default if it doesn't exist
+    pub fn load_or_create(path: &Path) -> Self {
+        match fs::read_to_string(path) {
+            Ok(contents) => {
+                match toml::from_str(&contents) {
+                    Ok(config) => {
+                        log::info!("Loaded world config from {}", path.display());
+                        config
+                    }
+                    Err(e) => {
+                        log::warn!("Failed to parse world config: {}, using defaults", e);
+                        Self::default()
+                    }
+                }
+            }
+            Err(_) => {
+                log::info!("No config found, using default world config");
+                let default = Self::default();
+                let _ = default.save(path);
+                default
+            }
+        }
+    }
+
+    /// Save configuration to a TOML file
+    pub fn save(&self, path: &Path) -> std::io::Result<()> {
+        let toml_string = toml::to_string_pretty(self)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        fs::write(path, toml_string)?;
+        Ok(())
+    }
+}
+
 /// Fog configuration
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct FogConfig {

@@ -47,7 +47,7 @@ pub struct ChunkLoader {
 }
 
 impl ChunkLoader {
-    pub fn new() -> Self {
+    pub fn new(master_seed: u32) -> Self {
         // Create channels for load requests/results
         let (load_request_tx, load_request_rx) = channel::<ChunkLoadRequest>();
         let (load_result_tx, load_result_rx) = channel::<ChunkLoadResult>();
@@ -64,7 +64,7 @@ impl ChunkLoader {
             .name("chunk-loader".to_string())
             .stack_size(8 * 1024 * 1024) // 8MB stack for chunk generation
             .spawn(move || {
-                Self::load_worker(load_request_rx, load_result_tx);
+                Self::load_worker(load_request_rx, load_result_tx, master_seed);
             })
             .expect("Failed to spawn chunk loader thread");
 
@@ -90,7 +90,7 @@ impl ChunkLoader {
     }
 
     /// Worker function that runs in the load thread
-    fn load_worker(rx: Receiver<ChunkLoadRequest>, tx: Sender<ChunkLoadResult>) {
+    fn load_worker(rx: Receiver<ChunkLoadRequest>, tx: Sender<ChunkLoadResult>, master_seed: u32) {
         // Collect requests and sort by priority
         let mut requests: Vec<ChunkLoadRequest> = Vec::new();
 
@@ -124,7 +124,7 @@ impl ChunkLoader {
             let mut chunk = if let Some(loaded) = chunk_storage::load_chunk(cx, cz) {
                 loaded
             } else {
-                Chunk::new(cx, cz)
+                Chunk::new(cx, cz, master_seed)
             };
 
             // Calculate lighting and mark as done so main thread doesn't recalculate
