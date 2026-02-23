@@ -5,6 +5,7 @@ use crate::block::BlockType;
 use crate::lighting;
 use rayon::prelude::*;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 //* —— Rebuild/Recal Variables —————————————————————————————————————————————————————————————————————
 pub const MAX_LIGHT_RECALCS: usize = 2;
@@ -16,16 +17,18 @@ pub struct World {
     chunk_loader: ChunkLoader,
     last_center: (i32, i32),
     master_seed: u32,
+    terrain_cfg: Arc<crate::config::TerrainConfig>,
 }
 
 impl World {
-    pub fn new(render_distance: i32, master_seed: u32) -> Self {
+    pub fn new(render_distance: i32, master_seed: u32, terrain_cfg: Arc<crate::config::TerrainConfig>) -> Self {
         let mut world = Self {
             chunks: HashMap::new(),
             render_distance,
-            chunk_loader: ChunkLoader::new(master_seed),
+            chunk_loader: ChunkLoader::new(master_seed, terrain_cfg.clone()),
             last_center: (0, 0),
             master_seed,
+            terrain_cfg,
         };
         // Generate initial chunks synchronously for immediate spawn
         world.generate_initial_chunks(0, 0);
@@ -49,13 +52,14 @@ impl World {
 
         // Generate chunks in parallel using rayon
         let master_seed = self.master_seed;
+        let terrain_cfg = self.terrain_cfg.clone();
         let generated_chunks: Vec<((i32, i32), Chunk)> = positions
             .par_iter()
             .map(|&(cx, cz)| {
                 let mut chunk = if let Some(loaded) = chunk_storage::load_chunk(cx, cz) {
                     loaded
                 } else {
-                    Chunk::new(cx, cz, master_seed)
+                    Chunk::new(cx, cz, master_seed, &terrain_cfg)
                 };
                 lighting::calculate_chunk_lighting(&mut chunk);
                 ((cx, cz), chunk)

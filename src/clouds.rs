@@ -67,8 +67,10 @@ impl CloudManager {
 
                 // Only generate cloud pixels above threshold
                 if noise_normalized > self.config.threshold {
+                    
                     // Use noise value to determine alpha (more noise = more opaque)
-                    let alpha = (noise_normalized * 0.7 + 0.3) as f32; // Range: 0.3 to 1.0
+                    //let alpha = (noise_normalized * 0.7 + 0.3) as f32; // Range: 0.3 to 1.0
+                    let alpha = 1.0; // always 1.0
 
                     self.add_cloud_pixel(world_x, world_z, alpha);
                 }

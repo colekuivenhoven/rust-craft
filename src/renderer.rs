@@ -322,6 +322,11 @@ impl State {
         let world_config = crate::config::WorldConfig::load_or_create(config_path);
         log::info!("Using master_seed = {}", world_config.master_seed);
 
+        // Terrain generation config - loaded from config.toml alongside other settings
+        let terrain_cfg = std::sync::Arc::new(
+            crate::config::TerrainConfig::load_or_create(config_path)
+        );
+
         let fog_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Fog Buffer"),
             contents: bytemuck::cast_slice(&[fog_uniform]),
@@ -662,11 +667,16 @@ impl State {
             cache: None,
         });
 
-        let world = World::new(18, world_config.master_seed);
+        let world = World::new(18, world_config.master_seed, terrain_cfg);
 
-        // Find a safe spawn point: scan from top down for a solid block with 2 blocks
-        // of non-solid space above it. Try (0,0) first, then nearby positions.
-        let spawn_point = {
+        // Restore from a previous session, or find a safe spawn point.
+        let player_save = crate::config::PlayerSave::load();
+        let spawn_point = if let Some(ref save) = player_save {
+            log::info!("Restoring player position ({:.1}, {:.1}, {:.1})", save.x, save.y, save.z);
+            Point3::new(save.x, save.y, save.z)
+        } else {
+            // Find a safe spawn point: scan from top down for a solid block with 2 blocks
+            // of non-solid space above it. Try (0,0) first, then nearby positions.
             let mut spawn_y = None;
             let mut spawn_x = 0i32;
             let mut spawn_z = 0i32;
@@ -700,6 +710,10 @@ impl State {
         };
 
         camera.position = spawn_point;
+        if let Some(ref save) = player_save {
+            camera.yaw = cgmath::Rad(save.yaw);
+            camera.pitch = cgmath::Rad(save.pitch);
+        }
         let player = Player::new(spawn_point);
         let water_simulation = WaterSimulation::new(0.5);
         let enemy_manager = EnemyManager::new(20.0, 10); // spawn frequency (seconds), max enemies
@@ -1815,10 +1829,10 @@ impl State {
             fps: 0.0,
             fps_frame_count: 0,
             fps_timer: 0.0,
-            // Debug mode
-            show_chunk_outlines: false,
-            noclip_mode: false,
-            show_enemy_hitboxes: false,
+            // Debug mode (restored from save if available)
+            show_chunk_outlines: player_save.as_ref().map_or(false, |s| s.show_chunk_outlines),
+            noclip_mode:         player_save.as_ref().map_or(false, |s| s.noclip_mode),
+            show_enemy_hitboxes: player_save.as_ref().map_or(false, |s| s.show_enemy_hitboxes),
             // Underwater effect
             camera_underwater: false,
             underwater_pipeline,
@@ -1966,6 +1980,17 @@ impl State {
     pub fn save_world(&mut self) {
         self.world.save_all_modified_chunks();
         self.enemy_manager.save_to_disk();
+        crate::config::PlayerSave {
+            x: self.camera.position.x,
+            y: self.camera.position.y,
+            z: self.camera.position.z,
+            yaw: self.camera.yaw.0,
+            pitch: self.camera.pitch.0,
+            show_chunk_outlines: self.show_chunk_outlines,
+            noclip_mode: self.noclip_mode,
+            show_enemy_hitboxes: self.show_enemy_hitboxes,
+        }
+        .save();
     }
 
     pub fn process_mouse(&mut self, dx: f64, dy: f64) {
