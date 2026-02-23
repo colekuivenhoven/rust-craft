@@ -1,2 +1,0 @@
-When adjusting the mountain_ridge consts to make the mountains taller + more jagged, I'm seeing that sometimes leaf blocks generated around trees on the sides/slopes of jagged mountains can be invisible along the edge of a chunk. Please investigate and see what's going on here.
-

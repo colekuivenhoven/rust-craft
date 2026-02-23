@@ -1267,15 +1267,20 @@ impl Chunk {
                         // Check if we should draw this face
                         // For water, use special transparency check that treats Boundary as opaque
                         // For semi-transparent blocks (ice), always draw faces against any different block
-                        // For transparent blocks (leaves), draw faces against any different block type
+                        // For transparent blocks (leaves, air, etc.), draw faces against any different block type
                         let is_semi_transparent = block.is_semi_transparent();
+                        // Track leaf-leaf boundaries so the winning side can emit a double-sided face.
+                        let is_leaf_leaf_face = block == BlockType::Leaves && neighbor_block == BlockType::Leaves;
                         let should_draw = if is_water {
                             neighbor_block.is_transparent_for_water() && neighbor_block != block
                         } else if is_semi_transparent {
                             // Semi-transparent blocks always draw all faces (except against same block type)
                             neighbor_block != block
+                        } else if is_leaf_leaf_face {
+                            // For two adjacent leaf blocks, only the "positive-direction" side renders,
+                            // but it emits a double-sided face so it is visible from both directions.
+                            dx + dy + dz > 0
                         } else if block == BlockType::Leaves {
-                            // Leaves always render all six faces unconditionally
                             true
                         } else {
                             (block.is_transparent() || neighbor_block.is_transparent() || neighbor_block.is_semi_transparent()) && neighbor_block != block
@@ -1459,11 +1464,27 @@ impl Chunk {
                                         base_index + 1, base_index + 2, base_index + 3,
                                         base_index + 3, base_index, base_index + 1,
                                     ]);
+                                    // Leaf-leaf boundary: also emit reversed winding so the face is
+                                    // visible from both sides without needing a second block to contribute.
+                                    if is_leaf_leaf_face {
+                                        indices.extend_from_slice(&[
+                                            base_index + 3, base_index + 2, base_index + 1,
+                                            base_index + 1, base_index, base_index + 3,
+                                        ]);
+                                    }
                                 } else {
                                     indices.extend_from_slice(&[
                                         base_index, base_index + 1, base_index + 2,
                                         base_index + 2, base_index + 3, base_index,
                                     ]);
+                                    // Leaf-leaf boundary: also emit reversed winding so the face is
+                                    // visible from both sides without needing a second block to contribute.
+                                    if is_leaf_leaf_face {
+                                        indices.extend_from_slice(&[
+                                            base_index + 2, base_index + 1, base_index,
+                                            base_index, base_index + 3, base_index + 2,
+                                        ]);
+                                    }
                                 }
                             }
                         }
