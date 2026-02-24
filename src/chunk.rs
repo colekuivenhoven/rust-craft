@@ -838,7 +838,8 @@ impl Chunk {
 
                         // Branches for taller trees
                         let branch_start_y = height + trunk_height.saturating_sub(2);
-                        let should_branch = rng.gen::<f64>() < cfg.tree_branch_chance;
+                        let branch_chance = if dominant_biome == BiomeType::Plains { cfg.plains_tree_branch_chance } else { cfg.tree_branch_chance };
+                        let should_branch = rng.gen::<f64>() < branch_chance;
                         if should_branch && trunk_height >= cfg.branch_min_trunk_height {
                             let num_branches = rng.gen_range(cfg.branch_count_min..=cfg.branch_count_max);
                             for _ in 0..num_branches {
@@ -855,26 +856,49 @@ impl Chunk {
                             }
                         }
 
-                        // Leaves - scale with trunk height
-                        let leaf_radius = if trunk_height >= cfg.tree_height_large_threshold { cfg.leaf_radius_large } else if trunk_height >= cfg.tree_height_medium_threshold { cfg.leaf_radius_medium } else { cfg.leaf_radius_small };
+                        // Leaves - biome-dependent shape
                         let leaf_start_y = height + trunk_height - 1;
-                        let leaf_height = if trunk_height >= cfg.tree_height_large_threshold { cfg.leaf_height_large } else if trunk_height >= cfg.tree_height_medium_threshold { cfg.leaf_height_medium } else { cfg.leaf_height_small };
+                        if dominant_biome == BiomeType::Plains {
+                            // Flat, spreading canopy: each layer up shrinks radius by 1
+                            let p_radius = cfg.plains_leaf_radius;
+                            let p_height = cfg.plains_leaf_height;
+                            for lx in x.saturating_sub(p_radius)..=(x + p_radius).min(CHUNK_SIZE - 1) {
+                                for lz in z.saturating_sub(p_radius)..=(z + p_radius).min(CHUNK_SIZE - 1) {
+                                    let dx = (lx as i32 - x as i32).abs();
+                                    let dz = (lz as i32 - z as i32).abs();
+                                    for dy in 0..p_height {
+                                        let ly = leaf_start_y + dy;
+                                        if ly < CHUNK_HEIGHT {
+                                            let effective_r = p_radius.saturating_sub(dy) as i32;
+                                            let is_corner = dx == effective_r && dz == effective_r;
+                                            if dx <= effective_r && dz <= effective_r && !is_corner && self.blocks[lx][ly][lz] == BlockType::Air {
+                                                self.blocks[lx][ly][lz] = BlockType::Leaves;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            // Standard canopy - scale with trunk height
+                            let leaf_radius = if trunk_height >= cfg.tree_height_large_threshold { cfg.leaf_radius_large } else if trunk_height >= cfg.tree_height_medium_threshold { cfg.leaf_radius_medium } else { cfg.leaf_radius_small };
+                            let leaf_height = if trunk_height >= cfg.tree_height_large_threshold { cfg.leaf_height_large } else if trunk_height >= cfg.tree_height_medium_threshold { cfg.leaf_height_medium } else { cfg.leaf_height_small };
 
-                        for lx in x.saturating_sub(leaf_radius)..=(x + leaf_radius).min(CHUNK_SIZE - 1) {
-                            for lz in z.saturating_sub(leaf_radius)..=(z + leaf_radius).min(CHUNK_SIZE - 1) {
-                                for ly in leaf_start_y..leaf_start_y + leaf_height {
-                                    if ly < CHUNK_HEIGHT {
-                                        let dx = (lx as i32 - x as i32).abs();
-                                        let dz = (lz as i32 - z as i32).abs();
-                                        let dy = ly - leaf_start_y;
+                            for lx in x.saturating_sub(leaf_radius)..=(x + leaf_radius).min(CHUNK_SIZE - 1) {
+                                for lz in z.saturating_sub(leaf_radius)..=(z + leaf_radius).min(CHUNK_SIZE - 1) {
+                                    for ly in leaf_start_y..leaf_start_y + leaf_height {
+                                        if ly < CHUNK_HEIGHT {
+                                            let dx = (lx as i32 - x as i32).abs();
+                                            let dz = (lz as i32 - z as i32).abs();
+                                            let dy = ly - leaf_start_y;
 
-                                        let is_corner = dx == leaf_radius as i32 && dz == leaf_radius as i32;
-                                        let skip_corner = is_corner && (dy == 0 || dy >= leaf_height - 1);
-                                        let at_top = dy >= leaf_height - 1;
-                                        let too_far_at_top = at_top && (dx > 1 || dz > 1);
+                                            let is_corner = dx == leaf_radius as i32 && dz == leaf_radius as i32;
+                                            let skip_corner = is_corner && (dy == 0 || dy >= leaf_height - 1);
+                                            let at_top = dy >= leaf_height - 1;
+                                            let too_far_at_top = at_top && (dx > 1 || dz > 1);
 
-                                        if !skip_corner && !too_far_at_top && self.blocks[lx][ly][lz] == BlockType::Air {
-                                            self.blocks[lx][ly][lz] = BlockType::Leaves;
+                                            if !skip_corner && !too_far_at_top && self.blocks[lx][ly][lz] == BlockType::Air {
+                                                self.blocks[lx][ly][lz] = BlockType::Leaves;
+                                            }
                                         }
                                     }
                                 }

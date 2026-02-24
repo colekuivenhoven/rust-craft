@@ -2,7 +2,7 @@
 #? - These settings control the generation of the world and its features at runtime.
 
 #* ── World Settings ──────────────────────────────────────────────────────────────────
-master_seed = 52994325                # World generation seed
+master_seed = 152994325               # World generation seed
 
 #* ── Terrain Settings ────────────────────────────────────────────────────────────────
 sea_level = 32                        # Y-level of the ocean surface
@@ -118,6 +118,9 @@ branch_min_trunk_height = 5
 branch_count_min = 1
 branch_count_max = 3
 tree_border_buffer = 2
+plains_tree_branch_chance = 0.99    # Higher branching for Plains trees
+plains_leaf_radius = 4              # Wide flat canopy radius
+plains_leaf_height = 3              # Compressed vertical layers (almost flat)
 
 # Oasis Settings
 oasis_scale = 0.006

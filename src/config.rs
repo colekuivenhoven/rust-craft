@@ -121,6 +121,9 @@ pub struct TerrainConfig {
     pub branch_count_min: usize,
     pub branch_count_max: usize,
     pub tree_border_buffer: usize,
+    pub plains_tree_branch_chance: f64,  // Branch chance for Plains trees (higher = more branchy)
+    pub plains_leaf_radius: usize,       // Leaf radius for the flat Plains canopy
+    pub plains_leaf_height: usize,       // Vertical layers for the flat Plains canopy
 
     // ── Oasis ─────────────────────────────────────────────────────────────────
     pub oasis_scale: f64,
@@ -297,6 +300,9 @@ impl Default for TerrainConfig {
             branch_count_min: 1,
             branch_count_max: 3,
             tree_border_buffer: 2,
+            plains_tree_branch_chance: 0.9,
+            plains_leaf_radius: 4,
+            plains_leaf_height: 2,
 
             oasis_scale: 0.006,
             oasis_threshold: 0.90,
