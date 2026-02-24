@@ -85,7 +85,8 @@ impl BiomeWeights {
 pub struct Chunk {
     pub blocks: Box<[[[BlockType; CHUNK_SIZE]; CHUNK_HEIGHT]; CHUNK_SIZE]>,
     pub light_levels: Box<[[[u8; CHUNK_SIZE]; CHUNK_HEIGHT]; CHUNK_SIZE]>,
-    pub biome_map: Vec<Vec<BiomeType>>,    // [x][z] dominant biome per column, for mesh coloring
+    pub biome_map: Vec<Vec<BiomeType>>,         // [x][z] dominant biome per column, for mesh coloring
+    pub plains_weight_map: Vec<Vec<f32>>,       // [x][z] continuous plains weight for smooth color blending
     pub position: (i32, i32),
     pub master_seed: u32,
     pub vertices: Vec<Vertex>,
@@ -177,6 +178,7 @@ impl Chunk {
             blocks,
             light_levels,
             biome_map: vec![vec![BiomeType::Forest; CHUNK_SIZE]; CHUNK_SIZE],
+            plains_weight_map: vec![vec![0.0f32; CHUNK_SIZE]; CHUNK_SIZE],
             position: (chunk_x, chunk_z),
             master_seed,
             vertices: Vec::new(),
@@ -205,6 +207,7 @@ impl Chunk {
             blocks,
             light_levels,
             biome_map: vec![vec![BiomeType::Forest; CHUNK_SIZE]; CHUNK_SIZE],
+            plains_weight_map: vec![vec![0.0f32; CHUNK_SIZE]; CHUNK_SIZE],
             position: (chunk_x, chunk_z),
             master_seed: 0, // Not used for saved chunks (blocks already generated)
             vertices: Vec::new(),
@@ -394,6 +397,7 @@ impl Chunk {
                 biome_weights.normalize();
                 column_biomes[x][z] = biome_weights;
                 self.biome_map[x][z] = biome_weights.dominant();
+                self.plains_weight_map[x][z] = biome_weights.plains as f32;
 
                 let dominant_biome = biome_weights.dominant();
 
@@ -1359,12 +1363,9 @@ impl Chunk {
                         let wz = (world_offset_z + z as i32) as f64;
                         let noise_val = leaf_color_noise.get([wx * 0.02, wy * 0.02, wz * 0.02]);
                         let t_raw = (noise_val as f32 * 0.5 + 0.5).clamp(0.0, 1.0);
-                        // Plains: bias t into the upper (orange) half of the existing range
-                        let t = if chunk.biome_map[x][z] == BiomeType::Plains {
-                            0.5 + t_raw * 0.5
-                        } else {
-                            t_raw
-                        };
+                        // Plains: smoothly bias t into the upper (orange) half based on plains weight
+                        let plains_w = chunk.plains_weight_map[x][z];
+                        let t = t_raw + plains_w * 0.5 * (1.0 - t_raw);
                         let tint = [
                             0.3 + t * (1.0 - 0.3),
                             0.95 + t * (0.65 - 0.95),
@@ -1560,12 +1561,9 @@ impl Chunk {
                                     let wz = (world_offset_z + z as i32) as f64;
                                     let noise_val = leaf_color_noise.get([wx * 0.02, wy * 0.02, wz * 0.02]);
                                     let t_raw = (noise_val as f32 * 0.5 + 0.5).clamp(0.0, 1.0);
-                                    // Plains: bias t into the upper (orange) half of the existing range
-                                    if chunk.biome_map[x][z] == BiomeType::Plains {
-                                        0.5 + t_raw * 0.5
-                                    } else {
-                                        t_raw
-                                    }
+                                    // Plains: smoothly bias t into the upper (orange) half based on plains weight
+                                    let plains_w = chunk.plains_weight_map[x][z];
+                                    t_raw + plains_w * 0.5 * (1.0 - t_raw)
                                 } else {
                                     0.0
                                 };
