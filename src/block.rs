@@ -1,5 +1,5 @@
 use cgmath::Vector3;
-use crate::texture::{FaceTextures, TEX_DIRT, TEX_SAND, TEX_ICE, TEX_STONE, TEX_WOOD_TOP, TEX_WOOD_SIDE, TEX_LEAVES, TEX_GRAINS, TEX_NONE};
+use crate::texture::{FaceTextures, TEX_DIRT, TEX_SAND, TEX_ICE, TEX_STONE, TEX_WOOD_TOP, TEX_WOOD_SIDE, TEX_LEAVES, TEX_GRAINS, TEX_GRAINS_TALL, TEX_NONE};
 
 // ============================================================================
 // Cross Model Constants (grass tufts, foliage)
@@ -23,12 +23,13 @@ pub enum BlockType {
     Ice,
     Snow,
     GrassTuft,
+    GrassTuftTall,
     Boundary, // Virtual block type for unloaded chunk boundaries.
 }
 
 impl BlockType {
     pub fn is_solid(&self) -> bool {
-        !matches!(self, BlockType::Air | BlockType::Water | BlockType::GrassTuft | BlockType::Boundary)
+        !matches!(self, BlockType::Air | BlockType::Water | BlockType::GrassTuft | BlockType::GrassTuftTall | BlockType::Boundary)
     }
 
     pub fn is_water(&self) -> bool {
@@ -36,7 +37,7 @@ impl BlockType {
     }
 
     pub fn is_transparent(&self) -> bool {
-        matches!(self, BlockType::Air | BlockType::Water | BlockType::Leaves | BlockType::GrassTuft | BlockType::Boundary)
+        matches!(self, BlockType::Air | BlockType::Water | BlockType::Leaves | BlockType::GrassTuft | BlockType::GrassTuftTall | BlockType::Boundary)
     }
 
     /// Returns true if this block is semi-transparent (rendered with alpha blending after opaque blocks).
@@ -46,7 +47,7 @@ impl BlockType {
     }
 
     pub fn no_shadow_casting(&self) -> bool {
-        matches!(self, BlockType::Air | BlockType::GrassTuft)
+        matches!(self, BlockType::Air | BlockType::GrassTuft | BlockType::GrassTuftTall)
     }
 
     /// Returns the alpha value for this block (1.0 = fully opaque, 0.0 = fully transparent)
@@ -78,6 +79,7 @@ impl BlockType {
             BlockType::Ice => [0.6, 0.8, 0.95],  // Light blue tint
             BlockType::Snow => [0.95, 0.95, 0.98],  // Nearly white
             BlockType::GrassTuft => [0.3, 0.8, 0.2], // Green (tinted by noise at mesh time)
+            BlockType::GrassTuftTall => [0.75, 0.50, 0.1], // Fall orange (tinted by noise at mesh time)
             BlockType::Boundary => [0.0, 0.0, 0.0], // Never rendered
         }
     }
@@ -97,6 +99,7 @@ impl BlockType {
             BlockType::Ice => "Ice",
             BlockType::Snow => "Snow",
             BlockType::GrassTuft => "Grass Tuft",
+            BlockType::GrassTuftTall => "Tall Grass Tuft",
             BlockType::Boundary => "Boundary",
         }
     }
@@ -116,6 +119,7 @@ impl BlockType {
             BlockType::Ice => 11,
             BlockType::Snow => 12,
             BlockType::GrassTuft => 14,
+            BlockType::GrassTuftTall => 16,
             BlockType::Boundary => 15,
         }
     }
@@ -136,6 +140,7 @@ impl BlockType {
             11 => BlockType::Ice,
             12 => BlockType::Snow,
             14 => BlockType::GrassTuft,
+            16 => BlockType::GrassTuftTall,
             15 => BlockType::Boundary,
             _ => BlockType::Air,
         }
@@ -146,6 +151,7 @@ impl BlockType {
         match self {
             BlockType::GlowStone => 15,
             BlockType::GrassTuft => 0,
+            BlockType::GrassTuftTall => 0,
             BlockType::Boundary => 0, // Virtual block, no light
             _ => 0,
         }
@@ -180,6 +186,9 @@ impl BlockType {
             // Grass tuft (cross model uses grains texture)
             BlockType::GrassTuft => FaceTextures::all(TEX_GRAINS),
 
+            // Tall grass tuft (cross model uses grains_tall texture)
+            BlockType::GrassTuftTall => FaceTextures::all(TEX_GRAINS_TALL),
+
             // All other blocks use color fallback
             _ => FaceTextures::all(TEX_NONE),
         }
@@ -201,6 +210,7 @@ impl BlockType {
             BlockType::Ice => 0.5,
             BlockType::Snow => 0.2,
             BlockType::GrassTuft => 0.1,
+            BlockType::GrassTuftTall => 0.1,
             BlockType::Boundary => 0.0,
         }
     }
@@ -208,7 +218,7 @@ impl BlockType {
     /// Returns true if this block can be broken
     /// Returns true if this block uses a cross model (two intersecting quads) instead of a cube.
     pub fn is_cross_model(&self) -> bool {
-        matches!(self, BlockType::GrassTuft)
+        matches!(self, BlockType::GrassTuft | BlockType::GrassTuftTall)
     }
 
     pub fn is_breakable(&self) -> bool {

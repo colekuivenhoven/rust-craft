@@ -1,10 +1,10 @@
-# Configuration
-# This file is automatically loaded at startup
+#? Configuration
+#? - These settings control the generation of the world and its features at runtime.
 
-# World Settings
+#* ── World Settings ──────────────────────────────────────────────────────────────────
 master_seed = 52994325                # World generation seed
 
-# Terrain Settings
+#* ── Terrain Settings ────────────────────────────────────────────────────────────────
 sea_level = 32                        # Y-level of the ocean surface
 terrain_base_scale = 0.006            # Primary terrain shape (smaller = larger landmasses)
 terrain_detail_scale = 0.06           # Fine terrain detail frequency
@@ -36,6 +36,9 @@ mountain_threshold_low = 0.55
 mountain_threshold_high = 0.75
 vein_scale = 0.075                     # Scale of vein-like transition areas between biomes (larger = smaller vein size)
 
+plains_humidity_threshold_high = 0.50  # Above this humidity = Forest; below = Plains territory
+plains_humidity_threshold_low = 0.15   # Below this = fully Plains (smoothstep range)
+
 ocean_height_base = 12.0
 ocean_height_variation = 15.0
 desert_height_base = 40.0
@@ -45,6 +48,8 @@ desert_pull_threshold = 0.2
 desert_pull_strength = 0.6
 forest_height_base = 36.0
 forest_height_variation = 8.0
+plains_height_base = 36.0             # Base elevation for Plains (same as forest)
+plains_height_variation = 3.5         # Height variation — smaller than forest for flatter terrain
 arctic_height_base = 35.0
 arctic_height_variation = 10.0
 mountain_height_base = 42.0
@@ -61,21 +66,23 @@ surface_transition_scale = 0.03
 grass_patch_base_threshold = 0.35
 grass_patch_height_factor = 0.06
 grass_patch_max_height = 12.0
-arctic_ice_threshold = 0.25
-arctic_full_ice_threshold = 0.55
+arctic_ice_threshold = 0.25           # Lower = more frequent ice on ground
+arctic_full_ice_threshold = 0.55      # Lower = more frequent full ice on ground
 
+# Ocean Island Settings
 ocean_island_scale = 0.01
 ocean_island_threshold = 0.4
 ocean_island_strength_max = 0.85
 ocean_island_max_bump = 14.0
 ocean_island_grass_start = 1
 
+# Tree Settings
 tree_min_height = 4
 tree_max_height = 12
-tree_branch_chance = 0.6              # Chance for a tree to grow branches
+tree_branch_chance = 0.6               # Chance for a tree to grow branches
 tree_tall_chance = 0.3
 tree_noise_scale = 0.02
-tree_seed_hash_1 = 73856093           # Deterministic tree placement hash
+tree_seed_hash_1 = 73856093            # Deterministic tree placement hash
 tree_seed_hash_2 = 19349663
 tree_threshold_forest_base = 0.3
 tree_threshold_forest_edge_add = 0.5
@@ -83,6 +90,8 @@ tree_threshold_mountain = 0.6
 tree_threshold_desert = 0.95
 tree_threshold_ocean = 0.7
 tree_threshold_arctic = 0.95
+tree_threshold_plains = 0.70           # High threshold = sparse trees in Plains
+tree_spacing_plains = 8                # Wide spacing between Plains trees
 tree_spacing_forest_dense = 4
 tree_spacing_default = 5
 tree_spacing_forest_weight_threshold = 0.5
@@ -110,6 +119,7 @@ branch_count_min = 1
 branch_count_max = 3
 tree_border_buffer = 2
 
+# Oasis Settings
 oasis_scale = 0.006
 oasis_threshold = 0.90
 oasis_strength_max = 0.97
@@ -123,21 +133,39 @@ oasis_tree_spacing = 2
 oasis_tree_leaf_radius = 2
 oasis_tree_leaf_max_dist = 3
 
+# River Settings
+river_cell_size = 1000.0                   # Size of Voronoi cells (larger = fewer, more spaced-out rivers)
+river_width = 75.0                         # Half-width of river channel in blocks (larger = wider rivers)
+river_bank_width = 3.0                     # Additional width of sand bank border around river
+river_sand_depth = 4                       # How many blocks deep river sand goes below surface
+river_depth_avg = 6                        # Average river water depth in blocks
+river_depth_variation = 2.0                # River depth varies ±this many blocks around the average
+river_bank_y_range = 9                     # Max Y blocks above the riverbed that sand banks can appear (sand blocks above surface roughly equals: river_bank_y_range - river_depth_avg +/- river_depth_variation)
+river_winding_scale = 0.01                 # Scale of domain warp noise (smaller = broader winding curves)
+river_winding_amplitude = 35.0             # Amplitude of domain warp in blocks (larger = more winding)
+
+# Glacier Settings
+# - Disable glaciers by setting glacier_threshold and glacier_ice_gap_threshold to 1.00
 glacier_scale = 0.015
-glacier_threshold = 0.50                   # Lower = more frequent glaciers
+glacier_threshold = 1.00                   # Lower = more frequent glaciers (disabled temporarily)
 glacier_max_height = 16.0
 glacier_ice_gap_scale = 0.05
-glacier_ice_gap_threshold = 0.15
+glacier_ice_gap_threshold = 1.00           # Lower = more frequent ice gaps (disabled temporarily)
 glacier_taper_scale = 0.08
 
+# Grass Tuft Settings
 grass_tuft_noise_scale = 0.15              # Noise scale for tuft placement clustering
 grass_tuft_threshold = -0.1                # Lower = more widespread
+grass_tuft_tall_threshold = 0.65           # Tall tufts globally (sparse)
+grass_tuft_tall_plains_threshold = 0.05    # Tall tufts in Plains (frequent)
 
+# Glowstone Settings
 glowstone_min_y = 5
 glowstone_max_y = 25
 glowstone_scale = 0.05
 glowstone_threshold = 0.85
 
+# Sky Island Settings
 sky_island_base_y = 65                     # Base Y-coordinate for sky island centers
 sky_island_height_range = 20
 sky_island_min_biome_weight = 0.5
@@ -157,14 +185,14 @@ sky_island_center_bonus = 8.0              # Stalactite length bonus the closer 
 depth_near_surface = 3                     # Blocks deep for dirt/sand layer
 depth_transition = 6                       # Blocks deep before full stone layer
 
-# Fog Settings
+#* ── Fog Settings ────────────────────────────────────────────────────────────────
 enabled = true                             # Enable/disable fog
 start = 200.0                              # Distance where fog begins
 end = 300.0                                # Distance where fog becomes fully opaque
 use_square_fog = false                     # true = square fog (Chebyshev distance), false = circular fog (Euclidean distance)
 
-# Cloud Settings
-height = 125.0                             # Y-coordinate where clouds generate
+#* ── Cloud Settings ──────────────────────────────────────────────────────────────
+height = 155.0                             # Y-coordinate where clouds generate
 pixel_size = 8.0                           # Size of each cloud pixel (larger = more pixelated)
 threshold = 0.65                           # Noise threshold for cloud presence (0.0-1.0, higher = fewer clouds)
 noise_scale = 0.005                        # Scale of noise pattern (lower = larger cloud formations)

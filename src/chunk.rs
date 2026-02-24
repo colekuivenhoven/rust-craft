@@ -17,6 +17,7 @@ pub enum BiomeType {
     Mountains,
     Arctic,
     Ocean,
+    Plains,
 }
 
 // Biome weights for smooth blending between biomes
@@ -27,6 +28,7 @@ pub struct BiomeWeights {
     pub mountains: f64,
     pub arctic: f64,
     pub ocean: f64,
+    pub plains: f64,
 }
 
 impl BiomeWeights {
@@ -37,17 +39,19 @@ impl BiomeWeights {
             mountains: 0.0,
             arctic: 0.0,
             ocean: 0.0,
+            plains: 0.0,
         }
     }
 
     pub fn normalize(&mut self) {
-        let total = self.desert + self.forest + self.mountains + self.arctic + self.ocean;
+        let total = self.desert + self.forest + self.mountains + self.arctic + self.ocean + self.plains;
         if total > 0.0 {
             self.desert /= total;
             self.forest /= total;
             self.mountains /= total;
             self.arctic /= total;
             self.ocean /= total;
+            self.plains /= total;
         }
     }
 
@@ -68,7 +72,11 @@ impl BiomeWeights {
             dominant = BiomeType::Arctic;
         }
         if self.ocean > max_weight {
+            max_weight = self.ocean;
             dominant = BiomeType::Ocean;
+        }
+        if self.plains > max_weight {
+            dominant = BiomeType::Plains;
         }
         dominant
     }
@@ -77,6 +85,7 @@ impl BiomeWeights {
 pub struct Chunk {
     pub blocks: Box<[[[BlockType; CHUNK_SIZE]; CHUNK_HEIGHT]; CHUNK_SIZE]>,
     pub light_levels: Box<[[[u8; CHUNK_SIZE]; CHUNK_HEIGHT]; CHUNK_SIZE]>,
+    pub biome_map: Vec<Vec<BiomeType>>,    // [x][z] dominant biome per column, for mesh coloring
     pub position: (i32, i32),
     pub master_seed: u32,
     pub vertices: Vec<Vertex>,
@@ -167,6 +176,7 @@ impl Chunk {
         let mut chunk = Self {
             blocks,
             light_levels,
+            biome_map: vec![vec![BiomeType::Forest; CHUNK_SIZE]; CHUNK_SIZE],
             position: (chunk_x, chunk_z),
             master_seed,
             vertices: Vec::new(),
@@ -194,6 +204,7 @@ impl Chunk {
         Self {
             blocks,
             light_levels,
+            biome_map: vec![vec![BiomeType::Forest; CHUNK_SIZE]; CHUNK_SIZE],
             position: (chunk_x, chunk_z),
             master_seed: 0, // Not used for saved chunks (blocks already generated)
             vertices: Vec::new(),
@@ -230,6 +241,10 @@ impl Chunk {
         let seed_vein              = master_seed.wrapping_add(558);
         let seed_vein_detail       = master_seed.wrapping_add(559);
         let seed_grass_tuft        = master_seed.wrapping_add(800);
+        let seed_river             = master_seed.wrapping_add(900);
+        let seed_river_warp1       = master_seed.wrapping_add(901);
+        let seed_river_warp2       = master_seed.wrapping_add(902);
+        let seed_river_depth       = master_seed.wrapping_add(903);
 
         // === Noise generators ===
         let perlin = Perlin::new(seed_base_terrain);
@@ -258,6 +273,12 @@ impl Chunk {
         // Ocean island noise
         let island_perlin = Perlin::new(seed_ocean_island);
 
+        // River domain warp noise (makes rivers wind naturally)
+        let river_warp1 = Perlin::new(seed_river_warp1);
+        let river_warp2 = Perlin::new(seed_river_warp2);
+        // River depth variation noise (gives rivers varying water depth along their length)
+        let river_depth_perlin = Perlin::new(seed_river_depth);
+
         let world_offset_x = self.position.0 * CHUNK_SIZE as i32;
         let world_offset_z = self.position.1 * CHUNK_SIZE as i32;
         let sea_level: isize = cfg.sea_level as isize;
@@ -285,6 +306,43 @@ impl Chunk {
             for z in 0..CHUNK_SIZE {
                 let world_x = (world_offset_x + x as i32) as f64;
                 let world_z = (world_offset_z + z as i32) as f64;
+
+                // === River: Voronoi F2-F1 edge distance with domain warping ===
+                // Domain warp offsets make rivers wind organically instead of following straight edges
+                let river_edge_dist = {
+                    let wx = world_x + river_warp1.get([world_x * cfg.river_winding_scale, world_z * cfg.river_winding_scale]) * cfg.river_winding_amplitude;
+                    let wz = world_z + river_warp2.get([world_x * cfg.river_winding_scale + 100.0, world_z * cfg.river_winding_scale + 100.0]) * cfg.river_winding_amplitude;
+                    let cell_size = cfg.river_cell_size;
+                    let cell_x = (wx / cell_size).floor() as i32;
+                    let cell_z = (wz / cell_size).floor() as i32;
+                    let mut f1 = f64::MAX;
+                    let mut f2 = f64::MAX;
+                    for dx in -2i32..=2 {
+                        for dz in -2i32..=2 {
+                            let nx = cell_x + dx;
+                            let nz = cell_z + dz;
+                            // Hash two integers + seed into a stable pseudo-random value
+                            let h: u64 = {
+                                let mut v = (seed_river as u64)
+                                    .wrapping_add((nx as i64 as u64).wrapping_mul(73856093))
+                                    .wrapping_add((nz as i64 as u64).wrapping_mul(19349663));
+                                v ^= v >> 33;
+                                v = v.wrapping_mul(0xff51afd7ed558ccd);
+                                v ^= v >> 33;
+                                v
+                            };
+                            // Random offset within the Voronoi cell
+                            let ox = (h & 0xFFFF) as f64 / 65536.0 * cell_size;
+                            let oz = ((h >> 16) & 0xFFFF) as f64 / 65536.0 * cell_size;
+                            let px = nx as f64 * cell_size + ox;
+                            let pz = nz as f64 * cell_size + oz;
+                            let d = ((wx - px).powi(2) + (wz - pz).powi(2)).sqrt();
+                            if d < f1 { f2 = f1; f1 = d; } else if d < f2 { f2 = d; }
+                        }
+                    }
+                    // F2-F1: 0 at Voronoi cell edges (river center), grows with distance from edge
+                    (f2 - f1).max(0.0)
+                };
 
                 // === Sample biome parameters ===
                 let raw_temperature = (temperature_perlin.get([world_x * cfg.biome_scale, world_z * cfg.biome_scale]) + 1.0) * 0.5;
@@ -324,15 +382,28 @@ impl Chunk {
                     let remaining = land_factor * (1.0 - biome_weights.arctic) * (1.0 - biome_weights.desert * 0.8);
                     biome_weights.mountains = mountain_factor * remaining;
 
-                    // Forest: everything else on land
+                    // Split remaining land between Forest and Plains based on humidity.
+                    // Plains occupy lower-humidity land that isn't arctic, desert, or mountainous.
                     let used = biome_weights.arctic + biome_weights.desert + biome_weights.mountains;
-                    biome_weights.forest = (land_factor - used).max(0.0);
+                    let forest_plains_total = (land_factor - used).max(0.0);
+                    let plains_humidity_factor = smootherstep(cfg.plains_humidity_threshold_high, cfg.plains_humidity_threshold_low, raw_humidity);
+                    biome_weights.plains = plains_humidity_factor * forest_plains_total;
+                    biome_weights.forest = forest_plains_total - biome_weights.plains;
                 }
 
                 biome_weights.normalize();
                 column_biomes[x][z] = biome_weights;
+                self.biome_map[x][z] = biome_weights.dominant();
 
                 let dominant_biome = biome_weights.dominant();
+
+                // === River factors ===
+                // Suppress rivers in ocean and desert — rivers are land features
+                let no_river_zone = (biome_weights.ocean + biome_weights.desert).min(1.0);
+                // river_factor: 1 at Voronoi cell edge (river center), 0 beyond river_width
+                let river_factor = (1.0 - smootherstep(0.0, cfg.river_width, river_edge_dist)) * (1.0 - no_river_zone);
+                // bank_factor: extends river_bank_width beyond the channel, for sand banks
+                let bank_factor = (1.0 - smootherstep(cfg.river_width, cfg.river_width + cfg.river_bank_width, river_edge_dist)) * (1.0 - no_river_zone);
 
                 // === Vein noise for organic biome transitions ===
                 // This creates connected, branching patterns instead of polka dots
@@ -375,6 +446,9 @@ impl Chunk {
                 // Forest: gentle rolling hills
                 let forest_height = cfg.forest_height_base + base_n * cfg.forest_height_variation + detail;
 
+                // Plains: slightly flatter than forest, similar elevation
+                let plains_height = cfg.plains_height_base + base_n * cfg.plains_height_variation + detail * 0.2;
+
                 // Arctic: varied terrain
                 let arctic_height = cfg.arctic_height_base + base_n * cfg.arctic_height_variation + detail;
 
@@ -388,6 +462,7 @@ impl Chunk {
                     biome_weights.ocean * ocean_height +
                     biome_weights.desert * desert_height +
                     biome_weights.forest * forest_height +
+                    biome_weights.plains * plains_height +
                     biome_weights.mountains * mountain_height +
                     biome_weights.arctic * arctic_height;
 
@@ -421,6 +496,22 @@ impl Chunk {
                     blended_height
                 };
 
+                // === River carving: smoothly lower terrain to sea level at river channels ===
+                // Depth varies along the river for a natural feel; deeper = lower riverbed
+                let depth_noise_val = river_depth_perlin.get([world_x * 0.02, world_z * 0.02]);
+                let river_depth = (cfg.river_depth_avg as f64 + depth_noise_val * cfg.river_depth_variation)
+                    .max(1.0)
+                    .round() as usize;
+                // Carve target: surface block sits here; water fills from (target+1) up to sea_level-1
+                let river_carve_target = cfg.sea_level as f64 - 1.0 - river_depth as f64;
+                // Sand banks limited to within river_bank_y_range blocks above the riverbed
+                let river_bank_max_height = (river_carve_target.round() as usize).saturating_add(cfg.river_bank_y_range);
+                let height_f = if river_factor > 0.0 && height_f > river_carve_target {
+                    height_f * (1.0 - river_factor) + river_carve_target * river_factor
+                } else {
+                    height_f
+                };
+
                 let height = (height_f.round() as isize).clamp(1, CHUNK_HEIGHT as isize - 1) as usize;
 
                 // === Surface block noise for variations ===
@@ -445,22 +536,22 @@ impl Chunk {
                         // Check for transition zones between biomes
                         // Use vein_value to create connected patterns, not random dots
 
-                        // Forest-Desert transition: dirt veins extending into desert
-                        if biome_weights.desert > 0.15 && biome_weights.forest > 0.15 {
-                            // In the transition zone
-                            let desert_dominance = biome_weights.desert / (biome_weights.desert + biome_weights.forest);
-                            // Vein threshold shifts based on dominance
-                            // More desert = need higher vein value to get grass
+                        // Forest/Plains combined weight for vein transitions
+                        let forest_or_plains = biome_weights.forest + biome_weights.plains;
+
+                        // (Forest|Plains)-Desert transition: dirt veins extending into desert
+                        if biome_weights.desert > 0.15 && forest_or_plains > 0.15 {
+                            let desert_dominance = biome_weights.desert / (biome_weights.desert + forest_or_plains);
                             let grass_threshold = 0.3 + desert_dominance * 0.5;
                             if vein_value > grass_threshold {
-                                BlockType::Dirt // Grass veins into desert
+                                BlockType::Dirt
                             } else {
                                 BlockType::Sand
                             }
                         }
-                        // Forest-Mountain transition
-                        else if biome_weights.mountains > 0.15 && biome_weights.forest > 0.15 {
-                            let mountain_dominance = biome_weights.mountains / (biome_weights.mountains + biome_weights.forest);
+                        // (Forest|Plains)-Mountain transition
+                        else if biome_weights.mountains > 0.15 && forest_or_plains > 0.15 {
+                            let mountain_dominance = biome_weights.mountains / (biome_weights.mountains + forest_or_plains);
                             if y_i > snow_threshold {
                                 BlockType::Snow
                             } else if y_i > stone_threshold {
@@ -470,9 +561,9 @@ impl Chunk {
                                 BlockType::Dirt
                             }
                         }
-                        // Forest-Arctic transition
-                        else if biome_weights.arctic > 0.15 && biome_weights.forest > 0.15 {
-                            let arctic_dominance = biome_weights.arctic / (biome_weights.arctic + biome_weights.forest);
+                        // (Forest|Plains)-Arctic transition
+                        else if biome_weights.arctic > 0.15 && forest_or_plains > 0.15 {
+                            let arctic_dominance = biome_weights.arctic / (biome_weights.arctic + forest_or_plains);
                             let snow_threshold_here = 0.3 + arctic_dominance * 0.5;
                             if vein_value < snow_threshold_here { BlockType::Snow } else { BlockType::Dirt }
                         }
@@ -481,6 +572,7 @@ impl Chunk {
                             match dominant_biome {
                                 BiomeType::Desert => BlockType::Sand,
                                 BiomeType::Forest => BlockType::Dirt,
+                                BiomeType::Plains => BlockType::Dirt,
                                 BiomeType::Ocean => {
                                     if height > sea + cfg.ocean_island_grass_start { BlockType::Dirt } else { BlockType::Sand }
                                 },
@@ -514,14 +606,16 @@ impl Chunk {
                         BlockType::Sand
                     } else if depth_from_surface <= cfg.depth_near_surface {
                         // Near-surface with vein transitions
-                        if biome_weights.desert > 0.15 && biome_weights.forest > 0.15 {
-                            let desert_dominance = biome_weights.desert / (biome_weights.desert + biome_weights.forest);
+                        let forest_or_plains = biome_weights.forest + biome_weights.plains;
+                        if biome_weights.desert > 0.15 && forest_or_plains > 0.15 {
+                            let desert_dominance = biome_weights.desert / (biome_weights.desert + forest_or_plains);
                             let dirt_threshold = 0.3 + desert_dominance * 0.5;
                             if vein_value > dirt_threshold { BlockType::Dirt } else { BlockType::Sand }
                         } else {
                             match dominant_biome {
                                 BiomeType::Desert => BlockType::Sand,
                                 BiomeType::Forest => BlockType::Dirt,
+                                BiomeType::Plains => BlockType::Dirt,
                                 BiomeType::Ocean => BlockType::Sand,
                                 BiomeType::Mountains => {
                                     if y_i > stone_threshold - 4 { BlockType::Stone } else { BlockType::Dirt }
@@ -538,6 +632,21 @@ impl Chunk {
                         }
                     } else {
                         BlockType::Stone
+                    };
+
+                    // === River sand overrides ===
+                    // Both surface banks and subsurface layers are capped by river_bank_max_height
+                    // so sand cannot appear high up on mountain slopes above the river channel.
+                    let block = if height <= river_bank_max_height {
+                        if depth_from_surface == 0 && bank_factor > 0.0 {
+                            BlockType::Sand
+                        } else if depth_from_surface >= 1 && depth_from_surface <= cfg.river_sand_depth && river_factor > 0.0 {
+                            BlockType::Sand
+                        } else {
+                            block
+                        }
+                    } else {
+                        block
                     };
 
                     self.blocks[x][y][z] = block;
@@ -659,6 +768,7 @@ impl Chunk {
                         BiomeType::Desert => cfg.tree_threshold_desert,
                         BiomeType::Ocean => cfg.tree_threshold_ocean,
                         BiomeType::Arctic => cfg.tree_threshold_arctic,
+                        BiomeType::Plains => cfg.tree_threshold_plains,
                     };
 
                     let height_variance = dominant_biome == BiomeType::Forest && forest_weight > 0.5;
@@ -666,7 +776,13 @@ impl Chunk {
                     let tree_noise = perlin.get([world_x * cfg.tree_noise_scale, world_z * cfg.tree_noise_scale]);
                     if tree_noise > base_threshold {
                         // Minimum spacing - forests get slightly closer trees but not packed
-                        let min_spacing = if dominant_biome == BiomeType::Forest && forest_weight > cfg.tree_spacing_forest_weight_threshold { cfg.tree_spacing_forest_dense } else { cfg.tree_spacing_default };
+                        let min_spacing = if dominant_biome == BiomeType::Forest && forest_weight > cfg.tree_spacing_forest_weight_threshold {
+                        cfg.tree_spacing_forest_dense
+                    } else if dominant_biome == BiomeType::Plains {
+                        cfg.tree_spacing_plains
+                    } else {
+                        cfg.tree_spacing_default
+                    };
                         let mut too_close = false;
                         'check: for check_x in x.saturating_sub(min_spacing)..=(x + min_spacing).min(CHUNK_SIZE - 1) {
                             for check_z in z.saturating_sub(min_spacing)..=(z + min_spacing).min(CHUNK_SIZE - 1) {
@@ -1122,23 +1238,41 @@ impl Chunk {
         }
 
         // === Grass Tufts ===
-        // Spawn cross-model grass tufts on grass blocks using noise for natural clustering
+        // Spawn cross-model grass tufts on grass blocks using noise for natural clustering.
+        // Plains uses a higher threshold for regular tufts (GrassTuftTall dominates there instead).
         let tuft_noise = Perlin::new(seed_grass_tuft);
+        let tall_tuft_noise = Perlin::new(seed_grass_tuft.wrapping_add(1));
         for x in 0..CHUNK_SIZE {
             for z in 0..CHUNK_SIZE {
                 let world_x = (world_offset_x + x as i32) as f64;
                 let world_z = (world_offset_z + z as i32) as f64;
 
-                let noise_val = tuft_noise.get([world_x * cfg.grass_tuft_noise_scale, world_z * cfg.grass_tuft_noise_scale]);
-                if noise_val < cfg.grass_tuft_threshold {
-                    continue;
+                let is_plains = column_biomes[x][z].dominant() == BiomeType::Plains;
+
+                // Regular GrassTuft: sparse in Plains (tall tufts take priority there)
+                let regular_threshold = if is_plains { cfg.grass_tuft_threshold + 0.5 } else { cfg.grass_tuft_threshold };
+                let regular_noise = tuft_noise.get([world_x * cfg.grass_tuft_noise_scale, world_z * cfg.grass_tuft_noise_scale]);
+                if regular_noise >= regular_threshold {
+                    for y in (cfg.sea_level..CHUNK_HEIGHT - 1).rev() {
+                        if self.blocks[x][y][z] == BlockType::Dirt && self.blocks[x][y + 1][z] == BlockType::Air {
+                            self.blocks[x][y + 1][z] = BlockType::GrassTuft;
+                            break;
+                        }
+                    }
                 }
 
-                // Find topmost grass block in column
-                for y in (cfg.sea_level..CHUNK_HEIGHT - 1).rev() {
-                    if self.blocks[x][y][z] == BlockType::Dirt && self.blocks[x][y + 1][z] == BlockType::Air {
-                        self.blocks[x][y + 1][z] = BlockType::GrassTuft;
-                        break;
+                // GrassTuftTall: sparse globally, much more frequent in Plains.
+                // Placed after regular tufts so it can overwrite them.
+                let tall_threshold = if is_plains { cfg.grass_tuft_tall_plains_threshold } else { cfg.grass_tuft_tall_threshold };
+                let tall_noise = tall_tuft_noise.get([world_x * cfg.grass_tuft_noise_scale, world_z * cfg.grass_tuft_noise_scale]);
+                if tall_noise >= tall_threshold {
+                    for y in (cfg.sea_level..CHUNK_HEIGHT - 1).rev() {
+                        if self.blocks[x][y][z] == BlockType::Dirt &&
+                            (self.blocks[x][y + 1][z] == BlockType::Air || self.blocks[x][y + 1][z] == BlockType::GrassTuft)
+                        {
+                            self.blocks[x][y + 1][z] = BlockType::GrassTuftTall;
+                            break;
+                        }
                     }
                 }
             }
@@ -1224,7 +1358,13 @@ impl Chunk {
                         let wy = y as f64;
                         let wz = (world_offset_z + z as i32) as f64;
                         let noise_val = leaf_color_noise.get([wx * 0.02, wy * 0.02, wz * 0.02]);
-                        let t = (noise_val as f32 * 0.5 + 0.5).clamp(0.0, 1.0);
+                        let t_raw = (noise_val as f32 * 0.5 + 0.5).clamp(0.0, 1.0);
+                        // Plains: bias t into the upper (orange) half of the existing range
+                        let t = if chunk.biome_map[x][z] == BiomeType::Plains {
+                            0.5 + t_raw * 0.5
+                        } else {
+                            t_raw
+                        };
                         let tint = [
                             0.3 + t * (1.0 - 0.3),
                             0.95 + t * (0.65 - 0.95),
@@ -1419,7 +1559,13 @@ impl Chunk {
                                     let wy = y as f64;
                                     let wz = (world_offset_z + z as i32) as f64;
                                     let noise_val = leaf_color_noise.get([wx * 0.02, wy * 0.02, wz * 0.02]);
-                                    (noise_val as f32 * 0.5 + 0.5).clamp(0.0, 1.0)
+                                    let t_raw = (noise_val as f32 * 0.5 + 0.5).clamp(0.0, 1.0);
+                                    // Plains: bias t into the upper (orange) half of the existing range
+                                    if chunk.biome_map[x][z] == BiomeType::Plains {
+                                        0.5 + t_raw * 0.5
+                                    } else {
+                                        t_raw
+                                    }
                                 } else {
                                     0.0
                                 };

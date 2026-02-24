@@ -15,6 +15,7 @@ pub const TEX_WOOD_TOP: u32 = 6;
 pub const TEX_WOOD_SIDE: u32 = 7;
 pub const TEX_LEAVES: u32 = 8;
 pub const TEX_GRAINS: u32 = 9;
+pub const TEX_GRAINS_TALL: u32 = 10;
 pub const TEX_NONE: u32 = 255; // Sentinel for "use color fallback"
 
 // Breaking textures start at row 1 (index 16)
@@ -110,6 +111,7 @@ impl TextureAtlas {
         Self::load_texture_into_atlas(&mut atlas, "assets/textures/blocks/wood_side.png", TEX_WOOD_SIDE);
         Self::load_texture_into_atlas(&mut atlas, "assets/textures/blocks/leaves.png", TEX_LEAVES);
         Self::load_texture_into_atlas(&mut atlas, "assets/textures/blocks/grains.png", TEX_GRAINS);
+        Self::load_texture_into_atlas(&mut atlas, "assets/textures/blocks/grains_tall.png", TEX_GRAINS_TALL);
 
         // Load breaking textures (row 1, starting at index 16)
         for i in 0..10 {

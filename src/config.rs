@@ -36,6 +36,10 @@ pub struct TerrainConfig {
     pub mountain_threshold_high: f64,
     pub vein_scale: f64,
 
+    // ── Plains biome ──────────────────────────────────────────────────────────
+    pub plains_humidity_threshold_high: f64,
+    pub plains_humidity_threshold_low: f64,
+
     // ── Biome heights ─────────────────────────────────────────────────────────
     pub ocean_height_base: f64,
     pub ocean_height_variation: f64,
@@ -46,6 +50,8 @@ pub struct TerrainConfig {
     pub desert_pull_strength: f64,
     pub forest_height_base: f64,
     pub forest_height_variation: f64,
+    pub plains_height_base: f64,
+    pub plains_height_variation: f64,
     pub arctic_height_base: f64,
     pub arctic_height_variation: f64,
     pub mountain_height_base: f64,
@@ -87,6 +93,8 @@ pub struct TerrainConfig {
     pub tree_threshold_desert: f64,
     pub tree_threshold_ocean: f64,
     pub tree_threshold_arctic: f64,
+    pub tree_threshold_plains: f64,
+    pub tree_spacing_plains: usize,
     pub tree_spacing_forest_dense: usize,
     pub tree_spacing_default: usize,
     pub tree_spacing_forest_weight_threshold: f64,
@@ -128,6 +136,17 @@ pub struct TerrainConfig {
     pub oasis_tree_leaf_radius: usize,
     pub oasis_tree_leaf_max_dist: i32,
 
+    // ── Rivers ────────────────────────────────────────────────────────────────
+    pub river_cell_size: f64,
+    pub river_width: f64,
+    pub river_bank_width: f64,
+    pub river_sand_depth: usize,
+    pub river_depth_avg: usize,
+    pub river_depth_variation: f64,
+    pub river_bank_y_range: usize,
+    pub river_winding_scale: f64,
+    pub river_winding_amplitude: f64,
+
     // ── Glacier ───────────────────────────────────────────────────────────────
     pub glacier_scale: f64,
     pub glacier_threshold: f64,
@@ -139,6 +158,8 @@ pub struct TerrainConfig {
     // ── Grass tufts ───────────────────────────────────────────────────────────
     pub grass_tuft_noise_scale: f64,
     pub grass_tuft_threshold: f64,
+    pub grass_tuft_tall_threshold: f64,
+    pub grass_tuft_tall_plains_threshold: f64,
 
     // ── Glowstone ─────────────────────────────────────────────────────────────
     pub glowstone_min_y: usize,
@@ -196,6 +217,8 @@ impl Default for TerrainConfig {
             mountain_threshold_low: 0.55,
             mountain_threshold_high: 0.75,
             vein_scale: 0.02,
+            plains_humidity_threshold_high: 0.50,
+            plains_humidity_threshold_low: 0.15,
 
             ocean_height_base: 12.0,
             ocean_height_variation: 15.0,
@@ -206,6 +229,8 @@ impl Default for TerrainConfig {
             desert_pull_strength: 0.6,
             forest_height_base: 36.0,
             forest_height_variation: 8.0,
+            plains_height_base: 36.0,
+            plains_height_variation: 3.5,
             arctic_height_base: 35.0,
             arctic_height_variation: 10.0,
             mountain_height_base: 42.0,
@@ -244,6 +269,8 @@ impl Default for TerrainConfig {
             tree_threshold_desert: 0.95,
             tree_threshold_ocean: 0.7,
             tree_threshold_arctic: 0.95,
+            tree_threshold_plains: 0.70,
+            tree_spacing_plains: 8,
             tree_spacing_forest_dense: 4,
             tree_spacing_default: 5,
             tree_spacing_forest_weight_threshold: 0.5,
@@ -284,6 +311,16 @@ impl Default for TerrainConfig {
             oasis_tree_leaf_radius: 2,
             oasis_tree_leaf_max_dist: 3,
 
+            river_cell_size: 250.0,
+            river_width: 8.0,
+            river_bank_width: 2.0,
+            river_sand_depth: 2,
+            river_depth_avg: 3,
+            river_depth_variation: 2.0,
+            river_bank_y_range: 3,
+            river_winding_scale: 0.003,
+            river_winding_amplitude: 15.0,
+
             glacier_scale: 0.015,
             glacier_threshold: 0.50,
             glacier_max_height: 16.0,
@@ -293,6 +330,8 @@ impl Default for TerrainConfig {
 
             grass_tuft_noise_scale: 0.15,
             grass_tuft_threshold: -0.1,
+            grass_tuft_tall_threshold: 0.65,
+            grass_tuft_tall_plains_threshold: 0.05,
 
             glowstone_min_y: 5,
             glowstone_max_y: 25,
