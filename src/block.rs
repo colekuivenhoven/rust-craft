@@ -1,5 +1,5 @@
 use cgmath::Vector3;
-use crate::texture::{FaceTextures, TEX_DIRT, TEX_SAND, TEX_ICE, TEX_STONE, TEX_WOOD_TOP, TEX_WOOD_SIDE, TEX_LEAVES, TEX_GRAINS, TEX_GRAINS_TALL, TEX_NONE};
+use crate::texture::{FaceTextures, TEX_DIRT, TEX_SAND, TEX_ICE, TEX_STONE, TEX_WOOD_TOP, TEX_WOOD_SIDE, TEX_LEAVES, TEX_GRAINS, TEX_GRAINS_TALL, TEX_CRAFTING_TABLE, TEX_NONE};
 
 // ============================================================================
 // Cross Model Constants (grass tufts, foliage)
@@ -24,6 +24,7 @@ pub enum BlockType {
     Snow,
     GrassTuft,
     GrassTuftTall,
+    CraftingTable,
     Boundary, // Virtual block type for unloaded chunk boundaries.
 }
 
@@ -67,19 +68,20 @@ impl BlockType {
     pub fn get_color(&self) -> [f32; 3] {
         match self {
             BlockType::Air => [0.0, 0.0, 0.0],
-            BlockType::Dirt => [0.6, 0.4, 0.2],
-            BlockType::Stone => [0.5, 0.5, 0.5],
-            BlockType::Wood => [0.4, 0.25, 0.1],
-            BlockType::Leaves => [0.1, 0.6, 0.1],
-            BlockType::Sand => [0.9, 0.9, 0.6],
-            BlockType::Water => [0.2, 0.4, 0.8],
+            BlockType::Dirt => [1.0, 1.0, 1.0], // Uses texture
+            BlockType::Stone => [1.0, 1.0, 1.0], // Uses texture
+            BlockType::Wood => [1.0, 1.0, 1.0], // Uses texture
+            BlockType::Leaves => [1.0, 1.0, 1.0], // Uses texture
+            BlockType::Sand => [1.0, 1.0, 1.0], // Uses texture
+            BlockType::Water => [0.2, 0.4, 0.8], // Uses texture/shader
             BlockType::Cobblestone => [0.4, 0.4, 0.4],
             BlockType::Planks => [0.7, 0.5, 0.3],
             BlockType::GlowStone => [1.0, 0.9, 0.5],
-            BlockType::Ice => [0.6, 0.8, 0.95],  // Light blue tint
-            BlockType::Snow => [0.95, 0.95, 0.98],  // Nearly white
-            BlockType::GrassTuft => [0.3, 0.8, 0.2], // Green (tinted by noise at mesh time)
-            BlockType::GrassTuftTall => [0.75, 0.50, 0.1], // Fall orange (tinted by noise at mesh time)
+            BlockType::Ice => [0.6, 0.8, 0.95], // Light blue tint
+            BlockType::Snow => [0.95, 0.95, 0.98], // Nearly white
+            BlockType::GrassTuft => [1.0, 1.0, 1.0], // Uses texture
+            BlockType::GrassTuftTall => [1.0, 1.0, 1.0], // Uses texture
+            BlockType::CraftingTable => [1.0, 1.0, 1.0], // Uses texture
             BlockType::Boundary => [0.0, 0.0, 0.0], // Never rendered
         }
     }
@@ -100,6 +102,7 @@ impl BlockType {
             BlockType::Snow => "Snow",
             BlockType::GrassTuft => "Grass Tuft",
             BlockType::GrassTuftTall => "Tall Grass Tuft",
+            BlockType::CraftingTable => "Crafting Table",
             BlockType::Boundary => "Boundary",
         }
     }
@@ -120,6 +123,7 @@ impl BlockType {
             BlockType::Snow => 12,
             BlockType::GrassTuft => 14,
             BlockType::GrassTuftTall => 16,
+            BlockType::CraftingTable => 17,
             BlockType::Boundary => 15,
         }
     }
@@ -142,6 +146,7 @@ impl BlockType {
             14 => BlockType::GrassTuft,
             16 => BlockType::GrassTuftTall,
             15 => BlockType::Boundary,
+            17 => BlockType::CraftingTable,
             _ => BlockType::Air,
         }
     }
@@ -189,6 +194,9 @@ impl BlockType {
             // Tall grass tuft (cross model uses grains_tall texture)
             BlockType::GrassTuftTall => FaceTextures::all(TEX_GRAINS_TALL),
 
+            // Crafting table
+            BlockType::CraftingTable => FaceTextures::all(TEX_CRAFTING_TABLE),
+
             // All other blocks use color fallback
             _ => FaceTextures::all(TEX_NONE),
         }
@@ -211,6 +219,7 @@ impl BlockType {
             BlockType::Snow => 0.2,
             BlockType::GrassTuft => 0.1,
             BlockType::GrassTuftTall => 0.1,
+            BlockType::CraftingTable => 2.5,
             BlockType::Boundary => 0.0,
         }
     }
@@ -937,6 +946,53 @@ impl UiVertex {
                     offset: std::mem::size_of::<[f32; 2]>() as wgpu::BufferAddress,
                     shader_location: 1,
                     format: wgpu::VertexFormat::Float32x4,
+                },
+            ],
+        }
+    }
+}
+
+// Textured vertex for isometric item cube icons in the hotbar
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct ItemCubeVertex {
+    pub position:    [f32; 2],  // clip-space 2D position
+    pub uv:          [f32; 2],  // atlas UV coordinate
+    pub color:       [f32; 4],  // shade tint (textured) or pre-shaded fallback color
+    pub use_texture: f32,       // 1.0 = sample atlas, 0.0 = use color directly
+    pub _pad:        f32,       // alignment padding
+}
+
+impl ItemCubeVertex {
+    pub fn desc() -> wgpu::VertexBufferLayout<'static> {
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<ItemCubeVertex>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &[
+                wgpu::VertexAttribute {
+                    offset: 0,
+                    shader_location: 0,
+                    format: wgpu::VertexFormat::Float32x2,
+                },
+                wgpu::VertexAttribute {
+                    offset: 8,
+                    shader_location: 1,
+                    format: wgpu::VertexFormat::Float32x2,
+                },
+                wgpu::VertexAttribute {
+                    offset: 16,
+                    shader_location: 2,
+                    format: wgpu::VertexFormat::Float32x4,
+                },
+                wgpu::VertexAttribute {
+                    offset: 32,
+                    shader_location: 3,
+                    format: wgpu::VertexFormat::Float32,
+                },
+                wgpu::VertexAttribute {
+                    offset: 36,
+                    shader_location: 4,
+                    format: wgpu::VertexFormat::Float32,
                 },
             ],
         }

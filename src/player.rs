@@ -23,6 +23,7 @@ impl Player {
         inventory.add_item(BlockType::Water, 64.0);
         inventory.add_item(BlockType::Ice, 64.0);
         inventory.add_item(BlockType::Snow, 64.0);
+        inventory.add_item(BlockType::CraftingTable, 4.0);
 
         Self {
             position,

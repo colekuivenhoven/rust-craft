@@ -1,6 +1,6 @@
 use crate::entities::bird::{BirdManager, create_bird_vertices, generate_bird_indices};
 use crate::entities::fish::{FishManager, create_fish_vertices, generate_fish_indices};
-use crate::block::{BlockType, Vertex, UiVertex, ModalVertex, LineVertex, create_cube_vertices, create_block_outline, create_face_vertices, create_scaled_cube_vertices, create_particle_vertices, create_shadow_vertices, CUBE_INDICES};
+use crate::block::{BlockType, Vertex, UiVertex, ItemCubeVertex, ModalVertex, LineVertex, create_cube_vertices, create_block_outline, create_face_vertices, create_scaled_cube_vertices, create_particle_vertices, create_shadow_vertices, CUBE_INDICES};
 use crate::modal::{self, Modal};
 use crate::audio::AudioManager;
 use crate::camera::{Camera, CameraController, CameraUniform, Projection, Frustum};
@@ -11,7 +11,7 @@ use crate::entities::enemy::{EnemyManager, create_enemy_vertices, generate_enemy
 use crate::bitmap_font;
 use crate::particle::ParticleManager;
 use crate::player::Player;
-use crate::texture::{TextureAtlas, get_face_uvs, TEX_DESTROY_BASE};
+use crate::texture::{TextureAtlas, get_face_uvs, TEX_DESTROY_BASE, TEX_NONE};
 use crate::water::WaterSimulation;
 use crate::world::World;
 use cgmath::{Point3, Vector3, InnerSpace};
@@ -106,6 +106,12 @@ pub struct State {
     crosshair_vertex_buffer: wgpu::Buffer,
     hud_vertex_buffer: wgpu::Buffer,
     hud_vertex_count: u32,
+    hud_text_vertex_buffer: wgpu::Buffer,
+    hud_text_vertex_count: u32,
+    item_cube_pipeline: wgpu::RenderPipeline,
+    item_cube_bind_group: wgpu::BindGroup,
+    item_cube_vertex_buffer: wgpu::Buffer,
+    item_cube_vertex_count: u32,
     // Block outline rendering
     outline_pipeline: wgpu::RenderPipeline,
     targeted_block: Option<(i32, i32, i32)>,
@@ -822,6 +828,103 @@ impl State {
             cache: None,
         });
 
+        // Item Cube Pipeline — textured isometric block icons using the texture atlas
+        let item_cube_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Item Cube Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/item_cube_shader.wgsl").into()),
+        });
+
+        let item_cube_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Item Cube Bind Group Layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+            });
+
+        let item_cube_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Item Cube Bind Group"),
+            layout: &item_cube_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&texture_atlas.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&texture_atlas.sampler),
+                },
+            ],
+        });
+
+        let item_cube_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Item Cube Pipeline Layout"),
+                bind_group_layouts: &[&item_cube_bind_group_layout],
+                push_constant_ranges: &[],
+            });
+
+        let item_cube_pipeline =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("Item Cube Pipeline"),
+                layout: Some(&item_cube_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &item_cube_shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[ItemCubeVertex::desc()],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &item_cube_shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: config.format,
+                        blend: Some(wgpu::BlendState {
+                            color: wgpu::BlendComponent {
+                                src_factor: wgpu::BlendFactor::SrcAlpha,
+                                dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                                operation: wgpu::BlendOperation::Add,
+                            },
+                            alpha: wgpu::BlendComponent::OVER,
+                        }),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: None,
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    unclipped_depth: false,
+                    conservative: false,
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState {
+                    count: 1,
+                    mask: !0,
+                    alpha_to_coverage_enabled: false,
+                },
+                multiview: None,
+                cache: None,
+            });
+
         // Crosshair vertices (will be updated on resize for aspect ratio correction)
         // Allocate enough space for crosshair (12) + hit indicator circle (24 segments * 6 = 144)
         let crosshair_vertices = Self::build_crosshair_vertices(aspect_ratio, false);
@@ -839,6 +942,22 @@ impl State {
         let hud_vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("HUD Vertex Buffer"),
             size: (std::mem::size_of::<UiVertex>() as u64) * 100_000,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        // HUD text overlay buffer — count text drawn on top of item cubes
+        let hud_text_vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("HUD Text Vertex Buffer"),
+            size: (std::mem::size_of::<UiVertex>() as u64) * 10_000,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        // Item cube vertex buffer — 3-face isometric icons, rebuilt each frame
+        let item_cube_vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Item Cube Vertex Buffer"),
+            size: (std::mem::size_of::<ItemCubeVertex>() as u64) * 1000,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -1813,6 +1932,12 @@ impl State {
             crosshair_vertex_buffer,
             hud_vertex_buffer,
             hud_vertex_count: 0,
+            hud_text_vertex_buffer,
+            hud_text_vertex_count: 0,
+            item_cube_pipeline,
+            item_cube_bind_group,
+            item_cube_vertex_buffer,
+            item_cube_vertex_count: 0,
             outline_pipeline,
             targeted_block: None,
             chunk_outline_pipeline,
@@ -2323,12 +2448,14 @@ impl State {
         // Layout in pixels
         let slot_size = 80.0;
         let slot_gap = 8.0;
-        let margin_bottom = 18.0;
+        let margin_bottom = 32.0;
         let total_w = (slots as f32) * slot_size + (slots as f32 - 1.0) * slot_gap;
         let start_x = (screen_w - total_w) * 0.5;
         let start_y = screen_h - margin_bottom - slot_size;
 
         let mut verts: Vec<UiVertex> = Vec::with_capacity(4096);
+        // Count text is rendered after item cubes so it appears on top
+        let mut text_verts: Vec<UiVertex> = Vec::with_capacity(512);
 
         // === FPS Counter (top-left) ===
         let fps_text = format!("{} FPS", self.fps as u32);
@@ -2569,9 +2696,12 @@ impl State {
             screen_h,
         );
 
-        let fill = [1.0, 1.0, 1.0, 0.10];
+        //let fill = [1.0, 1.0, 1.0, 0.10]; // white
+        let fill = [0.0, 0.0, 0.0, 0.3]; // dark
         let outline = [1.0, 1.0, 1.0, 0.85];
-        let outline_selected = [1.0, 1.0, 1.0, 1.0];
+        //let outline_selected = [1.0, 1.0, 1.0, 1.0];  // white
+        //let outline_selected = [0.14, 0.64, 0.98, 1.0]; // blue
+        let outline_selected = [1.0, 0.6, 0.0, 1.0]; // yellow-orange
 
         // Slot content layout
         let slot_padding = 6.0;
@@ -2597,7 +2727,7 @@ impl State {
             );
 
             // Outline as 4 thin quads (thicker for selected)
-            let thick = if i == selected { 5.0 } else { 1.5 };
+            let thick = if i == selected { 6.0 } else { 3.0 };
             let c = if i == selected { outline_selected } else { outline };
             // top
             bitmap_font::push_rect_px(&mut verts, x, y, slot_size, thick, c, screen_w, screen_h);
@@ -2628,28 +2758,16 @@ impl State {
 
             // Slot content
             if let Some(stack) = self.player.inventory.get_slot(i) {
-                // Block color fill (with padding)
-                let bc = stack.block_type.get_color();
-                let block_color = [bc[0], bc[1], bc[2], 1.0];
-                bitmap_font::push_rect_px(
-                    &mut verts,
-                    x + slot_padding,
-                    y + slot_padding,
-                    slot_size - slot_padding * 2.0,
-                    slot_size - slot_padding * 2.0,
-                    block_color,
-                    screen_w,
-                    screen_h,
-                );
 
-                // Only show the name for the currently selected slot, positioned just above the slot.
+                // Block name
                 if i == selected {
                     let name = stack.block_type.display_name();
                     let name_color = [1.0, 1.0, 1.0, 0.95];
                     let name_w = (name.chars().count() as f32) * name_char_w;
                     let name_x = x + (slot_size - name_w) * 0.5;
                     let name_y = (y - name_char_h - label_gap).max(0.0);
-                    // Optional background for readability
+
+                    // Background
                     bitmap_font::push_rect_px(
                         &mut verts,
                         name_x - 4.0,
@@ -2660,6 +2778,7 @@ impl State {
                         screen_w,
                         screen_h,
                     );
+
                     bitmap_font::draw_text_quads(
                         &mut verts,
                         name,
@@ -2673,32 +2792,30 @@ impl State {
                     );
                 }
 
-                // Count: show in white over the block color in the bottom-left (with padding).
-                // Show count if > 0.0
+                // Block count
                 if stack.count > 0.0 {
                     let count_text = format!("{:.2}", stack.count);
                     let count_color = [1.0, 1.0, 1.0, 0.95];
                     let count_scale = 2.0;
                     let count_w = (count_text.chars().count() as f32) * 6.0 * count_scale;
                     let count_x = x + (slot_size - count_w) * 0.5;
-                    //let count_x = x + slot_padding + 7.0;
-                    let count_y = y + slot_size - (slot_padding + 6.0) - (7.0 * count_scale) - 1.0;
+                    let count_y = y + slot_size + (3.0 * count_scale);
                     let count_background_padding = 4.0;
 
-                    // Background for count text
+                    // Background
                     bitmap_font::push_rect_px(
-                        &mut verts,
-                        count_x - count_background_padding, // x
-                        count_y - count_background_padding, // y
-                        (count_text.len() as f32) * 6.0 * count_scale + (count_background_padding * 2.0), // width
-                        7.0 * count_scale + (count_background_padding * 2.0), // height
-                        [0.0, 0.0, 0.0, 0.55], // color
+                        &mut text_verts,
+                        count_x - count_background_padding,
+                        count_y - count_background_padding,
+                        (count_text.len() as f32) * 6.0 * count_scale + (count_background_padding * 2.0),
+                        7.0 * count_scale + (count_background_padding * 2.0),
+                        [0.0, 0.0, 0.0, 0.55],
                         screen_w,
                         screen_h,
                     );
 
                     bitmap_font::draw_text_quads(
-                        &mut verts,
+                        &mut text_verts,
                         &count_text,
                         count_x,
                         count_y,
@@ -2791,8 +2908,6 @@ impl State {
         }
 
         // ── Dropped-item pickup hint ──────────────────────────────────────────
-        // When the crosshair is over a dropped item, show "Right-click to pickup"
-        // just to the right of the crosshair with a dark background box.
         if self.hovered_dropped_item.is_some() {
             let label = "Pickup (Right-click)";
             let scale = 2.0f32;
@@ -2825,6 +2940,39 @@ impl State {
         self.hud_vertex_count = verts.len() as u32;
         self.queue
             .write_buffer(&self.hud_vertex_buffer, 0, bytemuck::cast_slice(&verts));
+
+        self.hud_text_vertex_count = text_verts.len() as u32;
+        self.queue
+            .write_buffer(&self.hud_text_vertex_buffer, 0, bytemuck::cast_slice(&text_verts));
+    }
+
+    fn rebuild_item_cube_vertices(&mut self) {
+        let screen_w = self.size.width as f32;
+        let screen_h = self.size.height as f32;
+
+        let slots = self.player.inventory.size.max(1);
+        let slot_size = 80.0_f32;
+        let slot_gap = 8.0_f32;
+        let margin_bottom = 32.0_f32;
+        let total_w = (slots as f32) * slot_size + (slots as f32 - 1.0) * slot_gap;
+        let start_x = (screen_w - total_w) * 0.5;
+        let start_y = screen_h - margin_bottom - slot_size;
+
+        let mut verts: Vec<ItemCubeVertex> = Vec::with_capacity(200);
+
+        for i in 0..slots {
+            if let Some(stack) = self.player.inventory.get_slot(i) {
+                let x = start_x + i as f32 * (slot_size + slot_gap);
+                let cx = x + slot_size * 0.5;
+                let cy = start_y + slot_size * 0.5;
+                let cube_size = slot_size * 0.65; // cube size relative to slot
+                push_item_cube(&mut verts, stack.block_type, cx, cy, cube_size, screen_w, screen_h);
+            }
+        }
+
+        self.item_cube_vertex_count = verts.len() as u32;
+        self.queue
+            .write_buffer(&self.item_cube_vertex_buffer, 0, bytemuck::cast_slice(&verts));
     }
 
     fn build_debug_axes(&self, verts: &mut Vec<UiVertex>, screen_w: f32, screen_h: f32) {
@@ -3746,6 +3894,7 @@ impl State {
 
     pub fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
         self.rebuild_hud_vertices();
+        self.rebuild_item_cube_vertices();
 
         let output = self.surface.get_current_texture()?;
         let swap_chain_view = output
@@ -4578,14 +4727,29 @@ impl State {
                     occlusion_query_set: None,
                 });
 
+                // 1. Crosshair + HUD chrome (slot backgrounds, borders, name labels, fps)
                 ui_pass.set_pipeline(&self.ui_pipeline);
                 ui_pass.set_bind_group(0, &self.ui_bind_group, &[]);
                 ui_pass.set_vertex_buffer(0, self.crosshair_vertex_buffer.slice(..));
                 ui_pass.draw(0..self.crosshair_vertex_count, 0..1);
-
-                // Hotbar HUD
                 ui_pass.set_vertex_buffer(0, self.hud_vertex_buffer.slice(..));
                 ui_pass.draw(0..self.hud_vertex_count, 0..1);
+
+                // 2. Item cubes (drawn on top of slot backgrounds)
+                if self.item_cube_vertex_count > 0 {
+                    ui_pass.set_pipeline(&self.item_cube_pipeline);
+                    ui_pass.set_bind_group(0, &self.item_cube_bind_group, &[]);
+                    ui_pass.set_vertex_buffer(0, self.item_cube_vertex_buffer.slice(..));
+                    ui_pass.draw(0..self.item_cube_vertex_count, 0..1);
+                }
+
+                // 3. Count text overlay (drawn on top of cubes)
+                if self.hud_text_vertex_count > 0 {
+                    ui_pass.set_pipeline(&self.ui_pipeline);
+                    ui_pass.set_bind_group(0, &self.ui_bind_group, &[]);
+                    ui_pass.set_vertex_buffer(0, self.hud_text_vertex_buffer.slice(..));
+                    ui_pass.draw(0..self.hud_text_vertex_count, 0..1);
+                }
             }
         }
 
@@ -4593,5 +4757,127 @@ impl State {
         output.present();
 
         Ok(())
+    }
+}
+
+// Push the three visible isometric faces of a block cube icon into 'verts'
+fn push_item_cube(
+    verts: &mut Vec<ItemCubeVertex>,
+    block_type: BlockType,
+    cx: f32,
+    cy: f32,
+    cube_size: f32,
+    screen_w: f32,
+    screen_h: f32,
+) {
+    let face_tex = block_type.get_face_textures(false);
+    let bc = block_type.get_color();
+
+    // Horizontal scale: cube_size maps to 40 isometric units wide
+    let kx = cube_size / 40.0;
+    // Vertical scale: 1.1× taller than the mathematically-correct square so the cube doesn't look squat (the hex waist creates a "short" illusion).
+    let ky = kx * 1.1;
+
+    // ── 7 key 2D hex points (pixel space, y increases downward) ──────────
+    // Derived from 2:1 isometric with a vertical stretch applied.
+    // Width = 40·kx,  Height = 40·ky,  visual center at (cx, cy).
+    let tbl = [cx,           cy - 20.0 * ky]; // top vertex
+    let tfl = [cx - 20.0*kx, cy - 10.0 * ky]; // upper-left
+    let tbr = [cx + 20.0*kx, cy - 10.0 * ky]; // upper-right
+    let tfr = [cx,           cy             ]; // hex center (inner divider)
+    let fl  = [cx - 20.0*kx, cy + 10.0 * ky]; // lower-left
+    let br  = [cx + 20.0*kx, cy + 10.0 * ky]; // lower-right
+    let fr  = [cx,           cy + 20.0 * ky]; // bottom vertex
+
+    // Pixel-to-clip-space conversion (y flipped: screen y-down → clip y-up)
+    let p2c = |p: [f32; 2]| -> [f32; 2] {
+        [2.0 * p[0] / screen_w - 1.0, 1.0 - 2.0 * p[1] / screen_h]
+    };
+
+    // Atlas UV for a given tile index
+    let tile_uv = |tile: u32| -> (f32, f32, f32, f32) {
+        let col = (tile % 16) as f32;
+        let row = (tile / 16) as f32;
+        let u0 = col / 16.0;
+        let v0 = row / 16.0;
+        (u0, v0, u0 + 1.0 / 16.0, v0 + 1.0 / 16.0)
+    };
+
+    // Build one ItemCubeVertex
+    let make_v = |pos: [f32; 2], uv: [f32; 2], shade: f32, tile: u32| -> ItemCubeVertex {
+        let use_texture = if tile != TEX_NONE { 1.0_f32 } else { 0.0_f32 };
+        let color = if tile != TEX_NONE {
+            [shade, shade, shade, 1.0]
+        } else {
+            [bc[0] * shade, bc[1] * shade, bc[2] * shade, 1.0]
+        };
+        ItemCubeVertex {
+            position: p2c(pos),
+            uv,
+            color,
+            use_texture,
+            _pad: 0.0,
+        }
+    };
+
+    // Push a quad (4 corners CCW) as two triangles: (0,1,2) and (0,2,3)
+    let mut push_quad = |v0: ItemCubeVertex, v1: ItemCubeVertex, v2: ItemCubeVertex, v3: ItemCubeVertex| {
+        verts.push(v0);
+        verts.push(v1);
+        verts.push(v2);
+        verts.push(v0);
+        verts.push(v2);
+        verts.push(v3);
+    };
+
+    // ── TOP FACE (shade 1.0, uses face_tex.top) ───────────────────────────
+    // Corners: tfl, tbl, tbr, tfr
+    // UV (looking down from above — x right, z toward viewer):
+    //   tfl (front-left)  → (u0, v1)
+    //   tbl (back-left)   → (u0, v0)
+    //   tbr (back-right)  → (u1, v0)
+    //   tfr (front-right) → (u1, v1)
+    {
+        let ti = face_tex.top;
+        let (u0, v0, u1, v1) = tile_uv(ti);
+        let shade = 1.0;
+        push_quad(
+            make_v(tfl, [u0, v1], shade, ti),
+            make_v(tbl, [u0, v0], shade, ti),
+            make_v(tbr, [u1, v0], shade, ti),
+            make_v(tfr, [u1, v1], shade, ti),
+        );
+    }
+
+    // ── LEFT FACE — front-left (Z+ face, shade 0.75, uses face_tex.sides) ─
+    // Corners: tfl, tfr, fr, fl
+    // UV (looking at Z+ face from outside — x right, y up):
+    //   tfl → (u0, v0)  tfr → (u1, v0)  fr → (u1, v1)  fl → (u0, v1)
+    {
+        let ti = face_tex.sides;
+        let (u0, v0, u1, v1) = tile_uv(ti);
+        let shade = 0.75;
+        push_quad(
+            make_v(tfl, [u0, v0], shade, ti),
+            make_v(tfr, [u1, v0], shade, ti),
+            make_v(fr,  [u1, v1], shade, ti),
+            make_v(fl,  [u0, v1], shade, ti),
+        );
+    }
+
+    // ── RIGHT FACE (X+ face, shade 0.60, uses face_tex.sides) ────────────
+    // Corners: tfr, tbr, br, fr
+    // UV (looking at X+ face from outside — z-axis "left", y up):
+    //   tfr → (u0, v0)  tbr → (u1, v0)  br → (u1, v1)  fr → (u0, v1)
+    {
+        let ti = face_tex.sides;
+        let (u0, v0, u1, v1) = tile_uv(ti);
+        let shade = 0.60;
+        push_quad(
+            make_v(tfr, [u0, v0], shade, ti),
+            make_v(tbr, [u1, v0], shade, ti),
+            make_v(br,  [u1, v1], shade, ti),
+            make_v(fr,  [u0, v1], shade, ti),
+        );
     }
 }
