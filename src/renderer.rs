@@ -2189,11 +2189,11 @@ impl State {
         self.crafting_grid = CraftingGrid::default();
         self.crafting_held = None;
         self.crafting_output = None;
-        // Initialise per-slot selected quantities from current inventory counts
+        // Initialise per-slot selected quantities to 1.0 (or 0 if slot empty)
         for i in 0..9 {
             self.crafting_inv_qty[i] = self.player.inventory
                 .get_slot(i)
-                .map(|s| s.count)
+                .map(|_| 1.0)
                 .unwrap_or(0.0);
         }
         self.release_mouse();
@@ -3213,7 +3213,8 @@ impl State {
             for i in 0..9usize {
                 let sx = lo.row2_x + i as f32 * (ct_slot + ct_gap);
                 let sy = lo.row2_y;
-                let has_item = self.player.inventory.get_slot(i).is_some();
+                let inv_slot = self.player.inventory.get_slot(i);
+                let has_item = inv_slot.is_some();
                 modal::push_rect_px(&mut verts, sx, sy, sx + ct_slot, sy + ct_slot,
                     [0.08, 0.07, 0.04, 1.0], screen_w, screen_h);
                 let hovered = self.crafting_hovered_inv == Some(i);
@@ -3223,8 +3224,8 @@ impl State {
                 modal::push_rect_px(&mut verts, sx - bw, sy + ct_slot, sx + ct_slot + bw, sy + ct_slot + bw, border_col, screen_w, screen_h);
                 modal::push_rect_px(&mut verts, sx - bw, sy, sx, sy + ct_slot, border_col, screen_w, screen_h);
                 modal::push_rect_px(&mut verts, sx + ct_slot, sy, sx + ct_slot + bw, sy + ct_slot, border_col, screen_w, screen_h);
-                if has_item {
-                    let qty_text = format!("{:.2}", self.crafting_inv_qty[i]);
+                if let Some(slot) = inv_slot {
+                    let qty_text = format!("{:.2}", slot.count);
                     let qty_x = sx + ct_slot - qty_text.len() as f32 * qty_cw - 2.0;
                     let qty_y = sy + ct_slot - qty_ch - 2.0;
                     bitmap_font::draw_text_quads(&mut verts, &qty_text, qty_x, qty_y,
@@ -3237,7 +3238,7 @@ impl State {
             if let Some(i) = self.crafting_hovered_inv {
                 if let Some(stack) = self.player.inventory.get_slot(i) {
                     let qty = self.crafting_inv_qty[i];
-                    let tooltip = format!("{} x {:.2}", stack.block_type.name(), qty);
+                    let tooltip = format!("{} ({:.2} / {:.2})", stack.block_type.name(), qty, stack.count);
                     let tt_scale = 2.0f32;
                     let tt_cw = 6.0 * tt_scale;
                     let tt_ch = 7.0 * tt_scale;
@@ -3663,8 +3664,7 @@ impl State {
                         CraftingHit::InvSlot(i) => {
                             if let Some(held) = self.crafting_held.take() {
                                 self.player.inventory.add_item(held.0, held.1);
-                                self.crafting_inv_qty[i] = self.player.inventory
-                                    .get_slot(i).map(|s| s.count).unwrap_or(0.0);
+                                self.crafting_inv_qty[i] = if self.player.inventory.get_slot(i).is_some() { 1.0 } else { 0.0 };
                             } else {
                                 let pick = self.player.inventory.get_slot(i).map(|s| {
                                     (s.block_type, self.crafting_inv_qty[i].min(s.count))
@@ -3673,8 +3673,7 @@ impl State {
                                     if qty > 0.0 {
                                         self.player.inventory.remove_item(i, qty);
                                         self.crafting_held = Some((bt, qty));
-                                        self.crafting_inv_qty[i] = self.player.inventory
-                                            .get_slot(i).map(|s| s.count).unwrap_or(0.0);
+                                        self.crafting_inv_qty[i] = if self.player.inventory.get_slot(i).is_some() { 1.0 } else { 0.0 };
                                     }
                                 }
                             }
@@ -3758,10 +3757,11 @@ impl State {
                         CraftingHit::GridSlot(r, c) => self.crafting_hovered_grid = Some((r, c)),
                         CraftingHit::InvSlot(i) => {
                             self.crafting_hovered_inv = Some(i);
-                            // Initialise qty on first hover
+                            // Initialise qty on first hover to 1.0
                             if self.crafting_inv_qty[i] == 0.0 {
-                                self.crafting_inv_qty[i] = self.player.inventory
-                                    .get_slot(i).map(|s| s.count).unwrap_or(0.0);
+                                if self.player.inventory.get_slot(i).is_some() {
+                                    self.crafting_inv_qty[i] = 1.0;
+                                }
                             }
                         }
                         CraftingHit::OutputSlot => self.crafting_hovered_output = true,
