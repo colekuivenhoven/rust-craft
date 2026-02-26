@@ -5,7 +5,7 @@ use crate::modal::{self, Modal};
 use crate::audio::AudioManager;
 use crate::camera::{Camera, CameraController, CameraUniform, Projection, Frustum};
 use crate::chunk::{CHUNK_SIZE, CHUNK_HEIGHT};
-use crate::crafting::CraftingSystem;
+use crate::crafting::{CraftingGrid, match_recipe};
 use crate::dropped_item::DroppedItemManager;
 use crate::entities::enemy::{EnemyManager, create_enemy_vertices, generate_enemy_indices, create_enemy_collision_outlines};
 use crate::bitmap_font;
@@ -22,6 +22,80 @@ use wgpu::util::DeviceExt;
 use winit::event::*;
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::Window;
+
+/// Result of a crafting-UI pixel hit-test
+#[derive(Debug, Clone, Copy)]
+enum CraftingHit {
+    GridSlot(usize, usize),
+    OutputSlot,
+    InvSlot(usize),
+    None,
+}
+
+/// All pixel-space coordinates needed to draw / hit-test the crafting UI.
+/// Derived from the crafting modal's panel bounds each frame.
+struct CraftingLayout {
+    ct_slot:  f32,
+    ct_gap:   f32,
+    grid_w:   f32,
+    grid_h:   f32,
+    row1_x:   f32,
+    row1_y:   f32,
+    row2_x:   f32,
+    row2_y:   f32,
+    out_x:    f32,
+    out_y:    f32,
+    arrow_x:  f32,
+    arrow_y:  f32,
+    arrow_scale: f32,
+}
+
+/// Compute the crafting UI pixel layout from the modal's panel bounds.
+fn crafting_layout(panel_x: f32, panel_y: f32, panel_w: f32, panel_h: f32) -> CraftingLayout {
+    use crate::modal::{MODAL_BORDER_PX, MODAL_BEVEL_PX};
+    let bevel_pad    = MODAL_BORDER_PX + MODAL_BEVEL_PX; // 12
+    let interior_pad = 8.0f32;
+    let content_x    = panel_x + bevel_pad + interior_pad;
+    let content_w    = panel_w - 2.0 * (bevel_pad + interior_pad);
+    let content_bottom_y = panel_y + panel_h - bevel_pad - interior_pad;
+
+    let ct_gap  = 8.0f32;
+    // Slot size chosen so 9 slots + 8 gaps exactly fill the content width
+    let ct_slot = ((content_w - 8.0 * ct_gap) / 9.0) * 0.75; // 0.75 scale factor
+
+    // Row 1 horizontal layout (centred in content area)
+    let arrow_gap   = (content_w * 0.016).max(10.0);
+    let arrow_w     = (ct_slot * 0.40).max(24.0);
+    let grid_w      = 3.0 * ct_slot + 2.0 * ct_gap;
+    let grid_h      = grid_w;
+    let row1_w      = grid_w + arrow_gap + arrow_w + arrow_gap + ct_slot;
+    let row1_x      = content_x + (content_w - row1_w) * 0.5;
+
+    // Row 1 vertical start: below the crafting modal's title (fixed 20px offset + title height)
+    let title_scale  = 10.5f32; // fixed smaller scale for crafting modal
+    let title_h      = 7.0 * title_scale;
+    let title_offset = bevel_pad + interior_pad; // align title to top of content area
+    let title_end_y  = panel_y + title_offset + title_h;
+    let row1_y       = title_end_y + panel_h * 0.15;
+
+    // Row 2 (inventory): anchored to bottom of content area, horizontally centered
+    let row2_y = content_bottom_y - ct_slot;
+    let inv_w  = 9.0 * ct_slot + 8.0 * ct_gap;
+    let row2_x = content_x + (content_w - inv_w) * 0.5;
+
+    // Output slot (centred vertically in grid area)
+    let out_x = row1_x + grid_w + arrow_gap + arrow_w + arrow_gap;
+    let out_y = row1_y + (grid_h - ct_slot) * 0.5;
+
+    // Arrow text position (centred vertically in grid area, between grid and output)
+    let arrow_scale = 7.5f32;
+    let arrow_char_h = 7.0 * arrow_scale;
+    let arrow_x = row1_x + grid_w + arrow_gap;
+    let arrow_y = row1_y + (grid_h - arrow_char_h) * 0.5;
+
+    CraftingLayout { ct_slot, ct_gap, grid_w, grid_h, row1_x, row1_y,
+        row2_x, row2_y, out_x, out_y, arrow_x, arrow_y, arrow_scale }
+}
 
 /// Cached GPU buffers for a chunk - avoids recreating buffers every frame
 pub struct ChunkBuffers {
@@ -93,12 +167,10 @@ pub struct State {
     fish_manager: FishManager,
     dropped_item_manager: DroppedItemManager,
     particle_manager: ParticleManager,
-    crafting_system: CraftingSystem,
     last_frame: Instant,
     mouse_pressed: bool,
     window: Arc<Window>,
     show_inventory: bool,
-    show_crafting: bool,
     // UI rendering
     ui_pipeline: wgpu::RenderPipeline,
     ui_bind_group: wgpu::BindGroup,
@@ -187,6 +259,7 @@ pub struct State {
     // ── Pause / Modal ─────────────────────────────────────────────────────
     pub paused: bool,
     pause_modal: Modal,
+    crafting_modal: Modal,
     /// Current cursor position in pixel space (set via CursorMoved events)
     cursor_pos_px: (f32, f32),
 
@@ -209,6 +282,19 @@ pub struct State {
 
     // Dropped-item hover (index into dropped_item_manager.items the crosshair is over)
     hovered_dropped_item: Option<usize>,
+
+    // ── Crafting Table UI ─────────────────────────────────────────────────
+    crafting_ui_open: bool,
+    hovered_crafting_table: bool,
+    crafting_grid: CraftingGrid,
+    crafting_output: Option<(BlockType, f32)>,
+    /// Item currently held on the cursor (picked up from grid or inventory)
+    crafting_held: Option<(BlockType, f32)>,
+    crafting_hovered_grid: Option<(usize, usize)>,
+    crafting_hovered_inv: Option<usize>,
+    crafting_hovered_output: bool,
+    /// Per-slot selected pickup quantity for the inventory row in the crafting UI
+    crafting_inv_qty: [f32; 9],
 
     // Audio
     audio: Option<AudioManager>,
@@ -727,7 +813,6 @@ impl State {
         let fish_manager = FishManager::new();
         let dropped_item_manager = DroppedItemManager::new();
         let particle_manager = ParticleManager::new();
-        let crafting_system = CraftingSystem::new();
 
         // UI Pipeline for crosshair
         let ui_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -1878,8 +1963,12 @@ impl State {
         });
 
         // ── Pause modal instance ──────────────────────────────────────────────
-        let mut pause_modal = Modal::new("PAUSED", &["RESUME", "QUIT"]);
+        let mut pause_modal = Modal::new("PAUSED", &["RESUME", "QUIT"], modal::MODAL_W_RATIO, modal::MODAL_ASPECT);
         pause_modal.update_layout(size.width as f32, size.height as f32);
+
+        // ── Crafting table modal instance (wider + taller than pause modal) ──
+        let mut crafting_modal = Modal::new("CRAFTING TABLE", &[], 0.50, 1.80);
+        crafting_modal.update_layout(size.width as f32, size.height as f32);
 
         // ── Audio ─────────────────────────────────────────────────────────────
         // Both the music sink and walk sink must share the same OutputStream so
@@ -1920,12 +2009,10 @@ impl State {
             fish_manager,
             dropped_item_manager,
             particle_manager,
-            crafting_system,
             last_frame: Instant::now(),
             mouse_pressed: false,
             window,
             show_inventory: false,
-            show_crafting: false,
             ui_pipeline,
             ui_bind_group,
             ui_uniform_buffer,
@@ -2004,6 +2091,7 @@ impl State {
             // Pause / Modal
             paused: false,
             pause_modal,
+            crafting_modal,
             cursor_pos_px: (0.0, 0.0),
             pause_blur_pipeline,
             pause_blur_bind_group_layout,
@@ -2018,6 +2106,17 @@ impl State {
             modal_ui_vertex_count: 0,
 
             hovered_dropped_item: None,
+
+            // Crafting Table UI
+            crafting_ui_open: false,
+            hovered_crafting_table: false,
+            crafting_grid: CraftingGrid::default(),
+            crafting_output: None,
+            crafting_held: None,
+            crafting_hovered_grid: None,
+            crafting_hovered_inv: None,
+            crafting_hovered_output: false,
+            crafting_inv_qty: [0.0; 9],
 
             audio,
             walk_sink,
@@ -2075,6 +2174,93 @@ impl State {
     }
 
     pub fn is_paused(&self) -> bool { self.paused }
+
+    pub fn is_crafting_open(&self) -> bool { self.crafting_ui_open }
+
+    // ── Crafting Table UI ─────────────────────────────────────────────────
+
+    pub fn open_crafting_ui(&mut self) {
+        let sw = self.size.width as f32;
+        let sh = self.size.height as f32;
+        self.crafting_modal.update_layout(sw, sh);
+        // Smaller title, aligned to top of content area
+        self.crafting_modal.title_scale      = 2.5;
+        self.crafting_modal.title_y_offset   = (crate::modal::MODAL_BORDER_PX + crate::modal::MODAL_BEVEL_PX) + 8.0;
+        self.crafting_ui_open = true;
+        self.crafting_grid = CraftingGrid::default();
+        self.crafting_held = None;
+        self.crafting_output = None;
+        // Initialise per-slot selected quantities from current inventory counts
+        for i in 0..9 {
+            self.crafting_inv_qty[i] = self.player.inventory
+                .get_slot(i)
+                .map(|s| s.count)
+                .unwrap_or(0.0);
+        }
+        self.release_mouse();
+    }
+
+    pub fn close_crafting_ui(&mut self) {
+        // Return held item to inventory
+        if let Some((bt, qty)) = self.crafting_held.take() {
+            self.player.inventory.add_item(bt, qty);
+        }
+        // Return every grid item to inventory
+        for row in 0..3 {
+            for col in 0..3 {
+                if let Some((bt, qty)) = self.crafting_grid.slots[row][col].take() {
+                    self.player.inventory.add_item(bt, qty);
+                }
+            }
+        }
+        self.crafting_ui_open = false;
+        self.crafting_output = None;
+        self.capture_mouse();
+    }
+
+    /// Returns which crafting-UI element the pixel coordinate (px, py) is over.
+    fn crafting_slot_hit(&self, px: f32, py: f32, _sw: f32, _sh: f32) -> CraftingHit {
+        let lo = crafting_layout(
+            self.crafting_modal.panel_x, self.crafting_modal.panel_y,
+            self.crafting_modal.panel_w, self.crafting_modal.panel_h,
+        );
+        // 3×3 grid
+        for row in 0..3usize {
+            for col in 0..3usize {
+                let sx = lo.row1_x + col as f32 * (lo.ct_slot + lo.ct_gap);
+                let sy = lo.row1_y + row as f32 * (lo.ct_slot + lo.ct_gap);
+                if px >= sx && px < sx + lo.ct_slot && py >= sy && py < sy + lo.ct_slot {
+                    return CraftingHit::GridSlot(row, col);
+                }
+            }
+        }
+        // Output slot
+        if px >= lo.out_x && px < lo.out_x + lo.ct_slot
+            && py >= lo.out_y && py < lo.out_y + lo.ct_slot {
+            return CraftingHit::OutputSlot;
+        }
+        // Inventory row
+        for i in 0..9usize {
+            let sx = lo.row2_x + i as f32 * (lo.ct_slot + lo.ct_gap);
+            let sy = lo.row2_y;
+            if px >= sx && px < sx + lo.ct_slot && py >= sy && py < sy + lo.ct_slot {
+                return CraftingHit::InvSlot(i);
+            }
+        }
+        CraftingHit::None
+    }
+
+    /// Consume crafting grid inputs for one craft.
+    /// For Recipe 1 (Wood → Planks): clears the single occupied grid slot.
+    /// For Recipe 2 (2×2 Planks → CraftingTable): clears the four 2×2 slots.
+    fn consume_crafting_inputs(&mut self) {
+        // Simply clear all non-empty grid slots (recipes use exact slot contents)
+        for row in 0..3 {
+            for col in 0..3 {
+                self.crafting_grid.slots[row][col] = None;
+            }
+        }
+    }
 
     /// Call with the current cursor pixel position.
     /// Returns the label of a button that was just clicked, or None.
@@ -2908,33 +3094,180 @@ impl State {
         }
 
         // ── Dropped-item pickup hint ──────────────────────────────────────────
-        if self.hovered_dropped_item.is_some() {
-            let label = "Pickup (Right-click)";
+        if let Some(idx) = self.hovered_dropped_item {
+            if let Some(item) = self.dropped_item_manager.items.get(idx) {
+                let name = item.block_type.name();
+                let label = format!("Pickup {} (Right-click)", name);
+                let scale = 2.0f32;
+                let char_w = 6.0 * scale; // 5px glyph + 1px spacing
+                let char_h = 7.0 * scale;
+                let text_w = label.len() as f32 * char_w;
+                let pad = 10.0f32;
+
+                // Position: 24 px to the right of screen centre, vertically centred
+                let tx = screen_w * 0.5 + 48.0;
+                let ty = screen_h * 0.5 - char_h * 0.5;
+
+                // Dark background
+                modal::push_rect_px(
+                    &mut verts,
+                    tx - pad, ty - pad,
+                    tx + text_w + pad, ty + char_h + pad,
+                    [0.0, 0.0, 0.0, 0.4],
+                    screen_w, screen_h,
+                );
+                // White text
+                bitmap_font::draw_text_quads(
+                    &mut verts, &label,
+                    tx, ty, scale, scale,
+                    [1.0, 1.0, 1.0, 1.0],
+                    screen_w, screen_h,
+                );
+            }
+        }
+
+        // ── Crafting Table hover hint ─────────────────────────────────────────
+        if self.hovered_crafting_table && !self.crafting_ui_open && self.hovered_dropped_item.is_none() {
+            let label = "Open Crafting Table (Right-click)";
             let scale = 2.0f32;
-            let char_w = 6.0 * scale; // 5px glyph + 1px spacing
+            let char_w = 6.0 * scale;
             let char_h = 7.0 * scale;
             let text_w = label.len() as f32 * char_w;
             let pad = 10.0f32;
-
-            // Position: 24 px to the right of screen centre, vertically centred
             let tx = screen_w * 0.5 + 48.0;
             let ty = screen_h * 0.5 - char_h * 0.5;
+            modal::push_rect_px(&mut verts, tx - pad, ty - pad, tx + text_w + pad, ty + char_h + pad,
+                [0.0, 0.0, 0.0, 0.4], screen_w, screen_h);
+            bitmap_font::draw_text_quads(&mut verts, label, tx, ty, scale, scale,
+                [1.0, 1.0, 1.0, 1.0], screen_w, screen_h);
+        }
 
-            // Dark background
-            modal::push_rect_px(
-                &mut verts,
-                tx - pad, ty - pad,
-                tx + text_w + pad, ty + char_h + pad,
-                [0.0, 0.0, 0.0, 0.4],
-                screen_w, screen_h,
+        // ── Crafting Table UI panel ────────────────────────────────────────
+        if self.crafting_ui_open {
+            let lo = crafting_layout(
+                self.crafting_modal.panel_x, self.crafting_modal.panel_y,
+                self.crafting_modal.panel_w, self.crafting_modal.panel_h,
             );
-            // White text
-            bitmap_font::draw_text_quads(
-                &mut verts, label,
-                tx, ty, scale, scale,
-                [1.0, 1.0, 1.0, 1.0],
-                screen_w, screen_h,
-            );
+            let ct_slot = lo.ct_slot;
+            let ct_gap  = lo.ct_gap;
+
+            // ── Modal chrome (border, bevel, title) from the reusable Modal ──
+            let chrome = self.crafting_modal.build_ui_vertices(screen_w, screen_h);
+            verts.extend_from_slice(&chrome);
+
+            // ── 3×3 Crafting Grid ──
+            let qty_scale = 1.5f32;
+            let qty_cw    = 6.0 * qty_scale;
+            let qty_ch    = 7.0 * qty_scale;
+            for row in 0..3usize {
+                for col in 0..3usize {
+                    let sx = lo.row1_x + col as f32 * (ct_slot + ct_gap);
+                    let sy = lo.row1_y + row as f32 * (ct_slot + ct_gap);
+                    modal::push_rect_px(&mut verts, sx, sy, sx + ct_slot, sy + ct_slot,
+                        [0.08, 0.07, 0.04, 1.0], screen_w, screen_h);
+                    let hovered = self.crafting_hovered_grid == Some((row, col));
+                    let border_col = if hovered { [1.0, 0.8, 0.1, 1.0] } else { [0.6, 0.55, 0.38, 0.9] };
+                    let bw = if hovered { 3.0f32 } else { 2.0f32 };
+                    modal::push_rect_px(&mut verts, sx - bw, sy - bw, sx + ct_slot + bw, sy + bw, border_col, screen_w, screen_h);
+                    modal::push_rect_px(&mut verts, sx - bw, sy + ct_slot, sx + ct_slot + bw, sy + ct_slot + bw, border_col, screen_w, screen_h);
+                    modal::push_rect_px(&mut verts, sx - bw, sy, sx, sy + ct_slot, border_col, screen_w, screen_h);
+                    modal::push_rect_px(&mut verts, sx + ct_slot, sy, sx + ct_slot + bw, sy + ct_slot, border_col, screen_w, screen_h);
+                    if let Some((_, qty)) = self.crafting_grid.slots[row][col] {
+                        let qty_text = format!("{:.2}", qty);
+                        let qty_x = sx + ct_slot - qty_text.len() as f32 * qty_cw - 2.0;
+                        let qty_y = sy + ct_slot - qty_ch - 2.0;
+                        bitmap_font::draw_text_quads(&mut verts, &qty_text, qty_x, qty_y,
+                            qty_scale, qty_scale, [1.0, 1.0, 0.6, 1.0], screen_w, screen_h);
+                    }
+                }
+            }
+
+            // ── Arrow ──
+            bitmap_font::draw_text_quads(&mut verts, "→", lo.arrow_x, lo.arrow_y,
+                lo.arrow_scale, lo.arrow_scale, [0.0, 0.0, 0.0, 0.55], screen_w, screen_h);
+
+            // ── Output slot ──
+            let out_has_item = self.crafting_output.is_some();
+            let out_bg = if out_has_item { [0.1, 0.14, 0.06, 1.0] } else { [0.06, 0.05, 0.03, 1.0] };
+            modal::push_rect_px(&mut verts, lo.out_x, lo.out_y, lo.out_x + ct_slot, lo.out_y + ct_slot, out_bg, screen_w, screen_h);
+            let out_border = if self.crafting_hovered_output && out_has_item {
+                [0.5, 1.0, 0.3, 1.0]
+            } else if out_has_item {
+                [0.4, 0.8, 0.2, 0.9]
+            } else {
+                [0.4, 0.38, 0.25, 0.8]
+            };
+            let bw = 2.0f32;
+            modal::push_rect_px(&mut verts, lo.out_x - bw, lo.out_y - bw, lo.out_x + ct_slot + bw, lo.out_y + bw, out_border, screen_w, screen_h);
+            modal::push_rect_px(&mut verts, lo.out_x - bw, lo.out_y + ct_slot, lo.out_x + ct_slot + bw, lo.out_y + ct_slot + bw, out_border, screen_w, screen_h);
+            modal::push_rect_px(&mut verts, lo.out_x - bw, lo.out_y, lo.out_x, lo.out_y + ct_slot, out_border, screen_w, screen_h);
+            modal::push_rect_px(&mut verts, lo.out_x + ct_slot, lo.out_y, lo.out_x + ct_slot + bw, lo.out_y + ct_slot, out_border, screen_w, screen_h);
+            if let Some((_, qty)) = self.crafting_output {
+                let qty_text = format!("{:.2}", qty);
+                let qty_x = lo.out_x + ct_slot - qty_text.len() as f32 * qty_cw - 2.0;
+                let qty_y = lo.out_y + ct_slot - qty_ch - 2.0;
+                bitmap_font::draw_text_quads(&mut verts, &qty_text, qty_x, qty_y,
+                    qty_scale, qty_scale, [0.6, 1.0, 0.4, 1.0], screen_w, screen_h);
+            }
+
+            // ── Inventory row (Row 2) ──
+            for i in 0..9usize {
+                let sx = lo.row2_x + i as f32 * (ct_slot + ct_gap);
+                let sy = lo.row2_y;
+                let has_item = self.player.inventory.get_slot(i).is_some();
+                modal::push_rect_px(&mut verts, sx, sy, sx + ct_slot, sy + ct_slot,
+                    [0.08, 0.07, 0.04, 1.0], screen_w, screen_h);
+                let hovered = self.crafting_hovered_inv == Some(i);
+                let border_col = if hovered && has_item { [1.0, 0.8, 0.1, 1.0] } else { [0.6, 0.55, 0.38, 0.9] };
+                let bw = if hovered && has_item { 3.0f32 } else { 2.0f32 };
+                modal::push_rect_px(&mut verts, sx - bw, sy - bw, sx + ct_slot + bw, sy + bw, border_col, screen_w, screen_h);
+                modal::push_rect_px(&mut verts, sx - bw, sy + ct_slot, sx + ct_slot + bw, sy + ct_slot + bw, border_col, screen_w, screen_h);
+                modal::push_rect_px(&mut verts, sx - bw, sy, sx, sy + ct_slot, border_col, screen_w, screen_h);
+                modal::push_rect_px(&mut verts, sx + ct_slot, sy, sx + ct_slot + bw, sy + ct_slot, border_col, screen_w, screen_h);
+                if has_item {
+                    let qty_text = format!("{:.2}", self.crafting_inv_qty[i]);
+                    let qty_x = sx + ct_slot - qty_text.len() as f32 * qty_cw - 2.0;
+                    let qty_y = sy + ct_slot - qty_ch - 2.0;
+                    bitmap_font::draw_text_quads(&mut verts, &qty_text, qty_x, qty_y,
+                        qty_scale, qty_scale, [1.0, 1.0, 0.6, 1.0], screen_w, screen_h);
+                }
+            }
+
+            // ── Inventory slot tooltip (name + qty near cursor) ──
+            // Pushed into text_verts so it renders AFTER item cubes and stays on top.
+            if let Some(i) = self.crafting_hovered_inv {
+                if let Some(stack) = self.player.inventory.get_slot(i) {
+                    let qty = self.crafting_inv_qty[i];
+                    let tooltip = format!("{} x {:.2}", stack.block_type.name(), qty);
+                    let tt_scale = 2.0f32;
+                    let tt_cw = 6.0 * tt_scale;
+                    let tt_ch = 7.0 * tt_scale;
+                    let tt_w = tooltip.len() as f32 * tt_cw;
+                    let pad = 6.0f32;
+                    let (cx, cy) = self.cursor_pos_px;
+                    let tt_x = cx + 16.0;
+                    let tt_y = (cy - tt_ch - 4.0).max(0.0);
+                    modal::push_rect_px(&mut text_verts, tt_x - pad, tt_y - pad, tt_x + tt_w + pad, tt_y + tt_ch + pad,
+                        [0.0, 0.0, 0.0, 0.7], screen_w, screen_h);
+                    bitmap_font::draw_text_quads(&mut text_verts, &tooltip, tt_x, tt_y, tt_scale, tt_scale,
+                        [1.0, 1.0, 1.0, 1.0], screen_w, screen_h);
+                }
+            }
+
+            // ── Held item: ghost slot at cursor ──
+            if let Some((_, qty)) = self.crafting_held {
+                let (cx, cy) = self.cursor_pos_px;
+                let hx = cx - ct_slot * 0.5;
+                let hy = cy - ct_slot * 0.5;
+                modal::push_rect_px(&mut verts, hx, hy, hx + ct_slot, hy + ct_slot,
+                    [0.2, 0.18, 0.10, 0.7], screen_w, screen_h);
+                let qty_text = format!("{:.2}", qty);
+                let qty_x = hx + ct_slot - qty_text.len() as f32 * qty_cw - 2.0;
+                let qty_y = hy + ct_slot - qty_ch - 2.0;
+                bitmap_font::draw_text_quads(&mut verts, &qty_text, qty_x, qty_y,
+                    qty_scale, qty_scale, [1.0, 1.0, 0.6, 1.0], screen_w, screen_h);
+            }
+
         }
 
         self.hud_vertex_count = verts.len() as u32;
@@ -2967,6 +3300,48 @@ impl State {
                 let cy = start_y + slot_size * 0.5;
                 let cube_size = slot_size * 0.65; // cube size relative to slot
                 push_item_cube(&mut verts, stack.block_type, cx, cy, cube_size, screen_w, screen_h);
+            }
+        }
+
+        // ── Crafting UI item cubes ────────────────────────────────────────
+        if self.crafting_ui_open {
+            let lo = crafting_layout(
+                self.crafting_modal.panel_x, self.crafting_modal.panel_y,
+                self.crafting_modal.panel_w, self.crafting_modal.panel_h,
+            );
+            let cube_size = lo.ct_slot * 0.65;
+
+            // 3×3 grid slots
+            for row in 0..3usize {
+                for col in 0..3usize {
+                    if let Some((bt, _)) = self.crafting_grid.slots[row][col] {
+                        let cx = lo.row1_x + col as f32 * (lo.ct_slot + lo.ct_gap) + lo.ct_slot * 0.5;
+                        let cy = lo.row1_y + row as f32 * (lo.ct_slot + lo.ct_gap) + lo.ct_slot * 0.5;
+                        push_item_cube(&mut verts, bt, cx, cy, cube_size, screen_w, screen_h);
+                    }
+                }
+            }
+
+            // Output slot
+            if let Some((bt, _)) = self.crafting_output {
+                push_item_cube(&mut verts, bt,
+                    lo.out_x + lo.ct_slot * 0.5, lo.out_y + lo.ct_slot * 0.5,
+                    cube_size, screen_w, screen_h);
+            }
+
+            // Inventory row (slots 0-8)
+            for i in 0..9usize {
+                if let Some(stack) = self.player.inventory.get_slot(i) {
+                    let cx = lo.row2_x + i as f32 * (lo.ct_slot + lo.ct_gap) + lo.ct_slot * 0.5;
+                    let cy = lo.row2_y + lo.ct_slot * 0.5;
+                    push_item_cube(&mut verts, stack.block_type, cx, cy, cube_size, screen_w, screen_h);
+                }
+            }
+
+            // Held item (follows cursor)
+            if let Some((bt, _)) = self.crafting_held {
+                let (cx, cy) = self.cursor_pos_px;
+                push_item_cube(&mut verts, bt, cx, cy, cube_size, screen_w, screen_h);
             }
         }
 
@@ -3203,21 +3578,6 @@ impl State {
                         }
                         true
                     }
-                    KeyCode::KeyC => {
-                        if is_pressed {
-                            self.show_crafting = !self.show_crafting;
-                            println!("=== CRAFTING ===");
-                            let available = self
-                                .crafting_system
-                                .get_available_recipes(&self.player.inventory);
-                            for (i, recipe_idx) in available.iter().enumerate() {
-                                let recipe = &self.crafting_system.get_recipes()[*recipe_idx];
-                                println!("Recipe {}: {:?}", i, recipe);
-                            }
-                            println!("Press number keys 1-9 to craft");
-                        }
-                        true
-                    }
                     KeyCode::Digit1
                     | KeyCode::Digit2
                     | KeyCode::Digit3
@@ -3227,7 +3587,7 @@ impl State {
                     | KeyCode::Digit7
                     | KeyCode::Digit8
                     | KeyCode::Digit9 => {
-                        if is_pressed {
+                        if is_pressed && !self.crafting_ui_open {
                             let num = match keycode {
                                 KeyCode::Digit1 => 0,
                                 KeyCode::Digit2 => 1,
@@ -3240,20 +3600,7 @@ impl State {
                                 KeyCode::Digit9 => 8,
                                 _ => 0,
                             };
-
-                            if self.show_crafting {
-                                let available = self
-                                    .crafting_system
-                                    .get_available_recipes(&self.player.inventory);
-                                if num < available.len() {
-                                    if self.crafting_system.craft(&mut self.player.inventory, available[num]) {
-                                        println!("Crafted successfully!");
-                                    }
-                                }
-                            } else {
-                                self.player.inventory.selected_slot = num;
-                                println!("Selected slot {}", num);
-                            }
+                            self.player.inventory.selected_slot = num;
                         }
                         true
                     }
@@ -3287,12 +3634,64 @@ impl State {
                 ..
             } => {
                 let is_pressed = *state == ElementState::Pressed;
-                self.mouse_pressed = is_pressed;
-                self.left_mouse_held = is_pressed;
-
-                if !is_pressed {
-                    // Mouse released - cancel any breaking in progress
-                    self.breaking_state = None;
+                if self.crafting_ui_open && is_pressed {
+                    let (px, py) = self.cursor_pos_px;
+                    let sw = self.size.width as f32;
+                    let sh = self.size.height as f32;
+                    let hit = self.crafting_slot_hit(px, py, sw, sh);
+                    match hit {
+                        CraftingHit::GridSlot(row, col) => {
+                            if let Some(held) = self.crafting_held.take() {
+                                let existing = self.crafting_grid.slots[row][col].take();
+                                self.crafting_grid.slots[row][col] = Some(held);
+                                if let Some(old) = existing {
+                                    self.crafting_held = Some(old);
+                                }
+                            } else if let Some(item) = self.crafting_grid.slots[row][col].take() {
+                                self.crafting_held = Some(item);
+                            }
+                            self.crafting_output = match_recipe(&self.crafting_grid);
+                        }
+                        CraftingHit::OutputSlot => {
+                            if self.crafting_held.is_none() {
+                                if let Some((bt, qty)) = self.crafting_output.take() {
+                                    self.consume_crafting_inputs();
+                                    self.player.inventory.add_item(bt, qty);
+                                    self.crafting_output = match_recipe(&self.crafting_grid);
+                                }
+                            }
+                        }
+                        CraftingHit::InvSlot(i) => {
+                            if let Some(held) = self.crafting_held.take() {
+                                self.player.inventory.add_item(held.0, held.1);
+                                self.crafting_inv_qty[i] = self.player.inventory
+                                    .get_slot(i).map(|s| s.count).unwrap_or(0.0);
+                            } else {
+                                let pick = self.player.inventory.get_slot(i).map(|s| {
+                                    (s.block_type, self.crafting_inv_qty[i].min(s.count))
+                                });
+                                if let Some((bt, qty)) = pick {
+                                    if qty > 0.0 {
+                                        self.player.inventory.remove_item(i, qty);
+                                        self.crafting_held = Some((bt, qty));
+                                        self.crafting_inv_qty[i] = self.player.inventory
+                                            .get_slot(i).map(|s| s.count).unwrap_or(0.0);
+                                    }
+                                }
+                            }
+                        }
+                        CraftingHit::None => {
+                            if let Some((bt, qty)) = self.crafting_held.take() {
+                                self.player.inventory.add_item(bt, qty);
+                            }
+                        }
+                    }
+                } else {
+                    self.mouse_pressed = is_pressed;
+                    self.left_mouse_held = is_pressed;
+                    if !is_pressed {
+                        self.breaking_state = None;
+                    }
                 }
                 true
             }
@@ -3309,6 +3708,8 @@ impl State {
                             self.player.inventory.add_item(collected.block_type, collected.value);
                             self.hovered_dropped_item = None;
                         }
+                    } else if self.hovered_crafting_table {
+                        self.open_crafting_ui();
                     } else {
                         self.handle_block_place();
                     }
@@ -3316,20 +3717,28 @@ impl State {
                 true
             }
             WindowEvent::MouseWheel { delta, .. } => {
-                // Only handle scroll if mouse is captured (in-game) and not in crafting mode
-                if self.mouse_captured && !self.show_crafting {
-                    let scroll_amount = match delta {
-                        MouseScrollDelta::LineDelta(_, y) => *y as i32,
-                        MouseScrollDelta::PixelDelta(pos) => {
-                            // Convert pixel delta to line units (typical ~40 pixels per line)
-                            (pos.y / 40.0) as i32
+                let scroll_f = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => *y,
+                    MouseScrollDelta::PixelDelta(pos) => (pos.y / 40.0) as f32,
+                };
+                if self.crafting_ui_open {
+                    // Adjust selected quantity for hovered inventory slot
+                    if let Some(i) = self.crafting_hovered_inv {
+                        let max_qty = self.player.inventory
+                            .get_slot(i).map(|s| s.count).unwrap_or(0.0);
+                        if max_qty > 0.0 {
+                            let step = 0.25f32;
+                            let new_qty = (self.crafting_inv_qty[i] + scroll_f * step)
+                                .clamp(step, max_qty.max(step));
+                            // Round to nearest 0.25
+                            self.crafting_inv_qty[i] = (new_qty / step).round() * step;
                         }
-                    };
-
+                    }
+                } else if self.mouse_captured {
+                    let scroll_amount = scroll_f as i32;
                     if scroll_amount != 0 {
                         let slots = self.player.inventory.size;
                         let current = self.player.inventory.selected_slot as i32;
-                        // Scroll up = previous slot, scroll down = next slot
                         let new_slot = (current - scroll_amount).rem_euclid(slots as i32) as usize;
                         self.player.inventory.selected_slot = new_slot;
                     }
@@ -3337,7 +3746,29 @@ impl State {
                 true
             }
             WindowEvent::CursorMoved { position, .. } => {
-                self.handle_modal_cursor_moved(position.x as f32, position.y as f32);
+                let px = position.x as f32;
+                let py = position.y as f32;
+                self.handle_modal_cursor_moved(px, py);
+                if self.crafting_ui_open {
+                    let sw = self.size.width as f32;
+                    let sh = self.size.height as f32;
+                    self.crafting_hovered_grid = None;
+                    self.crafting_hovered_inv = None;
+                    self.crafting_hovered_output = false;
+                    match self.crafting_slot_hit(px, py, sw, sh) {
+                        CraftingHit::GridSlot(r, c) => self.crafting_hovered_grid = Some((r, c)),
+                        CraftingHit::InvSlot(i) => {
+                            self.crafting_hovered_inv = Some(i);
+                            // Initialise qty on first hover
+                            if self.crafting_inv_qty[i] == 0.0 {
+                                self.crafting_inv_qty[i] = self.player.inventory
+                                    .get_slot(i).map(|s| s.count).unwrap_or(0.0);
+                            }
+                        }
+                        CraftingHit::OutputSlot => self.crafting_hovered_output = true,
+                        CraftingHit::None => {}
+                    }
+                }
                 false // don't consume — other handlers may need it
             }
             _ => false,
@@ -3751,6 +4182,12 @@ impl State {
         let direction = self.camera.get_direction();
         self.targeted_block = self.player.raycast_block(direction, &self.world)
             .map(|(x, y, z, _)| (x, y, z));
+
+        // Update crafting table hover hint
+        self.hovered_crafting_table = match self.targeted_block {
+            Some((x, y, z)) => self.world.get_block_world(x, y, z) == BlockType::CraftingTable,
+            None => false,
+        };
 
         // Update block breaking / melee combat
         self.update_block_breaking(dt);
@@ -4706,6 +5143,36 @@ impl State {
 
         } else {
             // ── NORMAL: crosshair + HUD ───────────────────────────────────────
+
+            // If the crafting UI is open, render its modal sand background first
+            if self.crafting_ui_open {
+                let sw = self.size.width  as f32;
+                let sh = self.size.height as f32;
+                let sand_verts = self.crafting_modal.build_sand_vertices(sw, sh);
+                self.queue.write_buffer(
+                    &self.modal_sand_vertex_buffer,
+                    0,
+                    bytemuck::cast_slice(&sand_verts),
+                );
+                let mut sand_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("Crafting Sand Pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &swap_chain_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load:  wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+                sand_pass.set_pipeline(&self.modal_sand_pipeline);
+                sand_pass.set_bind_group(0, &self.modal_sand_bind_group, &[]);
+                sand_pass.set_vertex_buffer(0, self.modal_sand_vertex_buffer.slice(..));
+                sand_pass.draw(0..sand_verts.len() as u32, 0..1);
+            }
 
             // --- PASS 7: UI (Crosshair & HUD) ---
             // Always render UI directly to Swap Chain so it stays sharp and on top

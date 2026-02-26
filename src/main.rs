@@ -126,7 +126,9 @@ impl ApplicationHandler for App {
                 }
                 return; // Consume click while paused
             }
-            if !state.is_mouse_captured() {
+            // When the crafting UI is open the mouse is freed; pass clicks through
+            // to state.input() so crafting slot logic can handle them.
+            if !state.is_mouse_captured() && !state.is_crafting_open() {
                 state.capture_mouse();
                 return; // Don't process this click as game input
             }
@@ -147,8 +149,10 @@ impl ApplicationHandler for App {
                     },
                 ..
             } => {
-                // Toggle pause menu
-                if state.is_paused() {
+                // Close crafting UI first, then pause menu
+                if state.is_crafting_open() {
+                    state.close_crafting_ui();
+                } else if state.is_paused() {
                     state.close_pause_menu();
                 } else {
                     state.open_pause_menu();

@@ -29,6 +29,27 @@ pub enum BlockType {
 }
 
 impl BlockType {
+    pub fn name(&self) -> &'static str {
+        match self {
+            BlockType::Air => "Air",
+            BlockType::Dirt => "Dirt",
+            BlockType::Stone => "Stone",
+            BlockType::Wood => "Wood",
+            BlockType::Leaves => "Leaves",
+            BlockType::Sand => "Sand",
+            BlockType::Water => "Water",
+            BlockType::Cobblestone => "Cobblestone",
+            BlockType::Planks => "Planks",
+            BlockType::GlowStone => "Glowstone",
+            BlockType::Ice => "Ice",
+            BlockType::Snow => "Snow",
+            BlockType::GrassTuft => "Grass",
+            BlockType::GrassTuftTall => "Tall Grass",
+            BlockType::CraftingTable => "Crafting Table",
+            BlockType::Boundary => "Boundary",
+        }
+    }
+
     pub fn is_solid(&self) -> bool {
         !matches!(self, BlockType::Air | BlockType::Water | BlockType::GrassTuft | BlockType::GrassTuftTall | BlockType::Boundary)
     }

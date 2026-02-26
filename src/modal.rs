@@ -92,6 +92,11 @@ pub struct Modal {
     pub panel_w: f32,
     pub panel_h: f32,
 
+    /// Panel width as a fraction of screen width (e.g. 0.35 for the pause menu).
+    w_ratio: f32,
+    /// Panel width-to-height aspect ratio (e.g. 16.0/9.0).
+    aspect: f32,
+
     // Structural sizes:
     //   border_w / bevel_w / btn_border_w / btn_bevel_w / shadow_offset
     //     → fixed pixels (MODAL_*_PX constants, never scale)
@@ -101,16 +106,20 @@ pub struct Modal {
     bevel_w:         f32,
     btn_border_w:    f32,
     btn_bevel_w:     f32,
-    title_scale:     f32,
+    pub title_scale:     f32,
     btn_text_scale:  f32,
-    title_y_offset:  f32,
+    pub title_y_offset:  f32,
     shadow_offset:   f32,
 }
 
 impl Modal {
     /// Create a new modal with the given title and button labels.
+    ///
+    /// `w_ratio` controls the panel width as a fraction of screen width (e.g. `MODAL_W_RATIO`).
+    /// `aspect` controls the width-to-height aspect ratio (e.g. `MODAL_ASPECT`).
+    ///
     /// Call `update_layout` before generating vertices.
-    pub fn new(title: &'static str, button_labels: &[&'static str]) -> Self {
+    pub fn new(title: &'static str, button_labels: &[&'static str], w_ratio: f32, aspect: f32) -> Self {
         let buttons = button_labels.iter().map(|&label| ModalButton {
             label,
             x: 0.0, y: 0.0, w: 0.0, h: 0.0,
@@ -123,6 +132,8 @@ impl Modal {
             buttons,
             panel_x: 0.0, panel_y: 0.0,
             panel_w: 0.0, panel_h: 0.0,
+            w_ratio,
+            aspect,
             // Fixed pixel defaults (same values as the PX constants)
             border_w:       MODAL_BORDER_PX,
             bevel_w:        MODAL_BEVEL_PX,
@@ -139,9 +150,9 @@ impl Modal {
     /// screen dimensions.  Call this on startup, resize, and whenever the
     /// screen changes.
     pub fn update_layout(&mut self, screen_w: f32, screen_h: f32) {
-        // Width driven by screen; height derived so the panel is always 16:9.
-        let pw = screen_w * MODAL_W_RATIO;
-        let ph = pw / MODAL_ASPECT;
+        // Width driven by screen; height derived from the configured aspect ratio.
+        let pw = screen_w * self.w_ratio;
+        let ph = pw / self.aspect;
 
         // If the 16:9 height would overflow 90 % of the screen height, clamp
         // the height and re-derive the width from the aspect ratio.

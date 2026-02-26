@@ -1,121 +1,58 @@
 use crate::block::BlockType;
-use crate::inventory::Inventory;
 
-#[derive(Debug, Clone)]
-pub struct Recipe {
-    pub inputs: Vec<(BlockType, f32)>,
-    pub output: (BlockType, f32),
+pub type GridSlot = Option<(BlockType, f32)>;
+
+#[derive(Clone)]
+pub struct CraftingGrid {
+    pub slots: [[GridSlot; 3]; 3], // [row][col]
 }
 
-pub struct CraftingSystem {
-    recipes: Vec<Recipe>,
+impl Default for CraftingGrid {
+    fn default() -> Self {
+        Self {
+            slots: [[None; 3]; 3],
+        }
+    }
 }
 
-impl CraftingSystem {
-    pub fn new() -> Self {
-        let mut system = Self {
-            recipes: Vec::new(),
-        };
-        system.register_default_recipes();
-        system
-    }
+/// Returns the crafted output `(BlockType, qty)` if the grid matches a recipe, else `None`.
+pub fn match_recipe(grid: &CraftingGrid) -> Option<(BlockType, f32)> {
+    // Collect non-empty cells as (row, col, block_type, qty)
+    let filled: Vec<(usize, usize, BlockType, f32)> = (0..3)
+        .flat_map(|r| (0..3).map(move |c| (r, c)))
+        .filter_map(|(r, c)| grid.slots[r][c].map(|(bt, qty)| (r, c, bt, qty)))
+        .collect();
 
-    fn register_default_recipes(&mut self) {
-        // Wood -> Planks (1 wood = 4 planks)
-        self.recipes.push(Recipe {
-            inputs: vec![(BlockType::Wood, 1.0)],
-            output: (BlockType::Planks, 4.0),
-        });
-
-        // Planks -> Wood (4 planks = 1 wood)
-        self.recipes.push(Recipe {
-            inputs: vec![(BlockType::Planks, 4.0)],
-            output: (BlockType::Wood, 1.0),
-        });
-
-        // Stone -> Cobblestone
-        self.recipes.push(Recipe {
-            inputs: vec![(BlockType::Stone, 1.0)],
-            output: (BlockType::Cobblestone, 1.0),
-        });
-
-        // Cobblestone -> Stone
-        self.recipes.push(Recipe {
-            inputs: vec![(BlockType::Cobblestone, 1.0)],
-            output: (BlockType::Stone, 1.0),
-        });
-
-        // Sand -> Stone (smelting)
-        self.recipes.push(Recipe {
-            inputs: vec![(BlockType::Sand, 4.0)],
-            output: (BlockType::Stone, 1.0),
-        });
-    }
-
-    pub fn can_craft(&self, inventory: &Inventory, recipe_index: usize) -> bool {
-        if recipe_index >= self.recipes.len() {
-            return false;
+    // ── Recipe 1: single Wood slot → Planks × 4 (proportional) ──────────
+    if filled.len() == 1 {
+        let (_, _, bt, qty) = filled[0];
+        if bt == BlockType::Wood {
+            return Some((BlockType::Planks, qty * 4.0));
         }
-
-        let recipe = &self.recipes[recipe_index];
-        self.has_ingredients(inventory, &recipe.inputs)
     }
 
-    fn has_ingredients(&self, inventory: &Inventory, ingredients: &[(BlockType, f32)]) -> bool {
-        for &(block_type, required_count) in ingredients {
-            let mut total = 0.0;
-            for slot in &inventory.slots {
-                if let Some(stack) = slot {
-                    if stack.block_type == block_type {
-                        total += stack.count;
-                    }
-                }
-            }
-            if total < required_count {
-                return false;
+    // ── Recipe 2: 2×2 of Planks (1.0 each) anywhere in grid → CraftingTable ──
+    if filled.len() == 4 {
+        // Try all four possible top-left corners of a 2×2 inside a 3×3
+        for (tr, tc) in [(0usize, 0usize), (0, 1), (1, 0), (1, 1)] {
+            let corners = [
+                (tr,     tc),
+                (tr,     tc + 1),
+                (tr + 1, tc),
+                (tr + 1, tc + 1),
+            ];
+            let all_match = corners.iter().all(|&(r, c)| {
+                matches!(grid.slots[r][c], Some((BlockType::Planks, qty)) if (qty - 1.0).abs() < 0.001)
+            });
+            // Also verify the 4 filled cells are exactly these 4 corners
+            let exact = all_match && filled.iter().all(|&(fr, fc, _, _)| {
+                corners.contains(&(fr, fc))
+            });
+            if exact {
+                return Some((BlockType::CraftingTable, 1.0));
             }
         }
-        true
     }
 
-    pub fn craft(&self, inventory: &mut Inventory, recipe_index: usize) -> bool {
-        if !self.can_craft(inventory, recipe_index) {
-            return false;
-        }
-
-        let recipe = &self.recipes[recipe_index];
-
-        // Remove ingredients
-        for &(block_type, required_count) in &recipe.inputs {
-            let mut remaining = required_count;
-            for i in 0..inventory.size {
-                if remaining <= 0.0 {
-                    break;
-                }
-                if let Some(stack) = &inventory.slots[i] {
-                    if stack.block_type == block_type {
-                        let to_remove = remaining.min(stack.count);
-                        inventory.remove_item(i, to_remove);
-                        remaining -= to_remove;
-                    }
-                }
-            }
-        }
-
-        // Add output
-        inventory.add_item(recipe.output.0, recipe.output.1)
-    }
-
-    pub fn get_recipes(&self) -> &[Recipe] {
-        &self.recipes
-    }
-
-    pub fn get_available_recipes(&self, inventory: &Inventory) -> Vec<usize> {
-        self.recipes
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| self.can_craft(inventory, *i))
-            .map(|(i, _)| i)
-            .collect()
-    }
+    None
 }
