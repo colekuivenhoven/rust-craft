@@ -72,11 +72,11 @@ fn crafting_layout(panel_x: f32, panel_y: f32, panel_w: f32, panel_h: f32) -> Cr
     let row1_x      = content_x + (content_w - row1_w) * 0.5;
 
     // Row 1 vertical start: below the crafting modal's title (fixed 20px offset + title height)
-    let title_scale  = 10.5f32; // fixed smaller scale for crafting modal
+    let title_scale  = 10.5f32; // The scale of the AREA used by the title. Naming should probably be updated here!
     let title_h      = 7.0 * title_scale;
     let title_offset = bevel_pad + interior_pad; // align title to top of content area
     let title_end_y  = panel_y + title_offset + title_h;
-    let row1_y       = title_end_y + panel_h * 0.15;
+    let row1_y       = title_end_y + panel_h * 0.12;
 
     // Row 2 (inventory): anchored to bottom of content area, horizontally centered
     let row2_y = content_bottom_y - ct_slot;
@@ -2183,9 +2183,8 @@ impl State {
         let sw = self.size.width as f32;
         let sh = self.size.height as f32;
         self.crafting_modal.update_layout(sw, sh);
-        // Smaller title, aligned to top of content area
-        self.crafting_modal.title_scale      = 2.5;
-        self.crafting_modal.title_y_offset   = (crate::modal::MODAL_BORDER_PX + crate::modal::MODAL_BEVEL_PX) + 8.0;
+        self.crafting_modal.title_scale = 4.0;
+        self.crafting_modal.title_y_offset = (crate::modal::MODAL_BORDER_PX + crate::modal::MODAL_BEVEL_PX) + 8.0;
         self.crafting_ui_open = true;
         self.crafting_grid = CraftingGrid::default();
         self.crafting_held = None;

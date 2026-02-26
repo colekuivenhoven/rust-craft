@@ -22,3 +22,9 @@ rodio = "0.17"
 [profile.release]
 opt-level = 3
 lto = true
+
+# Fast iteration build: good performance, no LTO, much faster to compile
+[profile.dev-release]
+inherits = "release"
+lto = false
+opt-level = 2
