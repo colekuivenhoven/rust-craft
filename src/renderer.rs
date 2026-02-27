@@ -208,6 +208,7 @@ pub struct State {
     show_chunk_outlines: bool,
     noclip_mode: bool,
     show_enemy_hitboxes: bool,
+    smooth_lighting: bool,
     
     // Underwater effect (Post-Processing)
     camera_underwater: bool,
@@ -2045,6 +2046,7 @@ impl State {
             show_chunk_outlines: player_save.as_ref().map_or(false, |s| s.show_chunk_outlines),
             noclip_mode:         player_save.as_ref().map_or(false, |s| s.noclip_mode),
             show_enemy_hitboxes: player_save.as_ref().map_or(false, |s| s.show_enemy_hitboxes),
+            smooth_lighting: true,
             // Underwater effect
             camera_underwater: false,
             underwater_pipeline,
@@ -2763,6 +2765,36 @@ impl State {
             fps_scale,
             fps_scale,
             hitbox_color,
+            screen_w,
+            screen_h,
+        );
+
+        // === Smooth Lighting Toggle Indicator (below Enemy Hitbox) ===
+        let (smooth_text, smooth_color, smooth_bg_color) = if self.smooth_lighting {
+            ("F4 - SMOOTH LIGHTING: ON", [0.5, 1.0, 0.5, 1.0], [0.0, 0.2, 0.0, 0.6])
+        } else {
+            ("F4 - SMOOTH LIGHTING: OFF", [1.0, 1.0, 1.0, 0.9], [0.0, 0.0, 0.0, 0.5])
+        };
+        let smooth_y = hitbox_y + fps_char_h + 8.0;
+        let smooth_text_width = smooth_text.len() as f32 * fps_char_w;
+        bitmap_font::push_rect_px(
+            &mut verts,
+            fps_x - 4.0,
+            smooth_y - 4.0,
+            smooth_text_width + 8.0,
+            fps_char_h + 8.0,
+            smooth_bg_color,
+            screen_w,
+            screen_h,
+        );
+        bitmap_font::draw_text_quads(
+            &mut verts,
+            smooth_text,
+            fps_x,
+            smooth_y,
+            fps_scale,
+            fps_scale,
+            smooth_color,
             screen_w,
             screen_h,
         );
@@ -3625,6 +3657,17 @@ impl State {
                         }
                         true
                     }
+                    KeyCode::F4 => {
+                        if is_pressed {
+                            self.smooth_lighting = !self.smooth_lighting;
+                            println!("Smooth lighting: {}", if self.smooth_lighting { "ON" } else { "OFF" });
+                            // Mark all loaded chunks dirty so they get re-meshed with the new setting
+                            for chunk in self.world.chunks.values_mut() {
+                                chunk.dirty = true;
+                            }
+                        }
+                        true
+                    }
                     _ => false,
                 }
             }
@@ -3824,7 +3867,7 @@ impl State {
                     world_pos.z + dz as f32 * offset,
                 );
 
-                let face_verts = create_face_vertices(offset_pos, block_type, face_idx, 1.0, tex_index, uvs, [1.0; 4]);
+                let face_verts = create_face_vertices(offset_pos, block_type, face_idx, [1.0; 4], tex_index, uvs, [1.0; 4]);
 
                 let base_index = vertices.len() as u16;
                 vertices.extend_from_slice(&face_verts);
@@ -4098,7 +4141,7 @@ impl State {
         // Update world
         self.world
             .update_chunks((self.camera.position.x, self.camera.position.z));
-        self.world.rebuild_dirty_chunks();
+        self.world.rebuild_dirty_chunks(self.smooth_lighting);
 
         // Update water simulation
         self.water_simulation.update(&mut self.world, dt);

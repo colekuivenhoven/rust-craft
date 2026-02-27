@@ -75,9 +75,9 @@ impl World {
             self.chunks.insert(pos, chunk);
         }
 
-        // Mark neighbors dirty
+        // Mark neighbors dirty (cardinals + diagonals, so corner smooth-lighting samples refresh)
         for (cx, cz) in &new_chunk_positions {
-            for (dx, dz) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+            for (dx, dz) in [(-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (-1, 1), (1, -1), (1, 1)] {
                 let neighbor_pos = (cx + dx, cz + dz);
                 if let Some(neighbor) = self.chunks.get_mut(&neighbor_pos) {
                     neighbor.dirty = true;
@@ -125,9 +125,9 @@ impl World {
             new_positions.push(pos);
         }
 
-        // Mark neighbors dirty for new chunks
+        // Mark neighbors dirty for new chunks (cardinals + diagonals, so corner smooth-lighting samples refresh)
         for (cx, cz) in &new_positions {
-            for (dx, dz) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+            for (dx, dz) in [(-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (-1, 1), (1, -1), (1, 1)] {
                 let neighbor_pos = (cx + dx, cz + dz);
                 if let Some(neighbor) = self.chunks.get_mut(&neighbor_pos) {
                     neighbor.dirty = true;
@@ -237,7 +237,7 @@ impl World {
         self.propagate_light_for_chunk((chunk_x, chunk_z));
     }
 
-    pub fn rebuild_dirty_chunks(&mut self) {
+    pub fn rebuild_dirty_chunks(&mut self, smooth_lighting: bool) {
         // Recalculate lighting only for chunks explicitly marked light_dirty
         // (e.g., from new chunk loading, NOT from single block changes which use
         // incremental updates via on_block_removed/on_block_placed)
@@ -274,12 +274,16 @@ impl World {
                 if let Some(center) = self.chunks.get(&pos) {
                     let neighbors = ChunkNeighbors {
                         center,
-                        left: self.chunks.get(&(cx - 1, cz)),
-                        right: self.chunks.get(&(cx + 1, cz)),
-                        front: self.chunks.get(&(cx, cz + 1)),
-                        back: self.chunks.get(&(cx, cz - 1)),
+                        left:        self.chunks.get(&(cx - 1, cz    )),
+                        right:       self.chunks.get(&(cx + 1, cz    )),
+                        front:       self.chunks.get(&(cx,     cz + 1)),
+                        back:        self.chunks.get(&(cx,     cz - 1)),
+                        front_left:  self.chunks.get(&(cx - 1, cz + 1)),
+                        front_right: self.chunks.get(&(cx + 1, cz + 1)),
+                        back_left:   self.chunks.get(&(cx - 1, cz - 1)),
+                        back_right:  self.chunks.get(&(cx + 1, cz - 1)),
                     };
-                    Some(Chunk::generate_mesh(&neighbors))
+                    Some(Chunk::generate_mesh(&neighbors, smooth_lighting))
                 } else {
                     None
                 }

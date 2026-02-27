@@ -101,13 +101,19 @@ pub struct Chunk {
     pub modified: bool,                    // True if chunk has player modifications (needs saving)
 }
 
-/// Helper struct to provide safe access to neighboring chunks during mesh generation
+/// Helper struct to provide safe access to neighboring chunks during mesh generation.
+/// Includes the 4 cardinal and 4 diagonal neighbors so that smooth-lighting and AO
+/// samples near chunk corners can cross into diagonal chunks correctly.
 pub struct ChunkNeighbors<'a> {
     pub center: &'a Chunk,
-    pub left: Option<&'a Chunk>,   // (x-1, z)
-    pub right: Option<&'a Chunk>,  // (x+1, z)
-    pub front: Option<&'a Chunk>,  // (x, z+1)
-    pub back: Option<&'a Chunk>,   // (x, z-1)
+    pub left:         Option<&'a Chunk>,  // (x-1, z  )
+    pub right:        Option<&'a Chunk>,  // (x+1, z  )
+    pub front:        Option<&'a Chunk>,  // (x,   z+1)
+    pub back:         Option<&'a Chunk>,  // (x,   z-1)
+    pub front_left:   Option<&'a Chunk>,  // (x-1, z+1)
+    pub front_right:  Option<&'a Chunk>,  // (x+1, z+1)
+    pub back_left:    Option<&'a Chunk>,  // (x-1, z-1)
+    pub back_right:   Option<&'a Chunk>,  // (x+1, z-1)
 }
 
 impl<'a> ChunkNeighbors<'a> {
@@ -147,16 +153,20 @@ impl<'a> ChunkNeighbors<'a> {
     }
 
     fn resolve_coordinates(&self, x: i32, z: i32) -> (Option<&'a Chunk>, usize, usize) {
-        if x < 0 {
-            (self.left, (x + CHUNK_SIZE as i32) as usize, z as usize)
-        } else if x >= CHUNK_SIZE as i32 {
-            (self.right, (x - CHUNK_SIZE as i32) as usize, z as usize)
-        } else if z < 0 {
-            (self.back, x as usize, (z + CHUNK_SIZE as i32) as usize)
-        } else if z >= CHUNK_SIZE as i32 {
-            (self.front, x as usize, (z - CHUNK_SIZE as i32) as usize)
-        } else {
-            (Some(self.center), x as usize, z as usize)
+        let cs = CHUNK_SIZE as i32;
+        match (x < 0, x >= cs, z < 0, z >= cs) {
+            // Diagonals
+            (true,  false, true,  false) => (self.back_left,   (x + cs) as usize, (z + cs) as usize),
+            (true,  false, false, true)  => (self.front_left,  (x + cs) as usize, (z - cs) as usize),
+            (false, true,  true,  false) => (self.back_right,  (x - cs) as usize, (z + cs) as usize),
+            (false, true,  false, true)  => (self.front_right, (x - cs) as usize, (z - cs) as usize),
+            // Cardinals
+            (true,  false, false, false) => (self.left,  (x + cs) as usize, z as usize),
+            (false, true,  false, false) => (self.right, (x - cs) as usize, z as usize),
+            (false, false, true,  false) => (self.back,  x as usize, (z + cs) as usize),
+            (false, false, false, true)  => (self.front, x as usize, (z - cs) as usize),
+            // Center
+            _ => (Some(self.center), x as usize, z as usize),
         }
     }
 }
@@ -1338,7 +1348,7 @@ impl Chunk {
         }
     }
 
-    pub fn generate_mesh(neighbors: &ChunkNeighbors) -> (Vec<Vertex>, Vec<u16>, Vec<Vertex>, Vec<u16>, Vec<Vertex>, Vec<u16>) {
+    pub fn generate_mesh(neighbors: &ChunkNeighbors, smooth_lighting: bool) -> (Vec<Vertex>, Vec<u16>, Vec<Vertex>, Vec<u16>, Vec<Vertex>, Vec<u16>) {
         let mut vertices = Vec::new();
         let mut indices = Vec::new();
         let mut water_vertices = Vec::new();
@@ -1453,7 +1463,42 @@ impl Chunk {
 
                         if should_draw {
                             let light = neighbors.get_light(nx, ny, nz);
-                            let light_normalized = light as f32 / 15.0;
+
+                            // Compute per-vertex light: smooth mode averages the face-adjacent block
+                            // with its three AO-corner neighbors; flat mode uses only the face block.
+                            //
+                            // For opaque solid AO-neighbors we fall back to l0 (the face-adjacent
+                            // light) instead of sampling their internal value (which is always 0).
+                            // Solid blocks carry no meaningful open-air light — AO already handles
+                            // the corner darkening from solid geometry, so averaging in their 0s
+                            // would double-darken edges and corners.
+                            let light_values: [f32; 4] = if smooth_lighting {
+                                std::array::from_fn(|v| {
+                                    let offsets = &AO_OFFSETS[face_idx][v];
+                                    let l0 = light as f32;
+
+                                    // Sample a neighbor's light, but use l0 for opaque solids.
+                                    let mut sample = |ox: i32, oy: i32, oz: i32| -> f32 {
+                                        let b = neighbors.get_block(
+                                            x as i32 + ox, y as i32 + oy, z as i32 + oz,
+                                        );
+                                        if b.is_solid() && !b.is_transparent() {
+                                            l0
+                                        } else {
+                                            neighbors.get_light(
+                                                x as i32 + ox, y as i32 + oy, z as i32 + oz,
+                                            ) as f32
+                                        }
+                                    };
+
+                                    let l1 = sample(offsets[0][0], offsets[0][1], offsets[0][2]);
+                                    let l2 = sample(offsets[1][0], offsets[1][1], offsets[1][2]);
+                                    let l3 = sample(offsets[2][0], offsets[2][1], offsets[2][2]);
+                                    (l0 + l1 + l2 + l3) / (4.0 * 15.0)
+                                })
+                            } else {
+                                [light as f32 / 15.0; 4]
+                            };
 
                             // Check if block above is solid (for grass/dirt texture selection)
                             let block_above = neighbors.get_block(x as i32, y as i32 + 1, z as i32);
@@ -1532,7 +1577,7 @@ impl Chunk {
 
                                 // Water uses separate mesh with wave factor encoded in alpha
                                 let face_verts = create_water_face_vertices(
-                                    world_pos, face_idx, light_normalized, tex_index, uvs, edge_factors, is_surface_water
+                                    world_pos, face_idx, light_values, tex_index, uvs, edge_factors, is_surface_water
                                 );
 
                                 let base_index = water_vertices.len() as u16;
@@ -1555,7 +1600,7 @@ impl Chunk {
                                 use crate::block::create_face_vertices_with_alpha;
                                 let alpha = block.get_alpha();
                                 let face_verts = create_face_vertices_with_alpha(
-                                    world_pos, block, face_idx, light_normalized, alpha, tex_index, uvs, ao_values
+                                    world_pos, block, face_idx, light_values, alpha, tex_index, uvs, ao_values
                                 );
 
                                 let base_index = transparent_vertices.len() as u16;
@@ -1611,16 +1656,16 @@ impl Chunk {
 
                                 let face_verts = if block == BlockType::Leaves || (is_grass_dirt && face_idx == 2) {
                                     // Leaves: always tinted. Grass dirt top face: grass_top with tint.
-                                    create_face_vertices_tinted(world_pos, face_idx, light_normalized, actual_tex, actual_uvs, ao_values, tint)
+                                    create_face_vertices_tinted(world_pos, face_idx, light_values, actual_tex, actual_uvs, ao_values, tint)
                                 } else if is_grass_dirt && face_idx != 2 && face_idx != 3 {
                                     // Side faces of exposed dirt: pack overlay index (bits 16-23) and
                                     // tint parameter (bits 24-31) into tex_index. Shader reconstructs
                                     // tint and uses vertex color (dirt color) for the base texture.
                                     let tint_byte = (tint_t * 255.0) as u32;
                                     let packed_tex = tex_index | ((TEX_GRASS_SIDE + 1) << 16) | (tint_byte << 24);
-                                    create_face_vertices(world_pos, block, face_idx, light_normalized, packed_tex, uvs, ao_values)
+                                    create_face_vertices(world_pos, block, face_idx, light_values, packed_tex, uvs, ao_values)
                                 } else {
-                                    create_face_vertices(world_pos, block, face_idx, light_normalized, actual_tex, actual_uvs, ao_values)
+                                    create_face_vertices(world_pos, block, face_idx, light_values, actual_tex, actual_uvs, ao_values)
                                 };
 
                                 let base_index = vertices.len() as u16;
