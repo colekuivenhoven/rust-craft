@@ -9,8 +9,8 @@ use crate::texture::TEX_NONE;
 // ============================================================================
 
 // Spawning
-pub const BIRD_SPAWN_INTERVAL: f32 = 0.5;      // Seconds between spawn attempts
-pub const BIRD_MAX_COUNT: usize = 350;         // Maximum birds in world
+pub const BIRD_SPAWN_INTERVAL: f32 = 5.0;      // Seconds between spawn attempts
+pub const BIRD_MAX_COUNT: usize = 150;         // Maximum birds in world
 pub const BIRD_SPAWN_DISTANCE: f32 = 40.0;     // Distance from player to spawn
 pub const BIRD_DESPAWN_DISTANCE: f32 = 100.0;  // Distance at which birds despawn
 

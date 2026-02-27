@@ -186,6 +186,7 @@ pub struct TerrainConfig {
     pub sky_island_stalactite_threshold: f64,
     pub sky_island_stalactite_scale_factor: f64,
     pub sky_island_center_bonus: f64,
+    pub sky_island_biome_fade_end: f64,
 
     // ── Depth layers ──────────────────────────────────────────────────────────
     pub depth_near_surface: usize,
@@ -359,6 +360,7 @@ impl Default for TerrainConfig {
             sky_island_stalactite_threshold: 0.35,
             sky_island_stalactite_scale_factor: 5.0,
             sky_island_center_bonus: 4.0,
+            sky_island_biome_fade_end: 0.75,
 
             depth_near_surface: 3,
             depth_transition: 6,
@@ -452,6 +454,8 @@ pub struct CloudConfig {
     pub pixel_size: f32,
     pub threshold: f64,
     pub noise_scale: f64,
+    /// Cloud drift speed in world units per second (X axis).
+    /// Z drift is automatically 30% of this value.
     pub noise_offset_change_speed: f64,
 }
 
@@ -596,7 +600,7 @@ impl Default for CloudConfig {
             pixel_size: 8.0,
             threshold: 0.65,
             noise_scale: 0.005,
-            noise_offset_change_speed: 0.01,
+            noise_offset_change_speed: 5.0, // world units per second X drift
         }
     }
 }

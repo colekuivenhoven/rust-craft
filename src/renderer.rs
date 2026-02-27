@@ -256,6 +256,8 @@ pub struct State {
     cloud_vertex_buffer: wgpu::Buffer,
     cloud_index_buffer: wgpu::Buffer,
     cloud_index_count: u32,
+    cloud_drift_buffer: wgpu::Buffer,
+    cloud_drift_bind_group: wgpu::BindGroup,
 
     // ── Pause / Modal ─────────────────────────────────────────────────────
     pub paused: bool,
@@ -1164,9 +1166,43 @@ impl State {
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/cloud_shader.wgsl").into()),
         });
 
+        // Drift uniform: [drift_x, drift_z, pad, pad] — 16 bytes.
+        // Applied in the vertex shader so the CPU never rewrites vertex positions per frame.
+        let cloud_drift_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Cloud Drift Bind Group Layout"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+
+        let cloud_drift_buffer = {
+            use wgpu::util::DeviceExt;
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Cloud Drift Buffer"),
+                contents: bytemuck::bytes_of(&[0.0f32, 0.0, 0.0, 0.0]),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            })
+        };
+
+        let cloud_drift_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Cloud Drift Bind Group"),
+            layout: &cloud_drift_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: cloud_drift_buffer.as_entire_binding(),
+            }],
+        });
+
         let cloud_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Cloud Pipeline Layout"),
-            bind_group_layouts: &[&camera_bind_group_layout, &fog_bind_group_layout],
+            bind_group_layouts: &[&camera_bind_group_layout, &fog_bind_group_layout, &cloud_drift_bind_group_layout],
             push_constant_ranges: &[],
         });
 
@@ -2089,6 +2125,8 @@ impl State {
             cloud_vertex_buffer,
             cloud_index_buffer,
             cloud_index_count: 0,
+            cloud_drift_buffer,
+            cloud_drift_bind_group,
 
             // Pause / Modal
             paused: false,
@@ -4158,41 +4196,47 @@ impl State {
         // Update fish
         self.fish_manager.update(dt, self.player.position, &self.world);
 
-        // Update clouds and regenerate buffers
-        self.cloud_manager.update(self.player.position, self.world.get_render_distance());
-        let (cloud_vertices, cloud_indices) = self.cloud_manager.get_geometry();
+        // Update clouds: advances drift and loads/unloads chunks as needed
+        self.cloud_manager.update(self.player.position, dt, self.world.get_render_distance());
 
-        if !cloud_vertices.is_empty() {
-            use wgpu::util::DeviceExt;
+        // Re-upload combined geometry to GPU only when the chunk set changed (rare)
+        if self.cloud_manager.geometry_rebuilt() {
+            let (cloud_vertices, cloud_indices) = self.cloud_manager.geometry();
+            if !cloud_vertices.is_empty() {
+                use wgpu::util::DeviceExt;
+                let vertex_data = bytemuck::cast_slice(cloud_vertices);
+                let index_data  = bytemuck::cast_slice(cloud_indices);
 
-            let vertex_data = bytemuck::cast_slice(&cloud_vertices);
-            let index_data = bytemuck::cast_slice(&cloud_indices);
+                if vertex_data.len() as u64 > self.cloud_vertex_buffer.size() {
+                    self.cloud_vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("Cloud Vertex Buffer"),
+                        contents: vertex_data,
+                        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    });
+                } else {
+                    self.queue.write_buffer(&self.cloud_vertex_buffer, 0, vertex_data);
+                }
 
-            // Recreate buffers if they're too small
-            if vertex_data.len() as u64 > self.cloud_vertex_buffer.size() {
-                self.cloud_vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("Cloud Vertex Buffer"),
-                    contents: vertex_data,
-                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                });
-            } else {
-                self.queue.write_buffer(&self.cloud_vertex_buffer, 0, vertex_data);
+                if index_data.len() as u64 > self.cloud_index_buffer.size() {
+                    self.cloud_index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("Cloud Index Buffer"),
+                        contents: index_data,
+                        usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+                    });
+                } else {
+                    self.queue.write_buffer(&self.cloud_index_buffer, 0, index_data);
+                }
             }
-
-            if index_data.len() as u64 > self.cloud_index_buffer.size() {
-                self.cloud_index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("Cloud Index Buffer"),
-                    contents: index_data,
-                    usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
-                });
-            } else {
-                self.queue.write_buffer(&self.cloud_index_buffer, 0, index_data);
-            }
-
-            self.cloud_index_count = cloud_indices.len() as u32;
-        } else {
-            self.cloud_index_count = 0;
+            self.cloud_index_count = self.cloud_manager.index_count();
         }
+
+        // Always update drift uniform (16 bytes) — this is the only per-frame cloud GPU write
+        let (drift_x, drift_z) = self.cloud_manager.get_drift();
+        self.queue.write_buffer(
+            &self.cloud_drift_buffer,
+            0,
+            bytemuck::bytes_of(&[drift_x, drift_z, 0.0f32, 0.0f32]),
+        );
 
         // Advance dropped-item physics (no auto-collect; player must right-click)
         self.dropped_item_manager.update(dt, &self.world);
@@ -4822,8 +4866,9 @@ impl State {
             cloud_pass.set_pipeline(&self.cloud_pipeline);
             cloud_pass.set_bind_group(0, &self.camera_bind_group, &[]);
             cloud_pass.set_bind_group(1, &self.fog_bind_group, &[]);
+            cloud_pass.set_bind_group(2, &self.cloud_drift_bind_group, &[]);
             cloud_pass.set_vertex_buffer(0, self.cloud_vertex_buffer.slice(..));
-            cloud_pass.set_index_buffer(self.cloud_index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+            cloud_pass.set_index_buffer(self.cloud_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
             cloud_pass.draw_indexed(0..self.cloud_index_count, 0, 0..1);
         }
 

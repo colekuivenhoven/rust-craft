@@ -20,6 +20,17 @@ struct FogUniform {
 @group(1) @binding(0)
 var<uniform> fog: FogUniform;
 
+// Cloud drift: xy = (drift_x, drift_z) in world units, applied in vertex shader
+struct CloudDrift {
+    x: f32,
+    z: f32,
+    _pad0: f32,
+    _pad1: f32,
+};
+
+@group(2) @binding(0)
+var<uniform> cloud_drift: CloudDrift;
+
 struct VertexInput {
     @location(0) position: vec3<f32>,
     @location(1) color: vec3<f32>,
@@ -41,10 +52,11 @@ struct VertexOutput {
 @vertex
 fn vs_main(model: VertexInput) -> VertexOutput {
     var out: VertexOutput;
-    let world_position = vec4<f32>(model.position, 1.0);
-    out.clip_position = camera.view_proj * world_position;
+    // Apply GPU-side drift so the CPU never needs to rewrite vertex positions
+    let drifted = vec3<f32>(model.position.x + cloud_drift.x, model.position.y, model.position.z + cloud_drift.z);
+    out.clip_position = camera.view_proj * vec4<f32>(drifted, 1.0);
     out.color = model.color;
-    out.frag_pos = model.position;
+    out.frag_pos = drifted;
     out.alpha = model.alpha;
     return out;
 }

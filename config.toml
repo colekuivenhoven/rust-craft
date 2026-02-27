@@ -184,6 +184,7 @@ sky_island_max_hill_height = 6.0           # Hill height on sky islands
 sky_island_stalactite_threshold = 0.35     # Lower = more frequent stalactites
 sky_island_stalactite_scale_factor = 15.0  # Scale factor for stalactite size
 sky_island_center_bonus = 8.0              # Stalactite length bonus the closer to center the stalactite is
+sky_island_biome_fade_end = 0.75          # Biome weight at which islands reach full strength (fade from min_biome_weight to this)
 
 depth_near_surface = 3                     # Blocks deep for dirt/sand layer
 depth_transition = 6                       # Blocks deep before full stone layer
@@ -197,6 +198,6 @@ use_square_fog = false                     # true = square fog (Chebyshev distan
 #* ── Cloud Settings ──────────────────────────────────────────────────────────────
 height = 155.0                             # Y-coordinate where clouds generate
 pixel_size = 8.0                           # Size of each cloud pixel (larger = more pixelated)
-threshold = 0.65                           # Noise threshold for cloud presence (0.0-1.0, higher = fewer clouds)
-noise_scale = 0.005                        # Scale of noise pattern (lower = larger cloud formations)
-noise_offset_change_speed = 0.005          # Speed of cloud animation/drift (higher = faster drifting clouds)
+threshold = 0.75                           # Noise threshold for cloud presence (0.0-1.0, higher = fewer clouds)
+noise_scale = 0.007                        # Scale of noise pattern (lower = larger cloud formations)
+noise_offset_change_speed = 5.0            # Cloud drift speed in world units per second (X axis; Z = 30% of this)

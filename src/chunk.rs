@@ -1016,19 +1016,19 @@ impl Chunk {
             }
         }
 
-        // === Floating Sky Islands (Desert Only) ===
+        // === Floating Sky Islands ===
         // Sky islands appear over desert and ocean biomes
         let stalactite_perlin = Perlin::new(seed_stalactite);
         let hill_perlin = Perlin::new(seed_hill);
 
         for x in 0..CHUNK_SIZE {
             for z in 0..CHUNK_SIZE {
-                // Only generate sky islands over desert or ocean biomes
+                // Only generate sky islands over desert or ocean biomes.
+                // Use the stronger of the two eligible biome weights as the fade input.
                 let biome_weights = column_biomes[x][z];
-                let is_desert_island = biome_weights.desert >= cfg.sky_island_min_biome_weight;
-                let is_ocean_island = biome_weights.ocean >= cfg.sky_island_min_biome_weight;
-                if !is_desert_island && !is_ocean_island {
-                    continue; // Skip other biomes
+                let eligible_weight = biome_weights.ocean.max(biome_weights.desert);
+                if eligible_weight < cfg.sky_island_min_biome_weight {
+                    continue;
                 }
 
                 let world_x = (world_offset_x + x as i32) as f64;
@@ -1070,7 +1070,12 @@ impl Chunk {
                 let island_min_y = island_center_y.saturating_sub(cfg.sky_island_base_thickness / 2 + stalactite_depth);
                 let island_max_y = (island_center_y + cfg.sky_island_base_thickness / 2 + hill_height + 1).min(CHUNK_HEIGHT);
 
-                let island_strength = smoothstep(cfg.sky_island_mask_threshold, cfg.sky_island_strength_threshold, island_mask);
+                // Biome edge fade: eligible_weight runs from sky_island_min_biome_weight (edge)
+                // to sky_island_biome_fade_end (well inside biome). Multiplying island_strength
+                // by this factor raises the voxel threshold near the boundary so the island
+                // thins out and disappears organically instead of being cut off with a flat wall.
+                let biome_fade = smoothstep(cfg.sky_island_min_biome_weight, cfg.sky_island_biome_fade_end, eligible_weight);
+                let island_strength = smoothstep(cfg.sky_island_mask_threshold, cfg.sky_island_strength_threshold, island_mask) * biome_fade;
 
                 for y in island_min_y..island_max_y {
                     let world_y = y as f64;
@@ -1096,7 +1101,7 @@ impl Chunk {
                         y_falloff
                     };
 
-                    let threshold = 0.50 - (island_strength * 0.20) - (taper * 0.15); // Tighter threshold
+                    let threshold = 0.50 - (island_strength * 0.20) - (taper * 0.15) + (1.0 - biome_fade) * 0.60;
 
                     if island_noise > threshold && self.blocks[x][y][z] == BlockType::Air {
                         let is_surface = y + 1 >= island_max_y || {
@@ -1115,7 +1120,7 @@ impl Chunk {
                             } else {
                                 above_y_falloff
                             };
-                            let above_threshold = 0.50 - (island_strength * 0.20) - (above_taper * 0.15);
+                            let above_threshold = 0.50 - (island_strength * 0.20) - (above_taper * 0.15) + (1.0 - biome_fade) * 0.60;
                             above_noise <= above_threshold
                         };
 
@@ -1136,7 +1141,7 @@ impl Chunk {
                             } else {
                                 check_y_falloff
                             };
-                            let check_threshold = 0.50 - (island_strength * 0.20) - (check_taper * 0.15);
+                            let check_threshold = 0.50 - (island_strength * 0.20) - (check_taper * 0.15) + (1.0 - biome_fade) * 0.60;
                             if check_noise > check_threshold {
                                 depth_from_surface += 1;
                             } else {
@@ -1145,7 +1150,7 @@ impl Chunk {
                         }
 
                         // Block types depend on biome
-                        self.blocks[x][y][z] = if is_desert_island {
+                        self.blocks[x][y][z] = if biome_weights.desert >= biome_weights.ocean {
                             // Desert sky islands are sandstone-like
                             if is_below_center {
                                 BlockType::Stone
