@@ -186,6 +186,10 @@ sky_island_stalactite_scale_factor = 15.0  # Scale factor for stalactite size
 sky_island_center_bonus = 8.0              # Stalactite length bonus the closer to center the stalactite is
 sky_island_biome_fade_end = 0.75          # Biome weight at which islands reach full strength (fade from min_biome_weight to this)
 
+# Sky Castle Settings
+sky_castle_spawn_chance = 0.40            # Fraction of eligible sky island grid cells that get a castle (0.0 = none, 1.0 = all)
+sky_castle_ruin_threshold = 0.60          # Ruin decay threshold for outer walls; higher = more crumbled sections
+
 depth_near_surface = 3                     # Blocks deep for dirt/sand layer
 depth_transition = 6                       # Blocks deep before full stone layer
 

@@ -1280,6 +1280,315 @@ impl Chunk {
             }
         }
 
+        // === Sky Island Castles ===
+        // Ancient Laputa / Nausicaä-style stone fortresses that crown sky islands.
+        // Architecture: circular ring wall with battlements → four drum corner towers
+        // → four smaller mid-wall towers at cardinal points → hollow stone keep with
+        // Planks floors → soaring central spire capped with a GlowStone crystal.
+        // Outer walls are partially ruined; tower tops bloom with Leaves overgrowth.
+        {
+            // One potential castle per CASTLE_GRID × CASTLE_GRID world-block cell.
+            const CASTLE_GRID: i32 = 96;
+            // Maximum distance any castle block appears from the castle centre.
+            const CASTLE_MAX_REACH: i32 = 16;
+
+            // Noise for procedural ruin damage and overgrowth (Laputa aesthetic)
+            let ruin_perlin   = Perlin::new(master_seed.wrapping_add(1000));
+            let growth_perlin = Perlin::new(master_seed.wrapping_add(1001));
+
+            // Grid cell range whose castles could reach into this chunk
+            let gcx_min = (world_offset_x - CASTLE_MAX_REACH).div_euclid(CASTLE_GRID) - 1;
+            let gcx_max = (world_offset_x + CHUNK_SIZE as i32 + CASTLE_MAX_REACH).div_euclid(CASTLE_GRID) + 1;
+            let gcz_min = (world_offset_z - CASTLE_MAX_REACH).div_euclid(CASTLE_GRID) - 1;
+            let gcz_max = (world_offset_z + CHUNK_SIZE as i32 + CASTLE_MAX_REACH).div_euclid(CASTLE_GRID) + 1;
+
+            // Geometry constants (all relative to castle centre, values are radii²)
+            const RING_RI2: f64 = 9.5  * 9.5;   // ring wall inner radius²
+            const RING_RO2: f64 = 11.5 * 11.5;  // ring wall outer radius²
+            const CT_OFF:   i32 = 7;             // corner tower centre offset (±7, ±7)
+            const CT_R2:    f64 = 3.2  * 3.2;   // corner tower radius²
+            const MT_OFF:   i32 = 11;            // mid-wall tower offset on each axis
+            const MT_R2:    f64 = 2.2  * 2.2;   // mid-wall tower radius²
+            const KEEP_H:   i32 = 4;             // keep half-width (walls at |rx|==4 or |rz|==4)
+            const CT_OFFSETS: [(i32, i32); 4] = [
+                ( CT_OFF,  CT_OFF), (-CT_OFF,  CT_OFF),
+                ( CT_OFF, -CT_OFF), (-CT_OFF, -CT_OFF),
+            ];
+            const MT_OFFSETS: [(i32, i32); 4] = [
+                ( MT_OFF, 0), (-MT_OFF, 0),
+                (0,  MT_OFF), (0, -MT_OFF),
+            ];
+
+            for gcx in gcx_min..=gcx_max {
+                for gcz in gcz_min..=gcz_max {
+                    let castle_cx = gcx * CASTLE_GRID + CASTLE_GRID / 2;
+                    let castle_cz = gcz * CASTLE_GRID + CASTLE_GRID / 2;
+                    let cx_f = castle_cx as f64;
+                    let cz_f = castle_cz as f64;
+
+                    // --- Replicate sky island biome eligibility at castle centre ---
+                    let raw_temp  = (temperature_perlin.get([cx_f * cfg.biome_scale, cz_f * cfg.biome_scale]) + 1.0) * 0.5;
+                    let raw_humid = (humidity_perlin.get([cx_f * cfg.biome_scale * 1.1, cz_f * cfg.biome_scale * 1.1 + 1000.0]) + 1.0) * 0.5;
+                    let cont_sc   = cfg.biome_scale * cfg.continental_scale_factor;
+                    let raw_cont  = (continentalness_perlin.get([cx_f * cont_sc, cz_f * cont_sc + 2000.0]) + 1.0) * 0.5;
+
+                    let ocean_w = if raw_cont < cfg.ocean_threshold_deep {
+                        1.0_f64
+                    } else if raw_cont < cfg.ocean_threshold_shallow {
+                        smoothstep(cfg.ocean_threshold_shallow, cfg.ocean_threshold_deep, raw_cont)
+                    } else {
+                        0.0_f64
+                    };
+                    let land = 1.0 - ocean_w;
+                    let arctic_w  = smoothstep(cfg.arctic_temp_threshold_high, cfg.arctic_temp_threshold_low, raw_temp) * land;
+                    let d_temp    = smoothstep(cfg.desert_temp_threshold_low,  cfg.desert_temp_threshold_high, raw_temp);
+                    let d_dry     = smoothstep(cfg.desert_humidity_threshold_high, cfg.desert_humidity_threshold_low, raw_humid);
+                    let d_inland  = smoothstep(cfg.desert_inland_threshold_low, cfg.desert_inland_threshold_high, raw_cont);
+                    let desert_w  = d_temp * d_dry * d_inland * land * (1.0 - arctic_w);
+
+                    if ocean_w.max(desert_w) < cfg.sky_island_min_biome_weight { continue; }
+
+                    // Require a strong island signal at the castle centre
+                    let island_mask = (sky_island_mask_perlin.get([
+                        cx_f * cfg.sky_island_mask_scale,
+                        cz_f * cfg.sky_island_mask_scale,
+                    ]) + 1.0) * 0.5;
+                    if island_mask < cfg.sky_island_mask_threshold + 0.05 { continue; }
+
+                    // --- Deterministic castle existence check ---
+                    let castle_seed = (castle_cx as u64)
+                        .wrapping_mul(2654435761)
+                        .wrapping_add((castle_cz as u64).wrapping_mul(2246822519))
+                        .wrapping_add(master_seed as u64);
+                    let mut c_rng = StdRng::seed_from_u64(castle_seed);
+                    if c_rng.gen::<f64>() > cfg.sky_castle_spawn_chance { continue; }
+
+                    // --- Castle base Y: sit the floor on the island surface ---
+                    let height_n = (sky_island_detail.get([
+                        cx_f * cfg.sky_island_detail_scale,
+                        cz_f * cfg.sky_island_detail_scale,
+                    ]) + 1.0) * 0.5;
+                    let island_cy = cfg.sky_island_base_y
+                        + (height_n * cfg.sky_island_height_range as f64) as usize;
+                    let hill_n = (hill_perlin.get([
+                        cx_f * cfg.sky_island_hill_scale,
+                        cz_f * cfg.sky_island_hill_scale,
+                    ]) + 1.0) * 0.5;
+                    let hill_h = (hill_n * cfg.sky_island_max_hill_height) as usize;
+                    // base_y matches the top surface of the island at its centre
+                    let base_y = (island_cy + (cfg.sky_island_base_thickness / 2) + hill_h + 1)
+                        .min(CHUNK_HEIGHT.saturating_sub(32)) as i32;
+
+                    // --- Render castle blocks for every column in this chunk ---
+                    for lx in 0..CHUNK_SIZE {
+                        for lz in 0..CHUNK_SIZE {
+                            let wx = world_offset_x + lx as i32;
+                            let wz = world_offset_z + lz as i32;
+                            let rx = wx - castle_cx;
+                            let rz = wz - castle_cz;
+                            let rxf = rx as f64;
+                            let rzf = rz as f64;
+                            let d2  = rxf * rxf + rzf * rzf;
+
+                            // Quick cull: only process columns within the castle footprint
+                            let corner_idx = CT_OFFSETS.iter().position(|&(tcx, tcz)| {
+                                let dx = (rx - tcx) as f64;
+                                let dz = (rz - tcz) as f64;
+                                dx * dx + dz * dz <= CT_R2
+                            });
+                            let mid_idx = MT_OFFSETS.iter().position(|&(tcx, tcz)| {
+                                let dx = (rx - tcx) as f64;
+                                let dz = (rz - tcz) as f64;
+                                dx * dx + dz * dz <= MT_R2
+                            });
+                            if d2 > RING_RO2 && corner_idx.is_none() && mid_idx.is_none() {
+                                continue;
+                            }
+
+                            // Also skip columns where the island is unlikely to exist
+                            let col_mask = (sky_island_mask_perlin.get([
+                                (wx as f64) * cfg.sky_island_mask_scale,
+                                (wz as f64) * cfg.sky_island_mask_scale,
+                            ]) + 1.0) * 0.5;
+                            if col_mask < cfg.sky_island_mask_threshold * 0.80 { continue; }
+
+                            // --- Membership tests ---
+                            let in_ring      = d2 >= RING_RI2 && d2 <= RING_RO2;
+                            let in_corner    = corner_idx.is_some();
+                            let in_mid       = mid_idx.is_some();
+                            let in_keep_area = rx.abs() <= KEEP_H && rz.abs() <= KEEP_H;
+                            let in_keep_wall = in_keep_area && (rx.abs() == KEEP_H || rz.abs() == KEEP_H);
+                            let in_keep_int  = in_keep_area && !in_keep_wall;
+                            // Spire: 3×3 perimeter wall and single centre spine
+                            let in_sp3w = (rx.abs() <= 1 && rz.abs() <= 1)
+                                          && (rx.abs() == 1 || rz.abs() == 1);
+                            let in_sp1  = rx == 0 && rz == 0;
+
+                            // --- Noise helpers (world-space for seamless cross-chunk seams) ---
+                            let ruin   = ruin_perlin.get([
+                                rxf * 0.30 + cx_f * 0.02,
+                                rzf * 0.30 + cz_f * 0.02,
+                            ]);
+                            let wall_ruined = ruin > cfg.sky_castle_ruin_threshold;
+                            let batt_ruined = ruin > cfg.sky_castle_ruin_threshold - 0.25;
+                            let growth      = growth_perlin.get([
+                                rxf * 0.55 + cx_f * 0.03,
+                                rzf * 0.55 + cz_f * 0.03,
+                            ]);
+                            let has_leaves   = growth > 0.0;
+                            let dense_leaves = growth > 0.35;
+
+                            // Stone / Cobblestone mix — deterministic texture variation
+                            let mat_h = ((wx as i64).wrapping_mul(73856093)
+                                ^ (wz as i64).wrapping_mul(19349663)
+                                ^ master_seed as i64) as u64;
+                            let primary = if mat_h % 3 == 0 {
+                                BlockType::Cobblestone
+                            } else {
+                                BlockType::Stone
+                            };
+
+                            // Helpers: unconditional set, and set-only-if-air for decoration
+                            macro_rules! set {
+                                ($dy:expr, $b:expr) => {{
+                                    let cy = base_y + $dy;
+                                    if cy >= 0 && cy < CHUNK_HEIGHT as i32 {
+                                        self.blocks[lx][cy as usize][lz] = $b;
+                                    }
+                                }};
+                            }
+                            macro_rules! set_air {
+                                ($dy:expr, $b:expr) => {{
+                                    let cy = base_y + $dy;
+                                    if cy >= 0 && cy < CHUNK_HEIGHT as i32
+                                        && self.blocks[lx][cy as usize][lz] == BlockType::Air
+                                    {
+                                        self.blocks[lx][cy as usize][lz] = $b;
+                                    }
+                                }};
+                            }
+
+                            // === 1. Stone foundation at base level ===
+                            set!(0, BlockType::Stone);
+
+                            // === 2. Central spire — highest priority, placed before other features ===
+                            if in_sp1 {
+                                // Centre spine: stone shaft tapering into cobblestone needle
+                                for dy in 1..=16i32 { set!(dy, BlockType::Stone); }
+                                for dy in 17..=24i32 { set!(dy, BlockType::Cobblestone); }
+                                // GlowStone crystal — the Laputa power-stone at the apex
+                                set!(25, BlockType::GlowStone);
+                            }
+                            if in_sp3w {
+                                // Solid 3×3 base (four-sided shaft)
+                                for dy in 1..=5i32 { set!(dy, BlockType::Stone); }
+                                // Hollow shaft with narrow cardinal window slits
+                                for dy in 6..=15i32 {
+                                    let is_window = match (rx, rz) {
+                                        ( 1,  0) | (-1, 0) => dy % 5 == 2,
+                                        ( 0,  1) | ( 0,-1) => dy % 5 == 4,
+                                        _ => false, // corner posts never windowed
+                                    };
+                                    if !is_window { set!(dy, primary); }
+                                }
+                                // Corbel crown that marks the spire's transition to a 1×1 needle
+                                for dy in 16..=19i32 { set!(dy, BlockType::Cobblestone); }
+                            }
+
+                            // === 3. Corner drum towers ===
+                            if let Some(ci) = corner_idx {
+                                let (tcx, tcz) = CT_OFFSETS[ci];
+                                let tdx = (rx - tcx) as f64;
+                                let tdz = (rz - tcz) as f64;
+                                let td2 = tdx * tdx + tdz * tdz;
+                                // Tower is hollow above the floor slab
+                                let hollow = td2 < 1.8 * 1.8;
+
+                                for dy in 1..=13i32 {
+                                    if dy <= 2 || !hollow { set!(dy, primary); }
+                                }
+                                // GlowStone lantern hovering at the centre, near the top
+                                if rx == tcx && rz == tcz { set!(12, BlockType::GlowStone); }
+
+                                // Conical cobblestone cap — tiers narrow with height
+                                if td2 <= CT_R2       { set!(14, BlockType::Cobblestone); }
+                                if td2 <= 2.0 * 2.0   { set!(15, BlockType::Cobblestone); }
+                                if td2 <= 1.2 * 1.2   { set!(16, BlockType::Cobblestone); }
+                                if td2 <= 0.5         { set!(17, BlockType::Cobblestone); }
+
+                                // Laputa overgrowth — Leaves spill over the tower rim
+                                if has_leaves             { set_air!(15, BlockType::Leaves); }
+                                if dense_leaves {
+                                    set_air!(14, BlockType::Leaves);
+                                    set_air!(16, BlockType::Leaves);
+                                }
+                            }
+
+                            // === 4. Mid-wall towers (cardinal gatehouse turrets) ===
+                            if let Some(mi) = mid_idx {
+                                let (tcx, tcz) = MT_OFFSETS[mi];
+                                let tdx = (rx - tcx) as f64;
+                                let tdz = (rz - tcz) as f64;
+                                let td2 = tdx * tdx + tdz * tdz;
+                                let hollow = td2 < 1.1 * 1.1;
+
+                                for dy in 1..=10i32 {
+                                    if dy <= 2 || !hollow { set!(dy, primary); }
+                                }
+                                // Tapered cobblestone finial
+                                if td2 <= MT_R2       { set!(11, BlockType::Cobblestone); }
+                                if td2 <= 1.2 * 1.2   { set!(12, BlockType::Cobblestone); }
+                                // GlowStone beacon at the very tip
+                                if rx == tcx && rz == tcz { set!(13, BlockType::GlowStone); }
+                                // Sparse leaf decoration
+                                if has_leaves && td2 <= MT_R2 { set_air!(12, BlockType::Leaves); }
+                            }
+
+                            // === 5. Outer ring wall ===
+                            if in_ring && !in_corner && !in_mid {
+                                if !wall_ruined {
+                                    for dy in 1..=7i32 { set!(dy, primary); }
+                                } else {
+                                    // Partial ruin — lower courses always survive
+                                    let survive = 2 + ((ruin.abs() * 2.5) as i32).min(4);
+                                    for dy in 1..=survive { set!(dy, primary); }
+                                }
+                                // Alternating merlons at the parapet
+                                let sector = ((rxf.atan2(rzf) / std::f64::consts::PI * 8.0)
+                                    .floor() as i32)
+                                    .rem_euclid(2);
+                                if sector == 0 && !batt_ruined {
+                                    set!(8, primary);
+                                    set!(9, primary);
+                                }
+                            }
+
+                            // === 6. Keep walls ===
+                            if in_keep_wall {
+                                for dy in 1..=11i32 { set!(dy, primary); }
+                                // Cobblestone battlements, alternating per wall face
+                                let merlon = if rx.abs() == KEEP_H {
+                                    (rz + 2).rem_euclid(3) == 0
+                                } else {
+                                    (rx + 2).rem_euclid(3) == 0
+                                };
+                                if merlon {
+                                    set!(12, BlockType::Cobblestone);
+                                    set!(13, BlockType::Cobblestone);
+                                }
+                            }
+
+                            // === 7. Keep interior features ===
+                            if in_keep_int && !in_sp3w && !in_sp1 {
+                                set!(1, BlockType::Planks); // ground-floor planks
+                                set!(6, BlockType::Planks); // upper-level balcony floor
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // === Grass Tufts ===
         // Spawn cross-model grass tufts on grass blocks using noise for natural clustering.
         // Plains uses a higher threshold for regular tufts (GrassTuftTall dominates there instead).

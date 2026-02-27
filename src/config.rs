@@ -188,6 +188,10 @@ pub struct TerrainConfig {
     pub sky_island_center_bonus: f64,
     pub sky_island_biome_fade_end: f64,
 
+    // ── Sky castles ───────────────────────────────────────────────────────────
+    pub sky_castle_spawn_chance: f64,
+    pub sky_castle_ruin_threshold: f64,
+
     // ── Depth layers ──────────────────────────────────────────────────────────
     pub depth_near_surface: usize,
     pub depth_transition: usize,
@@ -361,6 +365,9 @@ impl Default for TerrainConfig {
             sky_island_stalactite_scale_factor: 5.0,
             sky_island_center_bonus: 4.0,
             sky_island_biome_fade_end: 0.75,
+
+            sky_castle_spawn_chance: 0.40,
+            sky_castle_ruin_threshold: 0.20,
 
             depth_near_surface: 3,
             depth_transition: 6,
