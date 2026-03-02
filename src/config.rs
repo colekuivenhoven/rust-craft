@@ -191,6 +191,19 @@ pub struct TerrainConfig {
     // ── Sky castles ───────────────────────────────────────────────────────────
     pub sky_castle_spawn_chance: f64,
     pub sky_castle_ruin_threshold: f64,
+    pub sky_castle_batt_ruin_offset: f64,    // battlement threshold offset from wall threshold
+    pub sky_castle_window_spacing: i32,      // window modulo period in blocks along wall face
+
+    // ── Sky castle overgrowth ─────────────────────────────────────────────────
+    pub sky_castle_vine_threshold: f64,          // 2D column gate base (higher = fewer vine cols)
+    pub sky_castle_vine_ruin_scaling: f64,       // how much ruin lowers the gate (0 = no scaling)
+    pub sky_castle_vine_min_len: usize,          // minimum drape length in blocks
+    pub sky_castle_vine_ruin_max_len: f64,       // extra length added on fully-ruined walls
+    pub sky_castle_moss_threshold: f64,          // noise gate for mossy render/spawn (~50% at 0.0)
+    pub sky_castle_tuft_short_threshold: f64,    // short tuft gate on plain stone
+    pub sky_castle_tuft_tall_threshold: f64,     // tall tuft gate on plain stone
+    pub sky_castle_tuft_mossy_short_threshold: f64, // short tuft gate on mossy stone
+    pub sky_castle_tuft_mossy_tall_threshold: f64,  // tall tuft gate on mossy stone
 
     // ── Depth layers ──────────────────────────────────────────────────────────
     pub depth_near_surface: usize,
@@ -368,6 +381,18 @@ impl Default for TerrainConfig {
 
             sky_castle_spawn_chance: 0.40,
             sky_castle_ruin_threshold: 0.20,
+            sky_castle_batt_ruin_offset: -0.25,
+            sky_castle_window_spacing: 6,
+
+            sky_castle_vine_threshold: 0.45,
+            sky_castle_vine_ruin_scaling: 0.40,
+            sky_castle_vine_min_len: 1,
+            sky_castle_vine_ruin_max_len: 16.0,
+            sky_castle_moss_threshold: 0.0,
+            sky_castle_tuft_short_threshold: 0.25,
+            sky_castle_tuft_tall_threshold: 0.55,
+            sky_castle_tuft_mossy_short_threshold: -0.25,
+            sky_castle_tuft_mossy_tall_threshold: 0.20,
 
             depth_near_surface: 3,
             depth_transition: 6,

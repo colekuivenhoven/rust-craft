@@ -89,6 +89,7 @@ pub struct Chunk {
     pub plains_weight_map: Vec<Vec<f32>>,       // [x][z] continuous plains weight for smooth color blending
     pub position: (i32, i32),
     pub master_seed: u32,
+    pub moss_threshold: f64,               // sky_castle_moss_threshold from cfg, used in meshing
     pub vertices: Vec<Vertex>,
     pub indices: Vec<u16>,
     pub water_vertices: Vec<Vertex>,       // Separate water vertices for transparency pass
@@ -191,6 +192,7 @@ impl Chunk {
             plains_weight_map: vec![vec![0.0f32; CHUNK_SIZE]; CHUNK_SIZE],
             position: (chunk_x, chunk_z),
             master_seed,
+            moss_threshold: cfg.sky_castle_moss_threshold,
             vertices: Vec::new(),
             indices: Vec::new(),
             water_vertices: Vec::new(),
@@ -220,6 +222,7 @@ impl Chunk {
             plains_weight_map: vec![vec![0.0f32; CHUNK_SIZE]; CHUNK_SIZE],
             position: (chunk_x, chunk_z),
             master_seed: 0, // Not used for saved chunks (blocks already generated)
+            moss_threshold: 0.0,
             vertices: Vec::new(),
             indices: Vec::new(),
             water_vertices: Vec::new(),
@@ -1298,6 +1301,8 @@ impl Chunk {
             let ruin_perlin    = Perlin::new(master_seed.wrapping_add(1000));
             let growth_perlin  = Perlin::new(master_seed.wrapping_add(1001));
             let vine_col_noise = Perlin::new(master_seed.wrapping_add(1002));
+            // Same seed as leaf_color_noise in meshing so the moss gate is pixel-perfect.
+            let moss_noise     = Perlin::new(master_seed.wrapping_add(700));
 
             let gcx_min = (world_offset_x - CASTLE_MAX_REACH).div_euclid(CASTLE_GRID) - 1;
             let gcx_max = (world_offset_x + CHUNK_SIZE as i32 + CASTLE_MAX_REACH).div_euclid(CASTLE_GRID) + 1;
@@ -1561,13 +1566,11 @@ impl Chunk {
                                 rzf * 0.30 + cz_f * 0.02,
                             ]);
                             let wall_ruined = ruin > cfg.sky_castle_ruin_threshold;
-                            let batt_ruined = ruin > cfg.sky_castle_ruin_threshold - 0.25;
+                            let batt_ruined = ruin > cfg.sky_castle_ruin_threshold + cfg.sky_castle_batt_ruin_offset;
                             let growth = growth_perlin.get([
                                 rxf * 0.55 + cx_f * 0.03,
                                 rzf * 0.55 + cz_f * 0.03,
                             ]);
-                            let has_leaves   = growth > 0.0;
-                            let dense_leaves = growth > 0.35;
 
                             // Absolute-Y macros — col_base is the per-column island surface
                             macro_rules! set {
@@ -1680,9 +1683,6 @@ impl Chunk {
                                         set!(tower_top - 1, BlockType::GlowStone);
                                     }
 
-                                    // Laputa overgrowth on tower rim
-                                    if has_leaves   { set_air!(tower_top + 1, BlockType::Leaves); }
-                                    if dense_leaves { set_air!(tower_top + 2, BlockType::Leaves); }
                                 }
                                 continue; // towers override walls and keeps
                             }
@@ -1708,6 +1708,19 @@ impl Chunk {
                                     if merlon {
                                         set!(col_base + kh + 1, BlockType::Stone);
                                         set!(col_base + kh + 2, BlockType::Stone);
+                                    }
+
+                                    // Windows in keep walls, offset from merlons
+                                    if kh >= 5 {
+                                        let pos = if lrx.abs() == hw { lrz } else { lrx };
+                                        if pos.rem_euclid(cfg.sky_castle_window_spacing) == 1 {
+                                            let wy1 = (col_base + 2) as usize;
+                                            let wy2 = wy1 + 1;
+                                            if wy2 < CHUNK_HEIGHT {
+                                                self.blocks[lx][wy1][lz] = BlockType::Air;
+                                                self.blocks[lx][wy2][lz] = BlockType::Air;
+                                            }
+                                        }
                                     }
                                 } else {
                                     // Interior: planks ground floor + optional mid-floor
@@ -1752,9 +1765,81 @@ impl Chunk {
                                         set!(col_base + wh + 2, BlockType::Stone);
                                     }
                                 }
+
+                                // Windows: two vertical air blocks cut into the outer wall.
+                                // Positioned in the gaps between battlements so they never
+                                // coincide with merlons. Only on intact, tall-enough walls.
+                                if in_outer && !wall_ruined && wh >= 5 {
+                                    let ws = cfg.sky_castle_window_spacing;
+                                    let is_window = match wall_metric {
+                                        1 => { // square
+                                            let pos = if rx.abs() >= rz.abs() { rz } else { rx };
+                                            pos.rem_euclid(ws) == 1
+                                        }
+                                        2 => (rx + rz).rem_euclid(ws) == 1, // diamond
+                                        _ => { // circular
+                                            let sector = ((rxf.atan2(rzf) / std::f64::consts::PI * ws as f64 / 2.0)
+                                                .floor() as i32).rem_euclid(ws);
+                                            sector == 1
+                                        }
+                                    };
+                                    if is_window {
+                                        let wy1 = (col_base + 2) as usize;
+                                        let wy2 = wy1 + 1;
+                                        if wy2 < CHUNK_HEIGHT {
+                                            self.blocks[lx][wy1][lz] = BlockType::Air;
+                                            self.blocks[lx][wy2][lz] = BlockType::Air;
+                                        }
+                                    }
+                                }
                             } else if wall_d < outer_r - wall_thickness {
                                 // Courtyard / inside the castle: cobblestone paving at surface level
                                 set!(col_base, BlockType::Cobblestone);
+                            }
+                        }
+                    }
+
+                    // Leaf-clearing pass: trees grow on the sky island surface before the
+                    // castle is generated, leaving canopy leaves inside or adjacent to the
+                    // structure. Remove them within the castle's horizontal extent so the
+                    // mossy/tuft overgrowth is the only vegetation visible on the castle.
+                    {
+                        let clear_lo = island_cy.saturating_sub(6).max(1);
+                        let clear_hi = (island_cy + outer_r as usize + wall_h as usize + 20)
+                            .min(CHUNK_HEIGHT - 1);
+                        let clear_r = (outer_r as i32) + 8;
+                        for lvx in 0..CHUNK_SIZE {
+                            for lvz in 0..CHUNK_SIZE {
+                                let dx = ((world_offset_x + lvx as i32) - castle_cx).abs();
+                                let dz = ((world_offset_z + lvz as i32) - castle_cz).abs();
+                                if dx > clear_r || dz > clear_r { continue; }
+                                for sy in clear_lo..=clear_hi {
+                                    if self.blocks[lvx][sy][lvz] == BlockType::Leaves {
+                                        // Only remove leaves that have no log within 6 blocks
+                                        // (orphaned canopy that drifted into the castle).
+                                        // Leaves that are genuinely part of a nearby tree stay.
+                                        let mut near_log = false;
+                                        'log_search: for ldy in -6i32..=6 {
+                                            for ldx in -6i32..=6 {
+                                                for ldz in -6i32..=6 {
+                                                    let nx = lvx as i32 + ldx;
+                                                    let ny = sy as i32 + ldy;
+                                                    let nz = lvz as i32 + ldz;
+                                                    if nx < 0 || nx >= CHUNK_SIZE as i32
+                                                        || ny < 1 || ny >= CHUNK_HEIGHT as i32
+                                                        || nz < 0 || nz >= CHUNK_SIZE as i32 { continue; }
+                                                    if self.blocks[nx as usize][ny as usize][nz as usize] == BlockType::Wood {
+                                                        near_log = true;
+                                                        break 'log_search;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        if !near_log {
+                                            self.blocks[lvx][sy][lvz] = BlockType::Air;
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -1776,7 +1861,7 @@ impl Chunk {
                                 let ruin_factor = (ruin_perlin.get([wvx * 0.07, wvz * 0.07]) + 1.0) * 0.5;
                                 // 2D gate: ruined sections (ruin_factor→1) lower threshold → more vines.
                                 let col_n = vine_col_noise.get([wvx * 0.12, wvz * 0.12]);
-                                let threshold = 0.45 - ruin_factor * 0.40; // 0.05 (ruined) .. 0.45 (pristine)
+                                let threshold = cfg.sky_castle_vine_threshold - ruin_factor * cfg.sky_castle_vine_ruin_scaling;
                                 if col_n < threshold { continue; }
 
                                 // Top-to-bottom scan: start vine strands at cobblestone attachment points.
@@ -1803,7 +1888,7 @@ impl Chunk {
                                             let len_n  = growth_perlin.get([wvx * 0.22 + 11.3, sy as f64 * 0.5, wvz * 0.22 + 5.7]);
                                             let len_n2 = growth_perlin.get([wvx * 0.55 + 33.1, sy as f64 * 0.9, wvz * 0.55 + 19.4]);
                                             let t = ((len_n + 1.0) * 0.5 * 0.6 + (len_n2 + 1.0) * 0.5 * 0.4) as f32;
-                                            max_vine_len = 1 + (t * (2.0 + ruin_factor as f32 * 16.0)) as usize;
+                                            max_vine_len = cfg.sky_castle_vine_min_len + (t * (2.0 + ruin_factor as f32 * cfg.sky_castle_vine_ruin_max_len as f32)) as usize;
                                             in_vine = true;
                                             self.blocks[lvx][sy][lvz] = BlockType::Vines;
                                             vine_len = 1;
@@ -1815,6 +1900,42 @@ impl Chunk {
                                     } else {
                                         in_vine = false;
                                         vine_len = 0;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Castle tuft pass: place short and tall grass tufts on exposed tops of
+                    // Cobblestone / Stone blocks. Mossy blocks (matched via the same noise gate
+                    // used in meshing) have lower spawn thresholds and a higher tall-tuft chance.
+                    {
+                        let tuft_lo = island_cy.saturating_sub(1).max(1);
+                        let tuft_hi = (island_cy + outer_r as usize + wall_h as usize + 12)
+                            .min(CHUNK_HEIGHT - 2);
+                        for lvx in 0..CHUNK_SIZE {
+                            for lvz in 0..CHUNK_SIZE {
+                                let wvx = (world_offset_x + lvx as i32) as f64;
+                                let wvz = (world_offset_z + lvz as i32) as f64;
+                                for sy in tuft_lo..=tuft_hi {
+                                    let blk = self.blocks[lvx][sy][lvz];
+                                    if blk != BlockType::Cobblestone && blk != BlockType::Stone { continue; }
+                                    let above = sy + 1;
+                                    if self.blocks[lvx][above][lvz] != BlockType::Air { continue; }
+
+                                    let is_mossy = moss_noise.get([wvx * 0.09 + 50.3, wvz * 0.09 + 50.3]) > cfg.sky_castle_moss_threshold;
+                                    let tuft_n = growth_perlin.get([wvx * 0.28 + 44.7, wvz * 0.28 + 88.2]);
+
+                                    let (short_thresh, tall_thresh) = if is_mossy {
+                                        (cfg.sky_castle_tuft_mossy_short_threshold, cfg.sky_castle_tuft_mossy_tall_threshold)
+                                    } else {
+                                        (cfg.sky_castle_tuft_short_threshold, cfg.sky_castle_tuft_tall_threshold)
+                                    };
+
+                                    if tuft_n > tall_thresh {
+                                        self.blocks[lvx][above][lvz] = BlockType::GrassTuftTall;
+                                    } else if tuft_n > short_thresh {
+                                        self.blocks[lvx][above][lvz] = BlockType::GrassTuft;
                                     }
                                 }
                             }
@@ -2241,15 +2362,28 @@ impl Chunk {
                                 // Determine if this is exposed dirt (grass rendering)
                                 let is_grass_dirt = block == BlockType::Dirt && !has_block_above && !block_above.is_water();
 
-                                // Compute noise tint parameter for leaves and grass (shared noise)
-                                let needs_tint = block == BlockType::Leaves || is_grass_dirt;
+                                // Exposed castle Cobblestone/Stone gets a moss overlay (same technique
+                                // as grass-on-dirt). Noise-gated so only ~half of eligible blocks are
+                                // mossy, avoiding a uniform carpet look.
+                                let is_mossy_stone = (block == BlockType::Cobblestone || block == BlockType::Stone)
+                                    && !has_block_above && !block_above.is_water()
+                                    && {
+                                        let wx_m = (world_offset_x + x as i32) as f64;
+                                        let wz_m = (world_offset_z + z as i32) as f64;
+                                        leaf_color_noise.get([wx_m * 0.09 + 50.3, wz_m * 0.09 + 50.3]) > neighbors.center.moss_threshold
+                                    };
+
+                                let has_overlay = is_grass_dirt || is_mossy_stone;
+
+                                // Compute noise tint parameter for leaves, grass, and moss (shared noise)
+                                let needs_tint = block == BlockType::Leaves || has_overlay;
                                 let tint_t = if needs_tint {
                                     let wx = (world_offset_x + x as i32) as f64;
                                     let wy = y as f64;
                                     let wz = (world_offset_z + z as i32) as f64;
                                     let noise_val = leaf_color_noise.get([wx * 0.02, wy * 0.02, wz * 0.02]);
                                     let t_raw = (noise_val as f32 * 0.5 + 0.5).clamp(0.0, 1.0);
-                                    // Plains: smoothly bias t into the upper (orange) half based on plains weight
+                                    // Same formula for all foliage — plains bias shifts toward orange.
                                     let plains_w = chunk.plains_weight_map[x][z];
                                     t_raw + plains_w * 0.5 * (1.0 - t_raw)
                                 } else {
@@ -2265,21 +2399,21 @@ impl Chunk {
                                     [1.0, 1.0, 1.0]
                                 };
 
-                                // For exposed dirt top face: use grass_top texture with tint
-                                let (actual_tex, actual_uvs) = if is_grass_dirt && face_idx == 2 {
+                                // For exposed top faces (dirt or mossy stone): use grass_top texture
+                                let (actual_tex, actual_uvs) = if has_overlay && face_idx == 2 {
                                     let grass_uvs = get_face_uvs(TEX_GRASS_TOP);
                                     (TEX_GRASS_TOP, grass_uvs)
                                 } else {
                                     (tex_index, uvs)
                                 };
 
-                                let face_verts = if block == BlockType::Leaves || (is_grass_dirt && face_idx == 2) {
-                                    // Leaves: always tinted. Grass dirt top face: grass_top with tint.
+                                let face_verts = if block == BlockType::Leaves || (has_overlay && face_idx == 2) {
+                                    // Leaves: always tinted. Overlay top face: grass_top with tint.
                                     create_face_vertices_tinted(world_pos, face_idx, light_values, actual_tex, actual_uvs, ao_values, tint)
-                                } else if is_grass_dirt && face_idx != 2 && face_idx != 3 {
-                                    // Side faces of exposed dirt: pack overlay index (bits 16-23) and
+                                } else if has_overlay && face_idx != 2 && face_idx != 3 {
+                                    // Side faces of overlay blocks: pack overlay index (bits 16-23) and
                                     // tint parameter (bits 24-31) into tex_index. Shader reconstructs
-                                    // tint and uses vertex color (dirt color) for the base texture.
+                                    // tint and uses vertex color (base texture) for the main surface.
                                     let tint_byte = (tint_t * 255.0) as u32;
                                     let packed_tex = tex_index | ((TEX_GRASS_SIDE + 1) << 16) | (tint_byte << 24);
                                     create_face_vertices(world_pos, block, face_idx, light_values, packed_tex, uvs, ao_values)

@@ -189,6 +189,19 @@ sky_island_biome_fade_end = 0.75          # Biome weight at which islands reach 
 # Sky Castle Settings
 sky_castle_spawn_chance = 0.75            # Fraction of eligible sky island grid cells that get a castle (0.0 = none, 1.0 = all)
 sky_castle_ruin_threshold = 0.60          # Ruin decay threshold for outer walls; higher = more crumbled sections
+sky_castle_batt_ruin_offset = -0.25       # Added to ruin_threshold for battlement ruin (negative = battlements ruin earlier)
+sky_castle_window_spacing = 6             # Block spacing between windows on outer walls and keep walls
+
+# Sky Castle Overgrowth Settings
+sky_castle_vine_threshold = 0.45          # Vine column noise threshold; lower = more vines
+sky_castle_vine_ruin_scaling = 0.40       # How much ruin_factor lowers the vine threshold (more ruin = more vines)
+sky_castle_vine_min_len = 1               # Minimum vine column length in blocks
+sky_castle_vine_ruin_max_len = 16.0       # Vine length bonus from ruin_factor (adds up to this many blocks)
+sky_castle_moss_threshold = 0.0           # Noise threshold for mossy stone overlay; lower = more moss (-1.0 to 1.0)
+sky_castle_tuft_short_threshold = 0.25    # Noise threshold for short grass tufts on non-mossy stone
+sky_castle_tuft_tall_threshold = 0.55     # Noise threshold for tall grass tufts on non-mossy stone
+sky_castle_tuft_mossy_short_threshold = -0.25  # Noise threshold for short grass tufts on mossy stone (lower = more)
+sky_castle_tuft_mossy_tall_threshold = 0.20    # Noise threshold for tall grass tufts on mossy stone
 
 depth_near_surface = 3                     # Blocks deep for dirt/sand layer
 depth_transition = 6                       # Blocks deep before full stone layer
