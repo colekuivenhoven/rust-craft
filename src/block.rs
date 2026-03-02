@@ -1,5 +1,21 @@
 use cgmath::Vector3;
-use crate::texture::{FaceTextures, TEX_DIRT, TEX_SAND, TEX_ICE, TEX_STONE, TEX_WOOD_TOP, TEX_WOOD_SIDE, TEX_LEAVES, TEX_GRAINS, TEX_GRAINS_TALL, TEX_CRAFTING_TABLE, TEX_NONE};
+use crate::texture::{
+    FaceTextures, 
+    TEX_DIRT, 
+    TEX_SAND, 
+    TEX_ICE, 
+    TEX_STONE, 
+    TEX_WOOD_TOP, 
+    TEX_WOOD_SIDE, 
+    TEX_LEAVES, 
+    TEX_GRAINS, 
+    TEX_GRAINS_TALL, 
+    TEX_CRAFTING_TABLE, 
+    TEX_COBBLESTONE, 
+    TEX_VINES, 
+    TEX_PLANKS,
+    TEX_NONE
+};
 
 // ============================================================================
 // Cross Model Constants (grass tufts, foliage)
@@ -25,6 +41,7 @@ pub enum BlockType {
     GrassTuft,
     GrassTuftTall,
     CraftingTable,
+    Vines,
     Boundary, // Virtual block type for unloaded chunk boundaries.
 }
 
@@ -46,12 +63,13 @@ impl BlockType {
             BlockType::GrassTuft => "Grass",
             BlockType::GrassTuftTall => "Tall Grass",
             BlockType::CraftingTable => "Crafting Table",
+            BlockType::Vines => "Vines",
             BlockType::Boundary => "Boundary",
         }
     }
 
     pub fn is_solid(&self) -> bool {
-        !matches!(self, BlockType::Air | BlockType::Water | BlockType::GrassTuft | BlockType::GrassTuftTall | BlockType::Boundary)
+        !matches!(self, BlockType::Air | BlockType::Water | BlockType::GrassTuft | BlockType::GrassTuftTall | BlockType::Vines | BlockType::Boundary)
     }
 
     pub fn is_water(&self) -> bool {
@@ -59,7 +77,7 @@ impl BlockType {
     }
 
     pub fn is_transparent(&self) -> bool {
-        matches!(self, BlockType::Air | BlockType::Water | BlockType::Leaves | BlockType::GrassTuft | BlockType::GrassTuftTall | BlockType::Boundary)
+        matches!(self, BlockType::Air | BlockType::Water | BlockType::Leaves | BlockType::GrassTuft | BlockType::GrassTuftTall | BlockType::Vines | BlockType::Boundary)
     }
 
     /// Returns true if this block is semi-transparent (rendered with alpha blending after opaque blocks).
@@ -69,7 +87,7 @@ impl BlockType {
     }
 
     pub fn no_shadow_casting(&self) -> bool {
-        matches!(self, BlockType::Air | BlockType::GrassTuft | BlockType::GrassTuftTall)
+        matches!(self, BlockType::Air | BlockType::GrassTuft | BlockType::GrassTuftTall | BlockType::Vines)
     }
 
     /// Returns the alpha value for this block (1.0 = fully opaque, 0.0 = fully transparent)
@@ -83,7 +101,7 @@ impl BlockType {
     /// Returns true if this block is transparent specifically for water face culling.
     /// Boundary blocks are NOT transparent for water to prevent rendering artifacts.
     pub fn is_transparent_for_water(&self) -> bool {
-        matches!(self, BlockType::Air | BlockType::Water | BlockType::Leaves)
+        matches!(self, BlockType::Air | BlockType::Water | BlockType::Leaves | BlockType::Vines)
     }
 
     pub fn get_color(&self) -> [f32; 3] {
@@ -103,6 +121,7 @@ impl BlockType {
             BlockType::GrassTuft => [1.0, 1.0, 1.0], // Uses texture
             BlockType::GrassTuftTall => [1.0, 1.0, 1.0], // Uses texture
             BlockType::CraftingTable => [1.0, 1.0, 1.0], // Uses texture
+            BlockType::Vines => [1.0, 1.0, 1.0], // Uses texture
             BlockType::Boundary => [0.0, 0.0, 0.0], // Never rendered
         }
     }
@@ -124,6 +143,7 @@ impl BlockType {
             BlockType::GrassTuft => "Grass Tuft",
             BlockType::GrassTuftTall => "Tall Grass Tuft",
             BlockType::CraftingTable => "Crafting Table",
+            BlockType::Vines => "Vines",
             BlockType::Boundary => "Boundary",
         }
     }
@@ -145,6 +165,7 @@ impl BlockType {
             BlockType::GrassTuft => 14,
             BlockType::GrassTuftTall => 16,
             BlockType::CraftingTable => 17,
+            BlockType::Vines => 18,
             BlockType::Boundary => 15,
         }
     }
@@ -168,6 +189,7 @@ impl BlockType {
             16 => BlockType::GrassTuftTall,
             15 => BlockType::Boundary,
             17 => BlockType::CraftingTable,
+            18 => BlockType::Vines,
             _ => BlockType::Air,
         }
     }
@@ -218,6 +240,15 @@ impl BlockType {
             // Crafting table
             BlockType::CraftingTable => FaceTextures::all(TEX_CRAFTING_TABLE),
 
+            // Cobblestone
+            BlockType::Cobblestone => FaceTextures::all(TEX_COBBLESTONE),
+
+            // Vines
+            BlockType::Vines => FaceTextures::all(TEX_VINES),
+
+            // Planks
+            BlockType::Planks => FaceTextures::all(TEX_PLANKS),
+
             // All other blocks use color fallback
             _ => FaceTextures::all(TEX_NONE),
         }
@@ -241,6 +272,7 @@ impl BlockType {
             BlockType::GrassTuft => 0.1,
             BlockType::GrassTuftTall => 0.1,
             BlockType::CraftingTable => 2.5,
+            BlockType::Vines => 0.1,
             BlockType::Boundary => 0.0,
         }
     }
@@ -690,6 +722,72 @@ pub fn create_cross_model_vertices(pos: Vector3<f32>, light_level: f32, tex_inde
     ];
 
     (vertices, indices)
+}
+
+/// Creates vertices for a single thin vine panel on one face of a vine block.
+/// The panel is 1/16 block thick, pressed against the face adjacent to `wall_dir`:
+///   0 = wall to -X (panel faces +X)   1 = wall to +X (panel faces -X)
+///   2 = wall to -Z (panel faces +Z)   3 = wall to +Z (panel faces -Z)
+/// Only one face is emitted (single-sided) — the wall behind is always solid.
+pub fn create_vine_face_vertices(
+    pos: Vector3<f32>,
+    wall_dir: u8,
+    light_level: f32,
+    tex_index: u32,
+    uvs: [[f32; 2]; 4],
+    tint: [f32; 3],
+) -> ([Vertex; 4], [u16; 12]) {
+    const T: f32 = 0.0625; // 1/16 block
+    let x = pos.x;
+    let y = pos.y;
+    let z = pos.z;
+    let color = tint;
+    let ao = 1.0;
+    let alpha = 1.0;
+
+    let vertices = match wall_dir {
+        0 => { // Wall at -X → panel at x+T, facing +X
+            let p = x + T;
+            [
+                Vertex { position: [p, y,     z    ], color, normal: [1.0, 0.0, 0.0], light_level, alpha, uv: uvs[0], tex_index, ao },
+                Vertex { position: [p, y,     z+1.0], color, normal: [1.0, 0.0, 0.0], light_level, alpha, uv: uvs[1], tex_index, ao },
+                Vertex { position: [p, y+1.0, z+1.0], color, normal: [1.0, 0.0, 0.0], light_level, alpha, uv: uvs[2], tex_index, ao },
+                Vertex { position: [p, y+1.0, z    ], color, normal: [1.0, 0.0, 0.0], light_level, alpha, uv: uvs[3], tex_index, ao },
+            ]
+        },
+        1 => { // Wall at +X → panel at x+1-T, facing -X
+            let p = x + 1.0 - T;
+            [
+                Vertex { position: [p, y,     z+1.0], color, normal: [-1.0, 0.0, 0.0], light_level, alpha, uv: uvs[0], tex_index, ao },
+                Vertex { position: [p, y,     z    ], color, normal: [-1.0, 0.0, 0.0], light_level, alpha, uv: uvs[1], tex_index, ao },
+                Vertex { position: [p, y+1.0, z    ], color, normal: [-1.0, 0.0, 0.0], light_level, alpha, uv: uvs[2], tex_index, ao },
+                Vertex { position: [p, y+1.0, z+1.0], color, normal: [-1.0, 0.0, 0.0], light_level, alpha, uv: uvs[3], tex_index, ao },
+            ]
+        },
+        2 => { // Wall at -Z → panel at z+T, facing +Z
+            let p = z + T;
+            [
+                Vertex { position: [x,     y,     p], color, normal: [0.0, 0.0, 1.0], light_level, alpha, uv: uvs[0], tex_index, ao },
+                Vertex { position: [x+1.0, y,     p], color, normal: [0.0, 0.0, 1.0], light_level, alpha, uv: uvs[1], tex_index, ao },
+                Vertex { position: [x+1.0, y+1.0, p], color, normal: [0.0, 0.0, 1.0], light_level, alpha, uv: uvs[2], tex_index, ao },
+                Vertex { position: [x,     y+1.0, p], color, normal: [0.0, 0.0, 1.0], light_level, alpha, uv: uvs[3], tex_index, ao },
+            ]
+        },
+        _ => { // Wall at +Z → panel at z+1-T, facing -Z
+            let p = z + 1.0 - T;
+            [
+                Vertex { position: [x+1.0, y,     p], color, normal: [0.0, 0.0, -1.0], light_level, alpha, uv: uvs[0], tex_index, ao },
+                Vertex { position: [x,     y,     p], color, normal: [0.0, 0.0, -1.0], light_level, alpha, uv: uvs[1], tex_index, ao },
+                Vertex { position: [x,     y+1.0, p], color, normal: [0.0, 0.0, -1.0], light_level, alpha, uv: uvs[2], tex_index, ao },
+                Vertex { position: [x+1.0, y+1.0, p], color, normal: [0.0, 0.0, -1.0], light_level, alpha, uv: uvs[3], tex_index, ao },
+            ]
+        },
+    };
+
+    (vertices, [
+        0, 1, 2, 2, 3, 0, // Front face
+        0, 3, 2, 2, 1, 0  // Back face
+    ])
 }
 
 pub fn create_cube_vertices(pos: Vector3<f32>, block_type: BlockType, light_level: f32) -> Vec<Vertex> {
