@@ -117,8 +117,8 @@ impl Player {
         let mut distance = 0.0;
 
         // Check starting block first
-        if world.get_block_world(x, y, z).is_solid() {
-            // We're inside a solid block, return it with no specific face
+        if world.get_block_world(x, y, z).is_targetable() {
+            // We're inside a targetable block, return it with no specific face
             return Some((x, y, z, Vector3::new(0, 1, 0)));
         }
 
@@ -149,8 +149,8 @@ impl Player {
                 break;
             }
 
-            // Check if this voxel is solid
-            if world.get_block_world(x, y, z).is_solid() {
+            // Check if this voxel can be targeted
+            if world.get_block_world(x, y, z).is_targetable() {
                 return Some((x, y, z, face_normal));
             }
         }

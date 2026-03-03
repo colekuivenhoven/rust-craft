@@ -736,6 +736,28 @@ impl EnemyManager {
             {
                 continue;
             }
+            // Reject water spawns: clearance blocks must not be water
+            if world.get_block_world(bx, y + 1, bz).is_water()
+                || world.get_block_world(bx, y + 2, bz).is_water()
+            {
+                continue;
+            }
+            // Reject sky island spawns: floating land has a large open-air gap below it.
+            // Scan 40 blocks beneath the surface; 15+ consecutive air blocks means
+            // it's a sky island (caves are never this tall).
+            let mut consecutive_air = 0u32;
+            for dy in 1i32..=40 {
+                let check_y = y - dy;
+                if check_y < 1 { break; }
+                if !world.get_block_world(bx, check_y, bz).is_solid() {
+                    consecutive_air += 1;
+                    if consecutive_air >= 15 {
+                        continue 'outer;
+                    }
+                } else {
+                    consecutive_air = 0;
+                }
+            }
             spawn_y = Some((y + 1) as f32);
             break;
         }

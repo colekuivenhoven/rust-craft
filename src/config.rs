@@ -78,6 +78,8 @@ pub struct TerrainConfig {
     pub ocean_island_strength_max: f64,
     pub ocean_island_max_bump: f64,
     pub ocean_island_grass_start: usize,
+    pub ocean_island_detail_scale: f64,     // frequency of the secondary detail noise layer
+    pub ocean_island_detail_amplitude: f64, // how strongly the detail layer bends island shape (0 = off)
 
     // ── Trees ─────────────────────────────────────────────────────────────────
     pub tree_min_height: usize,
@@ -195,9 +197,10 @@ pub struct TerrainConfig {
     pub sky_castle_window_spacing: i32,      // window modulo period in blocks along wall face
 
     // ── Sky castle overgrowth ─────────────────────────────────────────────────
-    pub sky_castle_vine_threshold: f64,          // 2D column gate base (higher = fewer vine cols)
-    pub sky_castle_vine_ruin_scaling: f64,       // how much ruin lowers the gate (0 = no scaling)
+    pub sky_castle_vine_density: f64,            // base vine coverage (0=none, 1=all possible cols)
+    pub sky_castle_vine_ruin_scaling: f64,       // extra density added in fully-ruined areas (0=no bonus)
     pub sky_castle_vine_min_len: usize,          // minimum drape length in blocks
+    pub sky_castle_vine_length_variation: f64,   // how randomly lengths vary (0=uniform, 1=full noise)
     pub sky_castle_vine_ruin_max_len: f64,       // extra length added on fully-ruined walls
     pub sky_castle_moss_threshold: f64,          // noise gate for mossy render/spawn (~50% at 0.0)
     pub sky_castle_tuft_short_threshold: f64,    // short tuft gate on plain stone
@@ -276,6 +279,8 @@ impl Default for TerrainConfig {
             ocean_island_strength_max: 0.85,
             ocean_island_max_bump: 14.0,
             ocean_island_grass_start: 1,
+            ocean_island_detail_scale: 0.05,
+            ocean_island_detail_amplitude: 0.15,
 
             tree_min_height: 4,
             tree_max_height: 12,
@@ -384,9 +389,10 @@ impl Default for TerrainConfig {
             sky_castle_batt_ruin_offset: -0.25,
             sky_castle_window_spacing: 6,
 
-            sky_castle_vine_threshold: 0.45,
-            sky_castle_vine_ruin_scaling: 0.40,
+            sky_castle_vine_density: 0.28,
+            sky_castle_vine_ruin_scaling: 0.30,
             sky_castle_vine_min_len: 1,
+            sky_castle_vine_length_variation: 0.8,
             sky_castle_vine_ruin_max_len: 16.0,
             sky_castle_moss_threshold: 0.0,
             sky_castle_tuft_short_threshold: 0.25,

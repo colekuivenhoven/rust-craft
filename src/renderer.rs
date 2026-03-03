@@ -1,6 +1,6 @@
 use crate::entities::bird::{BirdManager, create_bird_vertices, generate_bird_indices};
 use crate::entities::fish::{FishManager, create_fish_vertices, generate_fish_indices};
-use crate::block::{BlockType, Vertex, UiVertex, ItemCubeVertex, ModalVertex, LineVertex, create_cube_vertices, create_block_outline, create_face_vertices, create_scaled_cube_vertices, create_particle_vertices, create_shadow_vertices, CUBE_INDICES};
+use crate::block::{BlockType, Vertex, UiVertex, ItemCubeVertex, ModalVertex, LineVertex, create_cube_vertices, create_block_outline, create_face_vertices, create_scaled_cube_vertices, create_flat_item_vertices, create_particle_vertices, create_shadow_vertices, CUBE_INDICES};
 use crate::modal::{self, Modal};
 use crate::audio::AudioManager;
 use crate::camera::{Camera, CameraController, CameraUniform, Projection, Frustum};
@@ -144,6 +144,7 @@ pub struct State {
     config: wgpu::SurfaceConfiguration,
     pub size: winit::dpi::PhysicalSize<u32>,
     render_pipeline: wgpu::RenderPipeline,
+    shadow_pipeline: wgpu::RenderPipeline,  // Like render_pipeline but with polygon offset + no depth write
     water_pipeline: wgpu::RenderPipeline,  // Separate pipeline for transparent water with depth sampling
     transparent_pipeline: wgpu::RenderPipeline,  // Separate pipeline for semi-transparent blocks (ice) with no depth write
     camera: Camera,
@@ -511,6 +512,70 @@ impl State {
                 depth_compare: wgpu::CompareFunction::Less,
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            multiview: None,
+            cache: None,
+        });
+
+        // Shadow pipeline: same as main pipeline but with polygon offset and no depth write.
+        // Polygon offset (depth bias) pushes shadow fragments toward the camera in clip space,
+        // preventing z-fighting with the ground surface at all camera angles and distances.
+        let shadow_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Shadow Pipeline"),
+            layout: Some(&render_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[Vertex::desc()],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: Some(wgpu::BlendState {
+                        color: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::SrcAlpha,
+                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                        alpha: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::One,
+                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                    }),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: Some(wgpu::Face::Back),
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: false,
+                depth_compare: wgpu::CompareFunction::LessEqual,
+                stencil: wgpu::StencilState::default(),
+                // Polygon offset: pulls shadow fragments toward the camera so they reliably
+                // sit in front of the ground face at all viewing angles and distances.
+                bias: wgpu::DepthBiasState {
+                    constant: -2,
+                    slope_scale: -1.0,
+                    clamp: 0.0,
+                },
             }),
             multisample: wgpu::MultisampleState {
                 count: 1,
@@ -2024,6 +2089,7 @@ impl State {
             config,
             size,
             render_pipeline,
+            shadow_pipeline,
             water_pipeline,
             transparent_pipeline,
             camera,
@@ -4522,7 +4588,9 @@ impl State {
                 render_pass.draw_indexed(0..indices.len() as u32, 0, 0..1);
             }
 
-            // Render dropped item shadows first (so they appear behind items)
+            // Render dropped item shadows first (so they appear behind items).
+            // Uses the shadow pipeline which has polygon offset + no depth write.
+            render_pass.set_pipeline(&self.shadow_pipeline);
             for item in &self.dropped_item_manager.items {
                 // Find the ground below the item (search up to 10 blocks down)
                 let mut ground_y = None;
@@ -4575,14 +4643,33 @@ impl State {
                 }
             }
 
-            // Render dropped items (mini-blocks)
+            // Restore main pipeline for item geometry (mini-blocks / flat panels)
+            render_pass.set_pipeline(&self.render_pipeline);
+            render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
+            render_pass.set_bind_group(1, &self.texture_atlas.bind_group, &[]);
+            render_pass.set_bind_group(2, &self.fog_bind_group, &[]);
+
+            // Render dropped items (mini-blocks, or flat panels for tuft/vine types)
             for item in &self.dropped_item_manager.items {
-                let vertices = create_scaled_cube_vertices(
-                    item.position,
-                    item.block_type,
-                    item.get_size(),
-                    1.0, // Full brightness
-                );
+                let (vertices, item_indices): (Vec<Vertex>, Vec<u16>) =
+                    if item.block_type.is_flat_item() {
+                        create_flat_item_vertices(
+                            item.position,
+                            item.block_type,
+                            item.get_size(),
+                            1.0,
+                        )
+                    } else {
+                        (
+                            create_scaled_cube_vertices(
+                                item.position,
+                                item.block_type,
+                                item.get_size(),
+                                1.0,
+                            ),
+                            CUBE_INDICES.to_vec(),
+                        )
+                    };
 
                 let vertex_buffer =
                     self.device
@@ -4596,14 +4683,14 @@ impl State {
                     self.device
                         .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                             label: Some("Dropped Item Index Buffer"),
-                            contents: bytemuck::cast_slice(CUBE_INDICES),
+                            contents: bytemuck::cast_slice(&item_indices),
                             usage: wgpu::BufferUsages::INDEX,
                         });
 
                 render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
                 render_pass
                     .set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint16);
-                render_pass.draw_indexed(0..CUBE_INDICES.len() as u32, 0, 0..1);
+                render_pass.draw_indexed(0..item_indices.len() as u32, 0, 0..1);
             }
 
             // Render particles

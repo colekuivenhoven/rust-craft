@@ -254,6 +254,7 @@ impl Chunk {
         let seed_oasis             = master_seed.wrapping_add(358);
         let seed_glacier           = master_seed.wrapping_add(359);
         let seed_ocean_island      = master_seed.wrapping_add(458);
+        let seed_ocean_island_detail = master_seed.wrapping_add(459);
         let seed_vein              = master_seed.wrapping_add(558);
         let seed_vein_detail       = master_seed.wrapping_add(559);
         let seed_grass_tuft        = master_seed.wrapping_add(800);
@@ -288,6 +289,7 @@ impl Chunk {
 
         // Ocean island noise
         let island_perlin = Perlin::new(seed_ocean_island);
+        let island_detail_perlin = Perlin::new(seed_ocean_island_detail);
 
         // River domain warp noise (makes rivers wind naturally)
         let river_warp1 = Perlin::new(seed_river_warp1);
@@ -434,7 +436,11 @@ impl Chunk {
                 let detail = detail_perlin.get([world_x * cfg.terrain_detail_scale, world_z * cfg.terrain_detail_scale]) * cfg.terrain_detail_amplitude;
 
                 // === Ocean islands with GRADUAL slopes ===
-                let island_noise = (island_perlin.get([world_x * cfg.ocean_island_scale + 5000.0, world_z * cfg.ocean_island_scale + 5000.0]) + 1.0) * 0.5;
+                let island_noise_base = (island_perlin.get([world_x * cfg.ocean_island_scale + 5000.0, world_z * cfg.ocean_island_scale + 5000.0]) + 1.0) * 0.5;
+                // Second detail layer at higher frequency warps the island boundary and
+                // adds surface variation, breaking up the smooth egg-shape of the base noise.
+                let island_detail_n = island_detail_perlin.get([world_x * cfg.ocean_island_detail_scale + 3333.0, world_z * cfg.ocean_island_detail_scale + 3333.0]);
+                let island_noise = (island_noise_base + island_detail_n * cfg.ocean_island_detail_amplitude).clamp(0.0, 1.0);
 
                 // Compute raw island bump from noise alone (no ocean weight gate)
                 let island_bump_raw = if island_noise > cfg.ocean_island_threshold {
@@ -1859,9 +1865,11 @@ impl Chunk {
                                 let wvx = (world_offset_x + lvx as i32) as f64;
                                 let wvz = (world_offset_z + lvz as i32) as f64;
                                 let ruin_factor = (ruin_perlin.get([wvx * 0.07, wvz * 0.07]) + 1.0) * 0.5;
-                                // 2D gate: ruined sections (ruin_factor→1) lower threshold → more vines.
+                                // Density in [0,1]: base + ruin bonus, converted to a noise floor.
+                                // Higher density → lower threshold → more columns pass.
+                                let density = (cfg.sky_castle_vine_density + ruin_factor * cfg.sky_castle_vine_ruin_scaling).min(1.0);
+                                let threshold = 1.0 - 2.0 * density;
                                 let col_n = vine_col_noise.get([wvx * 0.12, wvz * 0.12]);
-                                let threshold = cfg.sky_castle_vine_threshold - ruin_factor * cfg.sky_castle_vine_ruin_scaling;
                                 if col_n < threshold { continue; }
 
                                 // Top-to-bottom scan: start vine strands at cobblestone attachment points.
@@ -1887,7 +1895,10 @@ impl Chunk {
                                             // even within the same ruined section.
                                             let len_n  = growth_perlin.get([wvx * 0.22 + 11.3, sy as f64 * 0.5, wvz * 0.22 + 5.7]);
                                             let len_n2 = growth_perlin.get([wvx * 0.55 + 33.1, sy as f64 * 0.9, wvz * 0.55 + 19.4]);
-                                            let t = ((len_n + 1.0) * 0.5 * 0.6 + (len_n2 + 1.0) * 0.5 * 0.4) as f32;
+                                            // t in [0,1]: blend of two noise octaves, scaled by length_variation.
+                                            // variation=0 → all vines are min_len; variation=1 → full noise spread.
+                                            let t_raw = ((len_n + 1.0) * 0.5 * 0.6 + (len_n2 + 1.0) * 0.5 * 0.4) as f32;
+                                            let t = t_raw * cfg.sky_castle_vine_length_variation as f32;
                                             max_vine_len = cfg.sky_castle_vine_min_len + (t * (2.0 + ruin_factor as f32 * cfg.sky_castle_vine_ruin_max_len as f32)) as usize;
                                             in_vine = true;
                                             self.blocks[lvx][sy][lvz] = BlockType::Vines;
@@ -2057,8 +2068,13 @@ impl Chunk {
                         let tex_index = face_textures.get_for_face(0);
                         let uvs = if tex_index != TEX_NONE { get_face_uvs(tex_index) } else { [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]] };
 
-                        // Sample light from above the block for consistent brightness
-                        let light = neighbors.get_light(x as i32, y as i32 + 1, z as i32);
+                        // Sample light from the block's own position. Sampling y+1 breaks when
+                        // a solid block sits directly overhead (its stored light is 0), making
+                        // tufts under overhangs completely black. The tuft position itself gets
+                        // correct light via horizontal propagation from adjacent air.
+                        let light_above = neighbors.get_light(x as i32, y as i32 + 1, z as i32);
+                        let light_self  = neighbors.get_light(x as i32, y as i32,     z as i32);
+                        let light = light_above.max(light_self);
                         let light_normalized = light as f32 / 15.0;
 
                         // Use same leaf color noise for consistent biome-wide coloring
@@ -2110,7 +2126,11 @@ impl Chunk {
                         };
                         let uvs = if tex_index != TEX_NONE { get_face_uvs(tex_index) } else { [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]] };
 
-                        let light = neighbors.get_light(x as i32, y as i32 + 1, z as i32);
+                        // Same fix as cross-model blocks: max of self and above so that vines
+                        // against a solid overhang still get horizontally-propagated light.
+                        let light_above = neighbors.get_light(x as i32, y as i32 + 1, z as i32);
+                        let light_self  = neighbors.get_light(x as i32, y as i32,     z as i32);
+                        let light = light_above.max(light_self);
                         let light_normalized = light as f32 / 15.0;
 
                         // Foliage color tint — same noise as leaves/grass.

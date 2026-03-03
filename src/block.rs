@@ -72,6 +72,13 @@ impl BlockType {
         !matches!(self, BlockType::Air | BlockType::Water | BlockType::GrassTuft | BlockType::GrassTuftTall | BlockType::Vines | BlockType::Boundary)
     }
 
+    /// True for any block that the player can point at, select, and break.
+    /// Broader than is_solid() — includes non-solid interactable blocks like
+    /// grass tufts and vines.
+    pub fn is_targetable(&self) -> bool {
+        !matches!(self, BlockType::Air | BlockType::Water | BlockType::Boundary)
+    }
+
     pub fn is_water(&self) -> bool {
         matches!(self, BlockType::Water)
     }
@@ -281,6 +288,11 @@ impl BlockType {
     /// Returns true if this block uses a cross model (two intersecting quads) instead of a cube.
     pub fn is_cross_model(&self) -> bool {
         matches!(self, BlockType::GrassTuft | BlockType::GrassTuftTall)
+    }
+
+    /// True for blocks whose dropped item should render as a flat panel instead of a mini-cube.
+    pub fn is_flat_item(&self) -> bool {
+        matches!(self, BlockType::GrassTuft | BlockType::GrassTuftTall | BlockType::Vines)
     }
 
     pub fn is_breakable(&self) -> bool {
@@ -919,6 +931,61 @@ pub fn create_scaled_cube_vertices(
         Vertex { position: [x, y + s, z + s], color, normal: [-1.0, 0.0, 0.0], light_level, alpha, uv: uvs_left[2], tex_index: tex_left, ao },
         Vertex { position: [x, y + s, z], color, normal: [-1.0, 0.0, 0.0], light_level, alpha, uv: uvs_left[3], tex_index: tex_left, ao },
     ]
+}
+
+/// Creates a double-sided flat panel for dropped items that are cross-model or face-panel
+/// blocks in the world (GrassTuft, GrassTuftTall, Vines). The panel is oriented at 45° in
+/// the XZ plane so it is visible from all four cardinal directions.
+/// Returns `(vertices, indices)`.
+pub fn create_flat_item_vertices(
+    center: cgmath::Point3<f32>,
+    block_type: BlockType,
+    scale: f32,
+    light_level: f32,
+) -> (Vec<Vertex>, Vec<u16>) {
+    use crate::texture::get_face_uvs;
+
+    let face_textures = block_type.get_face_textures(false);
+    let tex_index = face_textures.get_for_face(0);
+    let uvs = get_face_uvs(tex_index);
+    let color = [1.0f32, 1.0, 1.0];
+    let alpha = 1.0f32;
+    let ao   = 1.0f32;
+
+    let h = scale * 0.5;
+    // Diagonal extent along (1/√2, 0, 1/√2); quad width in world-space equals `scale`.
+    let d = h * std::f32::consts::FRAC_1_SQRT_2;
+
+    // Four corners of the quad (diagonal orientation in XZ at 45°).
+    let bl = [center.x - d, center.y - h, center.z - d]; // bottom-left
+    let br = [center.x + d, center.y - h, center.z + d]; // bottom-right
+    let tr = [center.x + d, center.y + h, center.z + d]; // top-right
+    let tl = [center.x - d, center.y + h, center.z - d]; // top-left
+
+    // Normals perpendicular to the diagonal plane.
+    let nf = [-std::f32::consts::FRAC_1_SQRT_2, 0.0_f32,  std::f32::consts::FRAC_1_SQRT_2]; // front
+    let nb = [ std::f32::consts::FRAC_1_SQRT_2, 0.0_f32, -std::f32::consts::FRAC_1_SQRT_2]; // back
+
+    // Front face: CCW winding when viewed from nf direction.
+    // Back face: same positions, reversed winding (CCW when viewed from nb direction).
+    let verts = vec![
+        Vertex { position: bl, color, normal: nf, light_level, alpha, uv: uvs[0], tex_index, ao },
+        Vertex { position: br, color, normal: nf, light_level, alpha, uv: uvs[1], tex_index, ao },
+        Vertex { position: tr, color, normal: nf, light_level, alpha, uv: uvs[2], tex_index, ao },
+        Vertex { position: tl, color, normal: nf, light_level, alpha, uv: uvs[3], tex_index, ao },
+        // Back face — bl→tl→tr→br reverses the triangle winding.
+        Vertex { position: bl, color, normal: nb, light_level, alpha, uv: uvs[0], tex_index, ao },
+        Vertex { position: tl, color, normal: nb, light_level, alpha, uv: uvs[3], tex_index, ao },
+        Vertex { position: tr, color, normal: nb, light_level, alpha, uv: uvs[2], tex_index, ao },
+        Vertex { position: br, color, normal: nb, light_level, alpha, uv: uvs[1], tex_index, ao },
+    ];
+
+    let indices: Vec<u16> = vec![
+        0, 1, 2, 2, 3, 0, // front
+        4, 5, 6, 6, 7, 4, // back
+    ];
+
+    (verts, indices)
 }
 
 /// Creates vertices for a small particle (tiny cube) at the given position.
