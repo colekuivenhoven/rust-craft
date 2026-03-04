@@ -12,10 +12,12 @@ mod entities;
 mod inventory;
 mod lighting;
 mod audio;
+mod menu;
 mod modal;
 mod particle;
 mod player;
 mod renderer;
+mod save_context;
 mod texture;
 mod water;
 mod world;
@@ -69,10 +71,15 @@ fn main() {
     }
 }
 
+enum AppPhase {
+    Menu(menu::MenuState),
+    Playing(renderer::State),
+}
+
 #[derive(Default)]
 struct App {
-    state: Option<renderer::State>,
     window: Option<Arc<Window>>,
+    phase: Option<AppPhase>,
 }
 
 impl ApplicationHandler for App {
@@ -85,9 +92,10 @@ impl ApplicationHandler for App {
 
             let window = Arc::new(event_loop.create_window(window_attributes).unwrap());
             self.window = Some(window.clone());
-            let mut state = pollster::block_on(renderer::State::new(window));
-            state.capture_mouse();
-            self.state = Some(state);
+
+            // Start with the main menu — no world is loaded yet
+            let menu = pollster::block_on(menu::MenuState::new(window));
+            self.phase = Some(AppPhase::Menu(menu));
         }
     }
 
@@ -97,7 +105,8 @@ impl ApplicationHandler for App {
         _device_id: DeviceId,
         event: DeviceEvent,
     ) {
-        if let Some(state) = self.state.as_mut() {
+        // Mouse-motion deltas only apply while in-game
+        if let Some(AppPhase::Playing(state)) = &mut self.phase {
             if let DeviceEvent::MouseMotion { delta } = event {
                 state.process_mouse(delta.0, delta.1);
             }
@@ -105,7 +114,69 @@ impl ApplicationHandler for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
-        let Some(state) = self.state.as_mut() else {
+        // ── Menu phase: handle render / resize first (early-return) ──────────
+        if let Some(AppPhase::Menu(menu)) = &mut self.phase {
+            match &event {
+                WindowEvent::RedrawRequested => {
+                    match menu.render() {
+                        Ok(_) => {}
+                        Err(wgpu::SurfaceError::Lost) => menu.resize(menu.size),
+                        Err(wgpu::SurfaceError::OutOfMemory) => event_loop.exit(),
+                        Err(e) => eprintln!("{:?}", e),
+                    }
+                    return;
+                }
+                WindowEvent::Resized(size) => {
+                    menu.resize(*size);
+                    return;
+                }
+                WindowEvent::CloseRequested => {
+                    event_loop.exit();
+                    return;
+                }
+                _ => {}
+            }
+        }
+
+        // ── Menu phase: process input and handle transitions ──────────────────
+        let menu_action = if let Some(AppPhase::Menu(menu)) = &mut self.phase {
+            menu.handle_event(&event)
+        } else {
+            menu::MenuAction::None
+        };
+
+        let window = self.window.as_ref().unwrap().clone();
+        match menu_action {
+            menu::MenuAction::None => {}
+            menu::MenuAction::Quit => {
+                event_loop.exit();
+                return;
+            }
+            menu::MenuAction::StartNewGame { world_name } => {
+                let seed: u32 = rand::random();
+                save_context::set_world(&world_name);
+                let wc = config::WorldConfig { master_seed: seed };
+                let _ = wc.save(std::path::Path::new(&save_context::world_config_path()));
+                // Drop MenuState (releases its wgpu surface) before creating the game
+                self.phase = None;
+                let mut state = pollster::block_on(renderer::State::new(window));
+                state.capture_mouse();
+                self.phase = Some(AppPhase::Playing(state));
+                return;
+            }
+            menu::MenuAction::LoadGame { world_name } => {
+                save_context::set_world(&world_name);
+                // Drop MenuState first
+                self.phase = None;
+                let mut state = pollster::block_on(renderer::State::new(window));
+                state.capture_mouse();
+                self.phase = Some(AppPhase::Playing(state));
+                return;
+            }
+        }
+
+        // ── Game phase ────────────────────────────────────────────────────────
+        let Some(AppPhase::Playing(state)) = &mut self.phase else {
             return;
         };
 
@@ -181,8 +252,8 @@ impl ApplicationHandler for App {
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
-        // Save all modified chunks before exiting
-        if let Some(state) = &mut self.state {
+        // Only save if we're in-game (not still on the menu)
+        if let Some(AppPhase::Playing(state)) = &mut self.phase {
             log::info!("Saving world...");
             state.save_world();
         }

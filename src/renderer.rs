@@ -23,6 +23,9 @@ use winit::event::*;
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::Window;
 
+/// Modal Background Texture
+const MODAL_BG_TEXTURE: &str = "assets/textures/blocks/planks.png";
+
 /// Result of a crafting-UI pixel hit-test
 #[derive(Debug, Clone, Copy)]
 enum CraftingHit {
@@ -210,7 +213,8 @@ pub struct State {
     noclip_mode: bool,
     show_enemy_hitboxes: bool,
     smooth_lighting: bool,
-    
+    hud_enabled: bool,
+
     // Underwater effect (Post-Processing)
     camera_underwater: bool,
     underwater_pipeline: wgpu::RenderPipeline,
@@ -414,8 +418,10 @@ impl State {
         // Cloud config setup - load from config file
         let cloud_config = crate::config::CloudConfig::load_or_create(config_path);
 
-        // World config setup - load master_seed from config file
-        let world_config = crate::config::WorldConfig::load_or_create(config_path);
+        // World config setup - load master_seed from the per-world save directory
+        let world_config = crate::config::WorldConfig::load_or_create(
+            &std::path::Path::new(&crate::save_context::world_config_path()),
+        );
         log::info!("Using master_seed = {}", world_config.master_seed);
 
         // Terrain generation config - loaded from config.toml alongside other settings
@@ -1906,11 +1912,9 @@ impl State {
                 cache: None,
             });
 
-        // ── MODAL SAND TEXTURE ────────────────────────────────────────────────
-        // Load sand.png as a standalone repeat-sampled texture.
-
-        let sand_img = image::open("assets/textures/blocks/sand.png")
-            .expect("Cannot open assets/textures/blocks/sand.png")
+        // ── MODAL BACKGROUND TEXTURE ────────────────────────────────────────────────
+        let sand_img = image::open(MODAL_BG_TEXTURE)
+            .expect("Cannot open MODAL_BG_TEXTURE")
             .to_rgba8();
         let (sand_w, sand_h) = sand_img.dimensions();
         let sand_data = sand_img.into_raw();
@@ -2149,6 +2153,7 @@ impl State {
             noclip_mode:         player_save.as_ref().map_or(false, |s| s.noclip_mode),
             show_enemy_hitboxes: player_save.as_ref().map_or(false, |s| s.show_enemy_hitboxes),
             smooth_lighting: true,
+            hud_enabled: true,
             // Underwater effect
             camera_underwater: false,
             underwater_pipeline,
@@ -2899,6 +2904,35 @@ impl State {
             fps_scale,
             fps_scale,
             smooth_color,
+            screen_w,
+            screen_h,
+        );
+
+        let (hud_text, hud_color, hud_bg_color) = if self.hud_enabled {
+            ("F5 - HUD Enabled: ON", [0.5, 1.0, 0.5, 1.0], [0.0, 0.2, 0.0, 0.6])
+        } else {
+            ("F5 - HUD Enabled: OFF", [1.0, 1.0, 1.0, 0.9], [0.0, 0.0, 0.0, 0.5])
+        };
+        let hud_toggle_y = smooth_y + fps_char_h + 8.0;
+        let hud_text_width = hud_text.len() as f32 * fps_char_w;
+        bitmap_font::push_rect_px(
+            &mut verts,
+            fps_x - 4.0,
+            hud_toggle_y - 4.0,
+            hud_text_width + 8.0,
+            fps_char_h + 8.0,
+            hud_bg_color,
+            screen_w,
+            screen_h,
+        );
+        bitmap_font::draw_text_quads(
+            &mut verts,
+            hud_text,
+            fps_x,
+            hud_toggle_y,
+            fps_scale,
+            fps_scale,
+            hud_color,
             screen_w,
             screen_h,
         );
@@ -3769,6 +3803,13 @@ impl State {
                             for chunk in self.world.chunks.values_mut() {
                                 chunk.dirty = true;
                             }
+                        }
+                        true
+                    }
+                    KeyCode::F5 => {
+                        if is_pressed {
+                            self.hud_enabled = !self.hud_enabled;
+                            println!("HUD: {}", if self.hud_enabled { "ON" } else { "OFF" });
                         }
                         true
                     }
@@ -5315,7 +5356,7 @@ impl State {
                 ui_pass.draw(0..self.modal_ui_vertex_count, 0..1);
             }
 
-        } else {
+        } else if self.hud_enabled {
             // ── NORMAL: crosshair + HUD ───────────────────────────────────────
 
             // If the crafting UI is open, render its modal sand background first

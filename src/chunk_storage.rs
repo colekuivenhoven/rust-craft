@@ -4,17 +4,17 @@ use std::fs::{self, File};
 use std::io::{Read, Write, BufReader, BufWriter};
 use std::path::PathBuf;
 
-const SAVE_DIR: &str = "saves/chunks";
 const CHUNK_FILE_VERSION: u8 = 1;
 
 /// Returns the file path for a chunk's save file
 fn get_chunk_path(chunk_x: i32, chunk_z: i32) -> PathBuf {
-    PathBuf::from(SAVE_DIR).join(format!("{}_{}.chunk", chunk_x, chunk_z))
+    PathBuf::from(crate::save_context::chunks_dir())
+        .join(format!("{}_{}.chunk", chunk_x, chunk_z))
 }
 
 /// Ensures the save directory exists
 fn ensure_save_dir() -> std::io::Result<()> {
-    fs::create_dir_all(SAVE_DIR)
+    fs::create_dir_all(crate::save_context::chunks_dir())
 }
 
 /// Saves a chunk to disk

@@ -564,11 +564,10 @@ const PLAYER_FILE_VERSION: u8 = 1;
 const PLAYER_SAVE_LEN: usize = 22; // 1 + 5*4 + 1
 
 impl PlayerSave {
-    const PATH: &'static str = "saves/player.dat";
-
     /// Load a saved player state, returning `None` if no save file exists or is invalid.
     pub fn load() -> Option<Self> {
-        let data = fs::read(Self::PATH).ok()?;
+        let path = crate::save_context::player_path();
+        let data = fs::read(&path).ok()?;
         if data.len() < PLAYER_SAVE_LEN || data[0] != PLAYER_FILE_VERSION {
             return None;
         }
@@ -578,7 +577,7 @@ impl PlayerSave {
         let yaw   = f32::from_le_bytes([data[13], data[14], data[15], data[16]]);
         let pitch = f32::from_le_bytes([data[17], data[18], data[19], data[20]]);
         let flags = data[21];
-        log::info!("Loaded player save from {}", Self::PATH);
+        log::info!("Loaded player save from {}", path);
         Some(Self {
             x, y, z, yaw, pitch,
             show_chunk_outlines: flags & 0x01 != 0,
@@ -589,7 +588,11 @@ impl PlayerSave {
 
     /// Persist the player state to disk.
     pub fn save(&self) {
-        let _ = fs::create_dir_all("saves");
+        let path = crate::save_context::player_path();
+        let dir = std::path::Path::new(&path)
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("saves"));
+        let _ = fs::create_dir_all(dir);
         let mut data = Vec::with_capacity(PLAYER_SAVE_LEN);
         data.push(PLAYER_FILE_VERSION);
         data.extend_from_slice(&self.x.to_le_bytes());
@@ -602,10 +605,10 @@ impl PlayerSave {
         if self.noclip_mode         { flags |= 0x02; }
         if self.show_enemy_hitboxes { flags |= 0x04; }
         data.push(flags);
-        if let Err(e) = fs::write(Self::PATH, data) {
+        if let Err(e) = fs::write(&path, data) {
             log::warn!("Failed to write player save: {}", e);
         } else {
-            log::info!("Saved player state to {}", Self::PATH);
+            log::info!("Saved player state to {}", path);
         }
     }
 }

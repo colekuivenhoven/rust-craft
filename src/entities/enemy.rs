@@ -19,7 +19,6 @@ const SPAWN_MAX_DIST: f32 = 40.0;
 const SLIME_SIZE: f32 = 0.8;
 const SLIME_DAMAGE: f32 = 8.0;
 const SUFFOCATION_DPS: f32 = 10.0;
-const SAVE_PATH: &str = "saves/enemies.dat";
 const ENEMY_FILE_VERSION: u8 = 1;
 
 // Combat constants
@@ -888,9 +887,13 @@ impl EnemyManager {
 
     /// Save all enemies (active + shelved) to disk
     pub fn save_to_disk(&self) {
-        let _ = fs::create_dir_all("saves");
+        let path = crate::save_context::enemies_path();
+        let dir = std::path::Path::new(&path)
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("saves"));
+        let _ = fs::create_dir_all(dir);
 
-        let file = match File::create(SAVE_PATH) {
+        let file = match File::create(&path) {
             Ok(f) => f,
             Err(e) => {
                 eprintln!("Failed to save enemies: {}", e);
@@ -922,7 +925,7 @@ impl EnemyManager {
 
     /// Load enemies from disk into shelved storage
     fn load_from_disk(&mut self) {
-        let file = match File::open(SAVE_PATH) {
+        let file = match File::open(crate::save_context::enemies_path()) {
             Ok(f) => f,
             Err(_) => return, // No save file, that's fine
         };
