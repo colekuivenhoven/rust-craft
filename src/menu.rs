@@ -10,7 +10,7 @@ use std::time::Instant;
 
 use wgpu::util::DeviceExt;
 use winit::dpi::PhysicalSize;
-use winit::event::{ElementState, KeyEvent, MouseButton, WindowEvent};
+use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::Window;
 
@@ -52,13 +52,13 @@ pub enum MenuAction {
 /// Fraction of screen width for the main-menu panel.
 const MAIN_PANEL_W_RATIO: f32 = MODAL_W_RATIO * 1.2;
 /// Height-to-width ratio that gives enough room for title + 3 buttons.
-const MAIN_PANEL_ASPECT: f32 = MODAL_ASPECT * 0.72; // ≈ 1.28:1 (shorter panel)
+const MAIN_PANEL_ASPECT: f32 = MODAL_ASPECT * 0.92; // ≈ 1.28:1 (shorter panel)
 /// Fraction of panel_h where the first button starts.
 const MAIN_BTN_Y_RATIO: f32 = 0.28;
 /// Button height as fraction of panel_h.
-const MAIN_BTN_H_RATIO: f32 = 0.16;
+const MAIN_BTN_H_RATIO: f32 = 0.14;
 /// Gap between buttons as fraction of panel_h.
-const MAIN_BTN_GAP_RATIO: f32 = 0.04;
+const MAIN_BTN_GAP_RATIO: f32 = 0.08;
 /// Title Y distance from panel top, as fraction of panel_h.
 const MAIN_TITLE_Y_RATIO: f32 = 0.10;
 
@@ -67,9 +67,10 @@ const MODAL_BG_TEXTURE: &str = "assets/textures/blocks/planks.png";
 const VIEW_BG_TEXTURE: &str = "assets/textures/blocks/sand.png";
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  A button with a heap-allocated (dynamic) label, used for world slots.
+//  Button types for the load-game list
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// A plain button with a heap-allocated label (used for the BACK button).
 struct DynButton {
     label: String,
     x: f32,
@@ -82,6 +83,31 @@ struct DynButton {
 impl DynButton {
     fn contains(&self, px: f32, py: f32) -> bool {
         px >= self.x && px <= self.x + self.w && py >= self.y && py <= self.y + self.h
+    }
+}
+
+/// One row in the world list: a name label area + [▶] play + [x] delete buttons.
+struct WorldSlot {
+    name: String,
+    row_y: f32,
+    row_h: f32,
+    name_x: f32,
+    name_w: f32,
+    play_x: f32,
+    del_x: f32,
+    icon_w: f32,
+    play_hovered: bool,
+    del_hovered: bool,
+}
+
+impl WorldSlot {
+    fn play_hit(&self, px: f32, py: f32) -> bool {
+        px >= self.play_x && px <= self.play_x + self.icon_w
+            && py >= self.row_y && py <= self.row_y + self.row_h
+    }
+    fn del_hit(&self, px: f32, py: f32) -> bool {
+        px >= self.del_x && px <= self.del_x + self.icon_w
+            && py >= self.row_y && py <= self.row_y + self.row_h
     }
 }
 
@@ -119,10 +145,12 @@ pub struct MenuState {
 
     /// Saved world names (populated when entering LoadGame phase).
     saved_worlds: Vec<String>,
-    /// Dynamic buttons for the world list.
-    load_buttons: Vec<DynButton>,
+    /// World-list rows (name + play/delete buttons).
+    world_slots: Vec<WorldSlot>,
     /// "BACK" button for the Load Game view.
     load_back: DynButton,
+    /// Scroll offset (index of first visible world slot).
+    load_scroll: usize,
 
     // ── Layout helpers (recomputed on resize) ────────────────────────────────
     /// Main-menu panel bounds in pixel space.
@@ -472,7 +500,7 @@ impl MenuState {
 
         // ── Modals ────────────────────────────────────────────────────────────
         let mut load_game_modal =
-            Modal::new("LOAD WORLD", &[], MODAL_W_RATIO, MODAL_ASPECT);
+            Modal::new("LOAD WORLD", &[], MAIN_PANEL_W_RATIO, MAIN_PANEL_ASPECT);
         load_game_modal.update_layout(screen_w, screen_h);
 
         // ── Initial main-panel layout ─────────────────────────────────────────
@@ -502,8 +530,9 @@ impl MenuState {
             cursor_visible: true,
             main_hovered: [false; 3],
             saved_worlds: Vec::new(),
-            load_buttons: Vec::new(),
+            world_slots: Vec::new(),
             load_back: back_btn,
+            load_scroll: 0,
             main_panel_x: mpx,
             main_panel_y: mpy,
             main_panel_w: mpw,
@@ -616,6 +645,21 @@ impl MenuState {
                         if self.phase == MenuPhase::LoadGame {
                             self.phase = MenuPhase::Main;
                         }
+                    }
+                }
+                MenuAction::None
+            }
+
+            WindowEvent::MouseWheel { delta, .. } => {
+                if self.phase == MenuPhase::LoadGame && !self.saved_worlds.is_empty() {
+                    let dir: i32 = match delta {
+                        MouseScrollDelta::LineDelta(_, y) => if *y > 0.0 { -1 } else { 1 },
+                        MouseScrollDelta::PixelDelta(pos) => if pos.y > 0.0 { -1 } else { 1 },
+                    };
+                    let new_scroll = (self.load_scroll as i32 + dir).max(0) as usize;
+                    if new_scroll != self.load_scroll {
+                        self.load_scroll = new_scroll;
+                        self.rebuild_load_buttons();
                     }
                 }
                 MenuAction::None
@@ -739,6 +783,7 @@ impl MenuState {
 
     fn enter_load_game(&mut self) {
         self.phase = MenuPhase::LoadGame;
+        self.load_scroll = 0;
         self.saved_worlds = crate::save_context::list_worlds();
         self.rebuild_load_buttons();
     }
@@ -780,8 +825,9 @@ impl MenuState {
                 self.ng_back_hovered   = hit(px, py, layout.create_x, layout.back_y,   layout.btn_w, layout.btn_h);
             }
             MenuPhase::LoadGame => {
-                for btn in &mut self.load_buttons {
-                    btn.hovered = btn.contains(px, py);
+                for slot in &mut self.world_slots {
+                    slot.play_hovered = slot.play_hit(px, py);
+                    slot.del_hovered  = slot.del_hit(px, py);
                 }
                 self.load_back.hovered = self.load_back.contains(px, py);
             }
@@ -815,11 +861,18 @@ impl MenuState {
                 }
             }
             MenuPhase::LoadGame => {
-                for btn in &self.load_buttons {
-                    if btn.hovered {
+                for i in 0..self.world_slots.len() {
+                    if self.world_slots[i].play_hovered {
                         return MenuAction::LoadGame {
-                            world_name: btn.label.clone(),
+                            world_name: self.world_slots[i].name.clone(),
                         };
+                    }
+                    if self.world_slots[i].del_hovered {
+                        let name = self.world_slots[i].name.clone();
+                        crate::save_context::delete_world(&name);
+                        self.saved_worlds = crate::save_context::list_worlds();
+                        self.rebuild_load_buttons();
+                        return MenuAction::None;
                     }
                 }
                 if self.load_back.hovered {
@@ -832,33 +885,53 @@ impl MenuState {
 
     /// Recompute the load-game dynamic button layout.
     fn rebuild_load_buttons(&mut self) {
-        self.load_buttons.clear();
+        self.world_slots.clear();
 
         let m = &self.load_game_modal;
         let btn_w = m.panel_w * MODAL_BUTTON_W_RATIO;
-        // Use same proportions as normal modal buttons but scaled to this panel
-        let btn_h = m.panel_h * 0.16;
-        let btn_gap = m.panel_h * 0.04;
+        let btn_h = m.panel_h * MAIN_BTN_H_RATIO;
         let btn_x = (m.panel_x + (m.panel_w - btn_w) * 0.5).round();
 
-        // World slots start at 0.28 of panel height
-        let start_y = (m.panel_y + m.panel_h * 0.28).round();
+        // Icon buttons are square; gap between name area and icons.
+        let icon_w   = btn_h;
+        let icon_gap = (btn_h * 0.12).max(4.0).round();
+        let name_w   = (btn_w - 2.0 * icon_w - 2.0 * icon_gap).max(0.0);
+        let play_x   = (btn_x + name_w + icon_gap).round();
+        let del_x    = (play_x + icon_w + icon_gap).round();
 
-        for (i, world) in self.saved_worlds.iter().take(4).enumerate() {
-            let by = start_y + i as f32 * (btn_h + btn_gap);
-            self.load_buttons.push(DynButton {
-                label: world.clone(),
-                x: btn_x,
-                y: by,
-                w: btn_w,
-                h: btn_h,
-                hovered: false,
+        // BACK is always pinned to the bottom of the panel.
+        let list_gap = m.panel_h * 0.04;
+        let back_y = (m.panel_y + m.panel_h - btn_h - list_gap).round();
+
+        // World-slot area: from just below the title down to just above BACK.
+        let list_start_y = (m.panel_y + m.panel_h * 0.22).round();
+        let slot_h = btn_h + list_gap;
+        let list_end_y = back_y - list_gap;
+        let visible_count = ((list_end_y - list_start_y) / slot_h).floor() as usize;
+        let visible_count = visible_count.max(1);
+
+        // Clamp scroll so we never show an empty tail.
+        let max_scroll = self.saved_worlds.len().saturating_sub(visible_count);
+        self.load_scroll = self.load_scroll.min(max_scroll);
+
+        // Build only the visible slice.
+        let end = (self.load_scroll + visible_count).min(self.saved_worlds.len());
+        for (i, world) in self.saved_worlds[self.load_scroll..end].iter().enumerate() {
+            let row_y = (list_start_y + i as f32 * slot_h).round();
+            self.world_slots.push(WorldSlot {
+                name: world.clone(),
+                row_y,
+                row_h: btn_h,
+                name_x: btn_x,
+                name_w,
+                play_x,
+                del_x,
+                icon_w,
+                play_hovered: false,
+                del_hovered: false,
             });
         }
 
-        // BACK button sits below the world list (or at the same position if no worlds)
-        let n = self.saved_worlds.len().min(4) as f32;
-        let back_y = start_y + n * (btn_h + btn_gap) + if n > 0.0 { btn_gap } else { 0.0 };
         self.load_back = DynButton {
             label: "BACK".to_string(),
             x: btn_x,
@@ -893,20 +966,19 @@ impl MenuState {
         push_view_quad(view, px, py, pw, ph, sw, sh);
         push_panel_chrome(ui, px, py, pw, ph, sw, sh);
 
-        // Title "CRAFT"
-        let title_s = (ph * MODAL_TITLE_SCALE_RATIO).max(1.0);
-        let title = "CRAFT";
+        let title_s = (ph * MODAL_TITLE_SCALE_RATIO * 0.75).max(1.0);
+        let title = "ALTERNATIVE QUEBEC";
         let title_w = title.len() as f32 * (5.0 + 1.0) * title_s;
         let tx = (px + (pw - title_w) * 0.5).round();
         let ty = (py + ph * MAIN_TITLE_Y_RATIO).round();
-        let so = MODAL_TEXT_SHADOW_PX;
+        let so = MODAL_TEXT_SHADOW_PX + title_s * 0.1;
         bitmap_font::draw_text_quads(ui, title, tx + so, ty + so, title_s, title_s, MODAL_TITLE_SHADOW, sw, sh);
         bitmap_font::draw_text_quads(ui, title, tx, ty, title_s, title_s, MODAL_TITLE_COLOR, sw, sh);
 
         // Buttons
         let labels = ["NEW GAME", "LOAD GAME", "QUIT"];
         let btns = main_buttons(px, py, pw, ph);
-        let btn_text_s = (ph * MODAL_BTN_TEXT_SCALE_RATIO).max(1.0);
+        let btn_text_s = (ph * MODAL_BTN_TEXT_SCALE_RATIO * 0.75).max(1.0);
 
         for (i, (bx, by, bw, bh)) in btns.iter().enumerate() {
             let hov = self.main_hovered[i];
@@ -962,16 +1034,16 @@ impl MenuState {
         push_panel_chrome(ui, px, py, pw, ph, sw, sh);
 
         // Title
-        let title_s = m.title_scale;
+        let title_s = (ph * MODAL_TITLE_SCALE_RATIO * 0.75).max(1.0);
         let title = "LOAD WORLD";
         let title_w = title.len() as f32 * (5.0 + 1.0) * title_s;
         let tx = (px + (pw - title_w) * 0.5).round();
-        let ty = (py + m.title_y_offset).round();
+        let ty = (py + ph * MAIN_TITLE_Y_RATIO).round();
         let so = MODAL_TEXT_SHADOW_PX;
         bitmap_font::draw_text_quads(ui, title, tx + so, ty + so, title_s, title_s, MODAL_TITLE_SHADOW, sw, sh);
         bitmap_font::draw_text_quads(ui, title, tx, ty, title_s, title_s, MODAL_TITLE_COLOR, sw, sh);
 
-        let btn_text_s = (ph * MODAL_BTN_TEXT_SCALE_RATIO).max(1.0);
+        let btn_text_s = (ph * MODAL_BTN_TEXT_SCALE_RATIO * 0.75).max(1.0);
 
         if self.saved_worlds.is_empty() {
             // "NO SAVES FOUND" message
@@ -982,8 +1054,54 @@ impl MenuState {
             bitmap_font::draw_text_quads(ui, msg, mx + so, my + so, btn_text_s, btn_text_s, MODAL_BUTTON_SHADOW_COLOR, sw, sh);
             bitmap_font::draw_text_quads(ui, msg, mx, my, btn_text_s, btn_text_s, [0.85, 0.78, 0.55, 1.0], sw, sh);
         } else {
-            for btn in &self.load_buttons {
-                push_dyn_button(ui, &btn.label, btn.x, btn.y, btn.w, btn.h, btn.hovered, btn_text_s, sw, sh);
+            // Icon scale: glyph fills ~60% of the square icon button height.
+            let icon_text_s = (ph * MAIN_BTN_H_RATIO * 0.6 / 7.0).max(1.0);
+            // Render each world row: [name area] [▶] [x]
+            for slot in &self.world_slots {
+                push_world_name_area(ui, &slot.name, slot.name_x, slot.row_y, slot.name_w, slot.row_h, btn_text_s, sw, sh);
+                push_dyn_button(ui, "▶", slot.play_x, slot.row_y, slot.icon_w, slot.row_h, slot.play_hovered, icon_text_s, sw, sh);
+                push_dyn_button_danger(ui, "X", slot.del_x, slot.row_y, slot.icon_w, slot.row_h, slot.del_hovered, icon_text_s * 0.75, sw, sh);
+            }
+
+            // Scrollbar — shown only when the list overflows the visible area.
+            let total = self.saved_worlds.len();
+            let btn_h_v   = ph * MAIN_BTN_H_RATIO;
+            let list_gap_v = ph * 0.04;
+            let back_y_v   = (py + ph - btn_h_v - list_gap_v).round();
+            let list_start_v = (py + ph * 0.22).round();
+            let slot_h_v = btn_h_v + list_gap_v;
+            let list_end_v = back_y_v - list_gap_v;
+            let vis = ((list_end_v - list_start_v) / slot_h_v).floor() as usize;
+            let vis = vis.max(1);
+
+            if total > vis {
+                // Centre the track in the right margin.
+                let right_margin = pw * (1.0 - MODAL_BUTTON_W_RATIO) / 2.0;
+                let track_w = (right_margin * 0.15).max(4.0).round();
+                let track_x = (px + pw - right_margin / 2.0 - track_w / 2.0).round();
+                let track_y = list_start_v;
+                let track_h = list_end_v - list_start_v - (list_gap_v * 1.5);
+
+                // Track: border + dark fill
+                let border = MODAL_BUTTON_BORDER_PX;
+                push_border_rect(
+                    ui,
+                    track_x - border, track_y - border,
+                    track_x + track_w + border, track_y + track_h + border,
+                    track_x, track_y, track_x + track_w, track_y + track_h,
+                    MODAL_BUTTON_BORDER_COLOR, sw, sh,
+                );
+                push_rect_px(ui, track_x, track_y, track_x + track_w, track_y + track_h, MODAL_BUTTON_BG_COLOR, sw, sh);
+
+                // Thumb: sized proportionally, positioned by scroll offset.
+                let thumb_h = (track_h * vis as f32 / total as f32).max(8.0);
+                let max_scroll = (total - vis) as f32;
+                let thumb_y = (track_y + (track_h - thumb_h) * (self.load_scroll as f32 / max_scroll)).round();
+
+                push_rect_px(ui, track_x, thumb_y, track_x + track_w, thumb_y + thumb_h, MODAL_BUTTON_HOVER_COLOR, sw, sh);
+                let bv = (MODAL_BUTTON_BEVEL_PX * 0.5).max(1.0);
+                push_rect_px(ui, track_x, thumb_y, track_x + track_w - bv, thumb_y + bv, MODAL_BUTTON_BEVEL_COLOR, sw, sh);
+                push_rect_px(ui, track_x, thumb_y + bv, track_x + bv, thumb_y + thumb_h, MODAL_BUTTON_BEVEL_COLOR, sw, sh);
             }
         }
 
@@ -1027,17 +1145,9 @@ fn main_buttons(px: f32, py: f32, pw: f32, ph: f32) -> [(f32, f32, f32, f32); 3]
 
 // ── New-Game layout helpers ───────────────────────────────────────────────────
 
-/// Aspect ratio for the New-Game panel — taller than 16:9 so the title,
-/// input field, and two buttons all have comfortable breathing room.
-const NG_PANEL_ASPECT: f32 = MODAL_ASPECT * 0.68; // ≈ 1.21:1
-
-/// Compute the New-Game panel bounds.
+/// Compute the New-Game panel bounds — same size as the main-menu panel.
 fn ng_panel_bounds(sw: f32, sh: f32) -> (f32, f32, f32, f32) {
-    let pw = (sw * MODAL_W_RATIO).min(sh * 0.90 * NG_PANEL_ASPECT);
-    let ph = pw / NG_PANEL_ASPECT;
-    let px = ((sw - pw) * 0.5).round();
-    let py = ((sh - ph) * 0.5).round();
-    (px, py, pw, ph)
+    main_panel_bounds(sw, sh)
 }
 
 struct NgLayout {
@@ -1056,26 +1166,22 @@ struct NgLayout {
 
 /// Compute the full vertical layout for the New-Game view.
 ///
-/// Stack (top → bottom):
-///   title  (ph * 0.10)
-///   gap    (ph * 0.07)
-///   field  (btn_h)
-///   gap    (ph * 0.07)
-///   CREATE (btn_h)
-///   gap    (ph * 0.04)
-///   BACK   (btn_h)
+/// Stack (top → bottom), anchored to the same ratios as the main menu:
+///   title  at MAIN_TITLE_Y_RATIO
+///   field  at MAIN_BTN_Y_RATIO  (same row as first main-menu button)
+///   CREATE gap MAIN_BTN_GAP_RATIO below field
+///   BACK   gap MAIN_BTN_GAP_RATIO below CREATE
 fn ng_layout(px: f32, py: f32, pw: f32, ph: f32) -> NgLayout {
-    let title_s = (ph * MODAL_TITLE_SCALE_RATIO).max(1.0);
-    let text_s  = (ph * MODAL_BTN_TEXT_SCALE_RATIO).max(1.0);
+    let title_s = (ph * MODAL_TITLE_SCALE_RATIO * 0.75).max(1.0);
+    let text_s  = (ph * MODAL_BTN_TEXT_SCALE_RATIO * 0.75).max(1.0);
     let btn_w   = pw * MODAL_BUTTON_W_RATIO;
-    let btn_h   = ph * 0.18;
+    let btn_h   = ph * MAIN_BTN_H_RATIO;
     let create_x = (px + (pw - btn_w) * 0.5).round();
 
-    let title_y   = (py + ph * 0.10).round();
-    let title_bot = title_y + 7.0 * title_s;
-    let field_y   = (title_bot + ph * 0.07).round();
-    let create_y  = (field_y + btn_h + ph * 0.06).round();
-    let back_y    = (create_y + btn_h + ph * 0.06).round();
+    let title_y  = (py + ph * MAIN_TITLE_Y_RATIO).round();
+    let field_y  = (py + ph * MAIN_BTN_Y_RATIO).round();
+    let create_y = (field_y + btn_h + ph * MAIN_BTN_GAP_RATIO).round();
+    let back_y   = (create_y + btn_h + ph * MAIN_BTN_GAP_RATIO).round();
 
     NgLayout { px, py, pw, ph, title_s, title_y, text_s, btn_w, btn_h, create_x, field_y, create_y, back_y }
 }
@@ -1157,9 +1263,76 @@ fn push_dyn_button(
     push_rect_px(out, bx, by, bx + bw - bevel, by + bevel, MODAL_BUTTON_BEVEL_COLOR, sw, sh);
     push_rect_px(out, bx, by + bevel, bx + bevel, by + bh, MODAL_BUTTON_BEVEL_COLOR, sw, sh);
 
-    // Centered label
+    // Centered label (use char count, not byte len, for multi-byte glyphs like ▶)
     let char_w = (5.0 + 1.0) * text_scale;
-    let label_px_w = label.len() as f32 * char_w;
+    let label_px_w = label.chars().count() as f32 * char_w;
+    let tx = (bx + (bw - label_px_w) * 0.5).round();
+    let ty = (by + (bh - 7.0 * text_scale) * 0.5).round();
+    bitmap_font::draw_text_quads(out, label, tx + so, ty + so, text_scale, text_scale, MODAL_BUTTON_SHADOW_COLOR, sw, sh);
+    bitmap_font::draw_text_quads(out, label, tx, ty, text_scale, text_scale, MODAL_BUTTON_TEXT_COLOR, sw, sh);
+}
+
+/// Push the name-area portion of a world-list row (button background, left-aligned text).
+fn push_world_name_area(
+    out: &mut Vec<UiVertex>,
+    name: &str,
+    bx: f32, by: f32, bw: f32, bh: f32,
+    text_scale: f32,
+    sw: f32, sh: f32,
+) {
+    let border = MODAL_BUTTON_BORDER_PX;
+    let bevel  = MODAL_BUTTON_BEVEL_PX;
+    let so     = MODAL_TEXT_SHADOW_PX;
+
+    push_border_rect(
+        out,
+        bx - border, by - border, bx + bw + border, by + bh + border,
+        bx, by, bx + bw, by + bh,
+        MODAL_BUTTON_BORDER_COLOR, sw, sh,
+    );
+    push_rect_px(out, bx, by, bx + bw, by + bh, MODAL_BUTTON_BG_COLOR, sw, sh);
+    push_rect_px(out, bx, by, bx + bw - bevel, by + bevel, MODAL_BUTTON_BEVEL_COLOR, sw, sh);
+    push_rect_px(out, bx, by + bevel, bx + bevel, by + bh, MODAL_BUTTON_BEVEL_COLOR, sw, sh);
+
+    // Truncate name to fit, left-aligned with a small left padding.
+    let char_w   = (5.0 + 1.0) * text_scale;
+    let pad      = (bh * 0.25).max(4.0);
+    let max_chars = (((bw - pad * 2.0) / char_w).floor() as usize).max(1);
+    let display: &str = if name.len() > max_chars { &name[..max_chars] } else { name };
+
+    let tx = (bx + pad).round();
+    let ty = (by + (bh - 7.0 * text_scale) * 0.5).round();
+    bitmap_font::draw_text_quads(out, display, tx + so, ty + so, text_scale, text_scale, MODAL_BUTTON_SHADOW_COLOR, sw, sh);
+    bitmap_font::draw_text_quads(out, display, tx, ty, text_scale, text_scale, MODAL_BUTTON_TEXT_COLOR, sw, sh);
+}
+
+/// Like `push_dyn_button` but uses a danger (red-tinted) hover color for destructive actions.
+fn push_dyn_button_danger(
+    out: &mut Vec<UiVertex>,
+    label: &str,
+    bx: f32, by: f32, bw: f32, bh: f32,
+    hovered: bool,
+    text_scale: f32,
+    sw: f32, sh: f32,
+) {
+    let border = MODAL_BUTTON_BORDER_PX;
+    let bevel  = MODAL_BUTTON_BEVEL_PX;
+    let so     = MODAL_TEXT_SHADOW_PX;
+
+    push_border_rect(
+        out,
+        bx - border, by - border, bx + bw + border, by + bh + border,
+        bx, by, bx + bw, by + bh,
+        MODAL_BUTTON_BORDER_COLOR, sw, sh,
+    );
+
+    let fill = if hovered { [0.72, 0.22, 0.18, 1.0] } else { MODAL_BUTTON_BG_COLOR };
+    push_rect_px(out, bx, by, bx + bw, by + bh, fill, sw, sh);
+    push_rect_px(out, bx, by, bx + bw - bevel, by + bevel, MODAL_BUTTON_BEVEL_COLOR, sw, sh);
+    push_rect_px(out, bx, by + bevel, bx + bevel, by + bh, MODAL_BUTTON_BEVEL_COLOR, sw, sh);
+
+    let char_w     = (5.0 + 1.0) * text_scale;
+    let label_px_w = label.chars().count() as f32 * char_w;
     let tx = (bx + (bw - label_px_w) * 0.5).round();
     let ty = (by + (bh - 7.0 * text_scale) * 0.5).round();
     bitmap_font::draw_text_quads(out, label, tx + so, ty + so, text_scale, text_scale, MODAL_BUTTON_SHADOW_COLOR, sw, sh);

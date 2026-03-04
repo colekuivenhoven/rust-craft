@@ -39,6 +39,12 @@ pub fn world_config_path() -> String {
     format!("{}/world.toml", world_dir())
 }
 
+/// Delete a world's save directory permanently.
+pub fn delete_world(name: &str) {
+    let path = std::path::Path::new("saves").join(name);
+    let _ = std::fs::remove_dir_all(path);
+}
+
 /// Return a list of available world names by scanning the `saves/` directory.
 pub fn list_worlds() -> Vec<String> {
     let saves_dir = std::path::Path::new("saves");
