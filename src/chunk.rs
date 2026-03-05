@@ -262,6 +262,10 @@ impl Chunk {
         let seed_river_warp1       = master_seed.wrapping_add(901);
         let seed_river_warp2       = master_seed.wrapping_add(902);
         let seed_river_depth       = master_seed.wrapping_add(903);
+        let seed_frozen_ceiling    = master_seed.wrapping_add(1000);
+        let seed_stalactite_arctic = master_seed.wrapping_add(1001);
+        let seed_ceiling_glow      = master_seed.wrapping_add(1002);
+        let seed_ceiling_ice_stal  = master_seed.wrapping_add(1003);
 
         // === Noise generators ===
         let perlin = Perlin::new(seed_base_terrain);
@@ -671,6 +675,9 @@ impl Chunk {
                     } else {
                         block
                     };
+
+                    // === Bedrock floor ===
+                    let block = if y == 0 { BlockType::Bedrock } else { block };
 
                     self.blocks[x][y][z] = block;
                 }
@@ -1996,6 +2003,338 @@ impl Chunk {
                 }
             }
         }
+
+        // =====================================================================
+        // Frozen Stone Ceiling + Arctic Stalactites/Stalagmites
+        // =====================================================================
+        if cfg.frozen_stone_ceiling_enabled {
+            let ceiling_perlin = Perlin::new(seed_frozen_ceiling);
+            let stalactite_perlin = Perlin::new(seed_stalactite_arctic);
+
+            // --- Pass 1: Place frozen stone ceiling ---
+            let mut ceiling_depth_map = [[0usize; CHUNK_SIZE]; CHUNK_SIZE];
+            for x in 0..CHUNK_SIZE {
+                for z in 0..CHUNK_SIZE {
+                    let world_x = (world_offset_x + x as i32) as f64;
+                    let world_z = (world_offset_z + z as i32) as f64;
+
+                    let noise_val = (ceiling_perlin.get([
+                        world_x * cfg.frozen_stone_ceiling_noise_scale,
+                        world_z * cfg.frozen_stone_ceiling_noise_scale,
+                    ]) + 1.0) * 0.5;
+                    let extra_depth = (noise_val * (cfg.frozen_stone_ceiling_max_depth as f64 + 1.0)).floor() as usize;
+                    let extra_depth = extra_depth.min(cfg.frozen_stone_ceiling_max_depth);
+                    let total_depth = 1 + extra_depth;
+
+                    ceiling_depth_map[x][z] = total_depth;
+
+                    for d in 0..total_depth {
+                        let y = CHUNK_HEIGHT - 1 - d;
+                        self.blocks[x][y][z] = BlockType::FrozenStone;
+                    }
+                }
+            }
+
+            // --- Pass 2: Arctic stalactites and stalagmites ---
+            let grid_spacing = 6i32;
+            let search_radius = (cfg.arctic_stalactite_base_radius as i32) + 2;
+
+            let chunk_min_x = world_offset_x;
+            let chunk_min_z = world_offset_z;
+            let chunk_max_x = world_offset_x + CHUNK_SIZE as i32;
+            let chunk_max_z = world_offset_z + CHUNK_SIZE as i32;
+
+            let search_min_x = chunk_min_x - search_radius;
+            let search_min_z = chunk_min_z - search_radius;
+            let search_max_x = chunk_max_x + search_radius;
+            let search_max_z = chunk_max_z + search_radius;
+
+            let grid_start_x = (search_min_x as f64 / grid_spacing as f64).floor() as i32 * grid_spacing;
+            let grid_start_z = (search_min_z as f64 / grid_spacing as f64).floor() as i32 * grid_spacing;
+
+            let mut gx = grid_start_x;
+            while gx <= search_max_x {
+                let mut gz = grid_start_z;
+                while gz <= search_max_z {
+                    let gwx = gx as f64;
+                    let gwz = gz as f64;
+
+                    // Check if this grid point is in an Arctic biome
+                    let local_x = gx - world_offset_x;
+                    let local_z = gz - world_offset_z;
+                    let is_arctic = if local_x >= 0 && local_x < CHUNK_SIZE as i32
+                        && local_z >= 0 && local_z < CHUNK_SIZE as i32
+                    {
+                        column_biomes[local_x as usize][local_z as usize].arctic > 0.5
+                    } else {
+                        // For out-of-chunk grid points, replicate biome weight calculation
+                        let temp = (temperature_perlin.get([gwx * cfg.biome_scale, gwz * cfg.biome_scale]) + 1.0) * 0.5;
+                        let continental_scale = cfg.biome_scale * cfg.continental_scale_factor;
+                        let raw_cont = (continentalness_perlin.get([gwx * continental_scale, gwz * continental_scale + 2000.0]) + 1.0) * 0.5;
+                        let ocean_weight = if raw_cont < cfg.ocean_threshold_deep {
+                            1.0
+                        } else if raw_cont < cfg.ocean_threshold_shallow {
+                            smootherstep(cfg.ocean_threshold_shallow, cfg.ocean_threshold_deep, raw_cont)
+                        } else {
+                            0.0
+                        };
+                        let land_factor = 1.0 - ocean_weight;
+                        let arctic_factor = smootherstep(cfg.arctic_temp_threshold_high, cfg.arctic_temp_threshold_low, temp);
+                        arctic_factor * land_factor > 0.5
+                    };
+
+                    if !is_arctic {
+                        gz += grid_spacing;
+                        continue;
+                    }
+
+                    // Sample stalactite noise
+                    let stala_noise = (stalactite_perlin.get([
+                        gwx * cfg.arctic_stalactite_noise_scale,
+                        gwz * cfg.arctic_stalactite_noise_scale,
+                    ]) + 1.0) * 0.5;
+
+                    if stala_noise < cfg.arctic_stalactite_threshold {
+                        gz += grid_spacing;
+                        continue;
+                    }
+
+                    // Stalactite length from noise
+                    let length_fraction = (stala_noise - cfg.arctic_stalactite_threshold)
+                        / (1.0 - cfg.arctic_stalactite_threshold);
+                    let stalactite_length = (5.0 + length_fraction * (cfg.arctic_stalactite_max_length as f64 - 5.0)).round() as usize;
+
+                    // Deterministic RNG for this stalactite
+                    let stala_seed = (gx as u64).wrapping_mul(73856093) ^ (gz as u64).wrapping_mul(19349663) ^ master_seed as u64;
+                    let mut stala_rng = StdRng::seed_from_u64(stala_seed);
+                    let base_radius = cfg.arctic_stalactite_base_radius;
+
+                    // Find surface height at grid center
+                    let center_lx = gx - world_offset_x;
+                    let center_lz = gz - world_offset_z;
+                    let surface_at_center = if center_lx >= 0 && center_lx < CHUNK_SIZE as i32
+                        && center_lz >= 0 && center_lz < CHUNK_SIZE as i32
+                    {
+                        let clx = center_lx as usize;
+                        let clz = center_lz as usize;
+                        let mut sh = 0usize;
+                        for y in (0..CHUNK_HEIGHT).rev() {
+                            if self.blocks[clx][y][clz].is_solid() && self.blocks[clx][y][clz] != BlockType::FrozenStone {
+                                sh = y;
+                                break;
+                            }
+                        }
+                        sh
+                    } else {
+                        cfg.sea_level
+                    };
+
+                    // Ceiling bottom at this position
+                    let ceiling_bottom = if center_lx >= 0 && center_lx < CHUNK_SIZE as i32
+                        && center_lz >= 0 && center_lz < CHUNK_SIZE as i32
+                    {
+                        CHUNK_HEIGHT - ceiling_depth_map[center_lx as usize][center_lz as usize]
+                    } else {
+                        CHUNK_HEIGHT - 1
+                    };
+
+                    // Clamp stalactite to respect minimum clearance above surface
+                    let max_allowed = if ceiling_bottom > surface_at_center + cfg.arctic_stalactite_min_clearance {
+                        ceiling_bottom - surface_at_center - cfg.arctic_stalactite_min_clearance
+                    } else {
+                        0
+                    };
+                    let stalactite_length = stalactite_length.min(max_allowed);
+
+                    if stalactite_length < 3 {
+                        gz += grid_spacing;
+                        continue;
+                    }
+
+                    // Place stalactite: tapered cone from ceiling downward
+                    for dy in 0..stalactite_length {
+                        let y = ceiling_bottom - 1 - dy;
+                        if y == 0 { break; }
+
+                        let progress = dy as f64 / stalactite_length as f64;
+                        let radius = (base_radius * (1.0 - progress)).max(0.0);
+                        let r_int = radius.ceil() as i32;
+
+                        for dx in -r_int..=r_int {
+                            for dz in -r_int..=r_int {
+                                let dist = ((dx * dx + dz * dz) as f64).sqrt();
+                                if dist > radius + 0.5 { continue; }
+
+                                let bx = gx + dx - world_offset_x;
+                                let bz = gz + dz - world_offset_z;
+                                if bx < 0 || bx >= CHUNK_SIZE as i32 || bz < 0 || bz >= CHUNK_SIZE as i32 {
+                                    continue;
+                                }
+                                let bx = bx as usize;
+                                let bz = bz as usize;
+
+                                if self.blocks[bx][y][bz] == BlockType::Air {
+                                    self.blocks[bx][y][bz] = BlockType::FrozenStone;
+                                }
+                            }
+                        }
+                    }
+
+                    // --- Stalagmite under this stalactite ---
+                    // Only spawn on dry solid ground (skip if water/ice sits above surface)
+                    let surface_block_ok = if center_lx >= 0 && center_lx < CHUNK_SIZE as i32
+                        && center_lz >= 0 && center_lz < CHUNK_SIZE as i32
+                    {
+                        let clx = center_lx as usize;
+                        let clz = center_lz as usize;
+                        let sb = self.blocks[clx][surface_at_center][clz];
+                        let above_ok = surface_at_center + 1 < CHUNK_HEIGHT
+                            && !matches!(self.blocks[clx][surface_at_center + 1][clz],
+                                BlockType::Water | BlockType::Ice);
+                        sb.is_solid() && sb != BlockType::FrozenStone && above_ok
+                    } else {
+                        false
+                    };
+
+                    if surface_block_ok && stala_rng.gen::<f64>() < cfg.arctic_stalagmite_chance {
+                        let max_len = cfg.arctic_stalagmite_max_length;
+                        let frac: f64 = stala_rng.gen();
+                        let stalagmite_length = (3.0 + frac * (max_len as f64 - 3.0).max(0.0)).round() as usize;
+
+                        if stalagmite_length >= 2 {
+                            let stag_base_radius = (base_radius * 0.6).max(1.0);
+
+                            for dy in 0..stalagmite_length {
+                                let y = surface_at_center + 1 + dy;
+                                if y >= CHUNK_HEIGHT - 1 { break; }
+
+                                let progress = dy as f64 / stalagmite_length as f64;
+                                let radius = (stag_base_radius * (1.0 - progress)).max(0.0);
+                                let r_int = radius.ceil() as i32;
+
+                                for dx in -r_int..=r_int {
+                                    for dz in -r_int..=r_int {
+                                        let dist = ((dx * dx + dz * dz) as f64).sqrt();
+                                        if dist > radius + 0.5 { continue; }
+
+                                        let bx = gx + dx - world_offset_x;
+                                        let bz = gz + dz - world_offset_z;
+                                        if bx < 0 || bx >= CHUNK_SIZE as i32 || bz < 0 || bz >= CHUNK_SIZE as i32 {
+                                            continue;
+                                        }
+                                        let bx = bx as usize;
+                                        let bz = bz as usize;
+
+                                        if self.blocks[bx][y][bz] == BlockType::Air {
+                                            self.blocks[bx][y][bz] = BlockType::FrozenStone;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    gz += grid_spacing;
+                }
+                gx += grid_spacing;
+            }
+
+            // --- Pass 3: Ceiling ice stalactites (all biomes) ---
+            if cfg.ceiling_ice_stalactite_enabled {
+                let ice_perlin = Perlin::new(seed_ceiling_ice_stal);
+                let ice_grid = cfg.ceiling_ice_stalactite_grid_spacing.max(2) as i32;
+                let ice_search_min_x = chunk_min_x - 1;
+                let ice_search_min_z = chunk_min_z - 1;
+                let ice_search_max_x = chunk_max_x + 1;
+                let ice_search_max_z = chunk_max_z + 1;
+
+                let ice_grid_start_x = (ice_search_min_x as f64 / ice_grid as f64).floor() as i32 * ice_grid;
+                let ice_grid_start_z = (ice_search_min_z as f64 / ice_grid as f64).floor() as i32 * ice_grid;
+
+                let mut igx = ice_grid_start_x;
+                while igx <= ice_search_max_x {
+                    let mut igz = ice_grid_start_z;
+                    while igz <= ice_search_max_z {
+                        let iwx = igx as f64;
+                        let iwz = igz as f64;
+
+                        let ice_noise = (ice_perlin.get([
+                            iwx * cfg.ceiling_ice_stalactite_noise_scale,
+                            iwz * cfg.ceiling_ice_stalactite_noise_scale,
+                        ]) + 1.0) * 0.5;
+
+                        if ice_noise >= cfg.ceiling_ice_stalactite_threshold {
+                            let lx = igx - world_offset_x;
+                            let lz = igz - world_offset_z;
+                            if lx >= 0 && lx < CHUNK_SIZE as i32 && lz >= 0 && lz < CHUNK_SIZE as i32 {
+                                let lx = lx as usize;
+                                let lz = lz as usize;
+                                let length_frac = (ice_noise - cfg.ceiling_ice_stalactite_threshold)
+                                    / (1.0 - cfg.ceiling_ice_stalactite_threshold);
+                                let length = (2.0 + length_frac * (cfg.ceiling_ice_stalactite_max_length as f64 - 2.0)).round() as usize;
+                                let ceiling_bottom = CHUNK_HEIGHT - ceiling_depth_map[lx][lz];
+                                for dy in 0..length {
+                                    let y = ceiling_bottom.saturating_sub(1 + dy);
+                                    if y == 0 { break; }
+                                    if self.blocks[lx][y][lz] == BlockType::Air {
+                                        self.blocks[lx][y][lz] = BlockType::Ice;
+                                    } else {
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+
+                        igz += ice_grid;
+                    }
+                    igx += ice_grid;
+                }
+            }
+
+            // --- Pass 4: Glowstone on frozen stone surfaces ---
+            let glow_ceiling_perlin = Perlin::new(seed_ceiling_glow);
+            for x in 0..CHUNK_SIZE {
+                for z in 0..CHUNK_SIZE {
+                    let world_x = (world_offset_x + x as i32) as f64;
+                    let world_z = (world_offset_z + z as i32) as f64;
+
+                    let glow_noise = (glow_ceiling_perlin.get([
+                        world_x * cfg.ceiling_glowstone_noise_scale,
+                        world_z * cfg.ceiling_glowstone_noise_scale,
+                    ]) + 1.0) * 0.5;
+
+                    if glow_noise < cfg.ceiling_glowstone_threshold {
+                        continue;
+                    }
+
+                    // Walk down from ceiling, replacing some FrozenStone with GlowStone
+                    for y in (1..CHUNK_HEIGHT).rev() {
+                        if self.blocks[x][y][z] != BlockType::FrozenStone {
+                            continue;
+                        }
+                        // Check if this FrozenStone block has at least one exposed face (adjacent to air)
+                        let has_exposed_face =
+                            (y > 0 && self.blocks[x][y - 1][z] == BlockType::Air)
+                            || (y + 1 < CHUNK_HEIGHT && self.blocks[x][y + 1][z] == BlockType::Air)
+                            || (x > 0 && self.blocks[x - 1][y][z] == BlockType::Air)
+                            || (x + 1 < CHUNK_SIZE && self.blocks[x + 1][y][z] == BlockType::Air)
+                            || (z > 0 && self.blocks[x][y][z - 1] == BlockType::Air)
+                            || (z + 1 < CHUNK_SIZE && self.blocks[x][y][z + 1] == BlockType::Air);
+                        if !has_exposed_face {
+                            continue;
+                        }
+                        // Use position-seeded chance for deterministic placement
+                        let pos_hash = (world_x as i64).wrapping_mul(73856093)
+                            ^ (y as i64).wrapping_mul(83492791)
+                            ^ (world_z as i64).wrapping_mul(19349663);
+                        let frac = ((pos_hash & 0xFFFF) as f64) / 65536.0;
+                        if frac < cfg.ceiling_glowstone_chance {
+                            self.blocks[x][y][z] = BlockType::GlowStone;
+                        }
+                    }
+                }
+            }
+        }
     }
 
     pub fn get_block(&self, x: usize, y: usize, z: usize) -> BlockType {
@@ -2232,7 +2571,12 @@ impl Chunk {
                             // Solid blocks carry no meaningful open-air light — AO already handles
                             // the corner darkening from solid geometry, so averaging in their 0s
                             // would double-darken edges and corners.
-                            let light_values: [f32; 4] = if smooth_lighting {
+                            let light_values: [f32; 4] = if block.get_light_emission() > 0 {
+                                // Emissive blocks: encode emission in light_level > 1.0
+                                // Shader detects this and applies bloom/glow effect
+                                let emit = block.get_light_emission() as f32 / 15.0;
+                                [2.0 + emit; 4]
+                            } else if smooth_lighting {
                                 std::array::from_fn(|v| {
                                     let offsets = &AO_OFFSETS[face_idx][v];
                                     let l0 = light as f32;

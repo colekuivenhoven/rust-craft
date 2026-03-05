@@ -211,6 +211,34 @@ pub struct TerrainConfig {
     // ── Depth layers ──────────────────────────────────────────────────────────
     pub depth_near_surface: usize,
     pub depth_transition: usize,
+
+    // ── Frozen stone ceiling ─────────────────────────────────────────────────
+    pub frozen_stone_ceiling_enabled: bool,
+    pub frozen_stone_ceiling_noise_scale: f64,
+    pub frozen_stone_ceiling_max_depth: usize,
+
+    // ── Arctic stalactites ───────────────────────────────────────────────────
+    pub arctic_stalactite_noise_scale: f64,
+    pub arctic_stalactite_threshold: f64,
+    pub arctic_stalactite_max_length: usize,
+    pub arctic_stalactite_min_clearance: usize,
+    pub arctic_stalactite_base_radius: f64,
+
+    // ── Arctic stalagmites ───────────────────────────────────────────────────
+    pub arctic_stalagmite_chance: f64,
+    pub arctic_stalagmite_max_length: usize,
+
+    // ── Ceiling glowstone ─────────────────────────────────────────────────────
+    pub ceiling_glowstone_chance: f64,
+    pub ceiling_glowstone_noise_scale: f64,
+    pub ceiling_glowstone_threshold: f64,
+
+    // ── Ceiling ice stalactites (all biomes) ──────────────────────────────────
+    pub ceiling_ice_stalactite_enabled: bool,
+    pub ceiling_ice_stalactite_noise_scale: f64,
+    pub ceiling_ice_stalactite_threshold: f64,
+    pub ceiling_ice_stalactite_max_length: usize,
+    pub ceiling_ice_stalactite_grid_spacing: usize,
 }
 
 impl Default for TerrainConfig {
@@ -402,6 +430,29 @@ impl Default for TerrainConfig {
 
             depth_near_surface: 3,
             depth_transition: 6,
+
+            frozen_stone_ceiling_enabled: true,
+            frozen_stone_ceiling_noise_scale: 0.05,
+            frozen_stone_ceiling_max_depth: 2,
+
+            arctic_stalactite_noise_scale: 0.03,
+            arctic_stalactite_threshold: 0.7,
+            arctic_stalactite_max_length: 40,
+            arctic_stalactite_min_clearance: 20,
+            arctic_stalactite_base_radius: 3.0,
+
+            arctic_stalagmite_chance: 0.4,
+            arctic_stalagmite_max_length: 15,
+
+            ceiling_glowstone_chance: 0.03,
+            ceiling_glowstone_noise_scale: 0.08,
+            ceiling_glowstone_threshold: 0.75,
+
+            ceiling_ice_stalactite_enabled: true,
+            ceiling_ice_stalactite_noise_scale: 0.06,
+            ceiling_ice_stalactite_threshold: 0.65,
+            ceiling_ice_stalactite_max_length: 10,
+            ceiling_ice_stalactite_grid_spacing: 4,
         }
     }
 }
@@ -430,15 +481,46 @@ impl TerrainConfig {
     }
 }
 
+/// World type determines terrain generation style.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WorldType {
+    Normal,
+    Crust,
+}
+
+impl WorldType {
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            WorldType::Normal => "NORMAL",
+            WorldType::Crust => "CRUST",
+        }
+    }
+
+    pub fn next(&self) -> Self {
+        match self {
+            WorldType::Normal => WorldType::Crust,
+            WorldType::Crust => WorldType::Normal,
+        }
+    }
+}
+
+impl Default for WorldType {
+    fn default() -> Self {
+        WorldType::Normal
+    }
+}
+
 /// World generation configuration
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct WorldConfig {
     pub master_seed: u32,
+    #[serde(default)]
+    pub world_type: WorldType,
 }
 
 impl Default for WorldConfig {
     fn default() -> Self {
-        Self { master_seed: 52 }
+        Self { master_seed: 52, world_type: WorldType::Normal }
     }
 }
 

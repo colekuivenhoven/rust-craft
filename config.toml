@@ -209,6 +209,34 @@ sky_castle_tuft_mossy_tall_threshold = 0.20    # Noise threshold for tall grass 
 depth_near_surface = 3                     # Blocks deep for dirt/sand layer
 depth_transition = 6                       # Blocks deep before full stone layer
 
+# Frozen stone ceiling
+frozen_stone_ceiling_enabled = false       # Enable frozen stone layer at top of world
+frozen_stone_ceiling_noise_scale = 0.075   # Perlin noise scale for ceiling depth variation
+frozen_stone_ceiling_max_depth = 2         # Max extra blocks extending down from top
+
+# Arctic stalactites (spawn from frozen stone ceiling over Arctic biomes)
+arctic_stalactite_noise_scale = 0.03       # Perlin noise scale for stalactite placement
+arctic_stalactite_threshold = 0.85         # Noise threshold (higher = rarer stalactites)
+arctic_stalactite_max_length = 80          # Max blocks hanging down from ceiling
+arctic_stalactite_min_clearance = 0        # Min blocks above arctic surface
+arctic_stalactite_base_radius = 5.0        # Radius at widest point (top)
+
+# Arctic stalagmites (grow up from surface under stalactites)
+arctic_stalagmite_chance = 0.45            # Chance to spawn under a stalactite
+arctic_stalagmite_max_length = 15          # Max height of stalagmites
+
+# Ceiling glowstone (spawns on frozen stone surfaces when ceiling enabled)
+ceiling_glowstone_chance = 0.005           # Probability of glowstone replacing a frozen stone block
+ceiling_glowstone_noise_scale = 0.04       # Perlin noise scale for glowstone clustering
+ceiling_glowstone_threshold = 0.9          # Noise threshold (higher = rarer clusters)
+
+# Ceiling ice stalactites (short, spawn everywhere on ceiling regardless of biome)
+ceiling_ice_stalactite_enabled = true      # Enable ice stalactites on frozen stone ceiling
+ceiling_ice_stalactite_noise_scale = 0.075   # Perlin noise scale for placement
+ceiling_ice_stalactite_threshold = 0.85    # Noise threshold (higher = rarer)
+ceiling_ice_stalactite_max_length = 8     # Max blocks hanging down
+ceiling_ice_stalactite_grid_spacing = 6    # Grid spacing between potential stalactite centers
+
 #* ── Fog Settings ────────────────────────────────────────────────────────────────
 enabled = true                             # Enable/disable fog
 start = 200.0                              # Distance where fog begins
@@ -218,6 +246,6 @@ use_square_fog = false                     # true = square fog (Chebyshev distan
 #* ── Cloud Settings ──────────────────────────────────────────────────────────────
 height = 155.0                             # Y-coordinate where clouds generate
 pixel_size = 8.0                           # Size of each cloud pixel (larger = more pixelated)
-threshold = 0.75                           # Noise threshold for cloud presence (0.0-1.0, higher = fewer clouds)
+threshold = 0.75                           # Noise threshold for cloud presence (0.0-1.0, higher = fewer clouds). 0.75 is good.
 noise_scale = 0.007                        # Scale of noise pattern (lower = larger cloud formations)
 noise_offset_change_speed = 5.0            # Cloud drift speed in world units per second (X axis; Z = 30% of this)

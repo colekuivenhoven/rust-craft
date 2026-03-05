@@ -21,6 +21,8 @@ pub const TEX_COBBLESTONE: u32 = 12;
 pub const TEX_VINES: u32 = 13;
 pub const TEX_VINES_END: u32 = 14;
 pub const TEX_PLANKS: u32 = 15;
+pub const TEX_BEDROCK: u32 = 26;
+pub const TEX_FROZEN_STONE: u32 = 27;
 pub const TEX_NONE: u32 = 255; // Sentinel for "use color fallback"
 
 // Breaking textures start at row 1 (index 16)
@@ -122,6 +124,9 @@ impl TextureAtlas {
         Self::load_texture_into_atlas(&mut atlas, "assets/textures/blocks/vines.png", TEX_VINES);
         Self::load_texture_into_atlas(&mut atlas, "assets/textures/blocks/vines_end.png", TEX_VINES_END);
         Self::load_texture_into_atlas(&mut atlas, "assets/textures/blocks/planks.png", TEX_PLANKS);
+
+        Self::load_texture_into_atlas(&mut atlas, "assets/textures/blocks/bedrock.png", TEX_BEDROCK);
+        Self::load_texture_into_atlas(&mut atlas, "assets/textures/blocks/frozen_stone.png", TEX_FROZEN_STONE);
 
         // Load breaking textures (row 1, starting at index 16)
         for i in 0..10 {

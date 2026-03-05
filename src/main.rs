@@ -152,10 +152,10 @@ impl ApplicationHandler for App {
                 event_loop.exit();
                 return;
             }
-            menu::MenuAction::StartNewGame { world_name } => {
+            menu::MenuAction::StartNewGame { world_name, world_type } => {
                 let seed: u32 = rand::random();
                 save_context::set_world(&world_name);
-                let wc = config::WorldConfig { master_seed: seed };
+                let wc = config::WorldConfig { master_seed: seed, world_type };
                 let _ = wc.save(std::path::Path::new(&save_context::world_config_path()));
                 // Drop MenuState (releases its wgpu surface) before creating the game
                 self.phase = None;
@@ -176,6 +176,47 @@ impl ApplicationHandler for App {
         }
 
         // ── Game phase ────────────────────────────────────────────────────────
+
+        // Check for "Save and Quit" click first (needs to drop game state borrow)
+        let save_and_quit = if let Some(AppPhase::Playing(state)) = &mut self.phase {
+            if let WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Left,
+                ..
+            } = &event
+            {
+                if state.is_paused() {
+                    if let Some(label) = state.handle_modal_click() {
+                        if label == "SAVE AND QUIT" {
+                            state.save_world();
+                            true
+                        } else {
+                            if label == "RESUME" {
+                                state.close_pause_menu();
+                            }
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        if save_and_quit {
+            let window = self.window.as_ref().unwrap().clone();
+            self.phase = None;
+            let menu = pollster::block_on(menu::MenuState::new(window));
+            self.phase = Some(AppPhase::Menu(menu));
+            return;
+        }
+
         let Some(AppPhase::Playing(state)) = &mut self.phase else {
             return;
         };
@@ -188,13 +229,7 @@ impl ApplicationHandler for App {
         } = &event
         {
             if state.is_paused() {
-                if let Some(label) = state.handle_modal_click() {
-                    match label {
-                        "RESUME" => state.close_pause_menu(),
-                        "QUIT"   => { event_loop.exit(); return; }
-                        _        => {}
-                    }
-                }
+                // Already handled above (save_and_quit / resume)
                 return; // Consume click while paused
             }
             // When the crafting UI is open the mouse is freed; pass clicks through

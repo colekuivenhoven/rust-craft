@@ -127,11 +127,14 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         }
     }
 
+    // Detect emissive blocks: light_level > 1.5 signals emission
+    // Encoding: light_level = 2.0 + emission_strength (0.0-1.0)
+    let is_emissive = in.light_level > 1.5;
+    let emission_strength = select(0.0, in.light_level - 2.0, is_emissive);
+    let voxel_light = select(in.light_level, 1.0, is_emissive);
+
     // Minimum ambient light (visibility even in complete darkness)
     let min_ambient = 0.05;
-
-    // Voxel lighting from BFS propagation (0.0 to 1.0)
-    let voxel_light = in.light_level;
 
     // Apply curve to make light falloff more pleasing
     let curved_light = pow(voxel_light, 1.4);
@@ -143,10 +146,20 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Combine lighting: voxel light is primary, directional adds depth
     let total_light = min_ambient + curved_light * 0.9 + directional * voxel_light;
 
-    // Apply ambient occlusion
-    let final_light = total_light * in.ao;
+    // Apply ambient occlusion (skip for emissive blocks — they glow uniformly)
+    let final_light = select(total_light * in.ao, total_light, is_emissive);
 
-    let lit_color = base_color * final_light;
+    var lit_color = base_color * final_light;
+
+    // Emissive blocks: boost brightness so bloom post-process can detect them
+    if (is_emissive) {
+        // Saturate the block's color slightly for vividness
+        let avg = dot(lit_color, vec3<f32>(0.333, 0.333, 0.333));
+        lit_color = mix(vec3<f32>(avg), lit_color, 1.4);
+
+        let brightness_boost = 0.4; // Tunable parameter for how much brighter emissive blocks appear
+        lit_color = lit_color * (1.0 + emission_strength * brightness_boost);
+    }
 
     // Apply distance fog as alpha/transparency
     var final_alpha = alpha;
@@ -172,4 +185,28 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     return vec4<f32>(lit_color, final_alpha);
+}
+
+// Fragment shader for bloom: only outputs emissive block color, discards everything else.
+// Used in a separate render pass to write emissive pixels into the bloom texture.
+@fragment
+fn fs_emissive(in: VertexOutput) -> @location(0) vec4<f32> {
+    // Only emissive blocks pass (light_level > 1.5 encodes emission)
+    if (in.light_level <= 1.5) {
+        discard;
+    }
+
+    let base_idx = in.tex_index & 0xFFFFu;
+    var base_color: vec3<f32>;
+
+    if (base_idx == 255u) {
+        base_color = in.color;
+    } else {
+        let tex_color = textureSample(texture_atlas, texture_sampler, in.uv);
+        base_color = tex_color.rgb * in.color;
+    }
+
+    let emission_strength = in.light_level - 2.0;
+    // Output bright emissive color for bloom blur
+    return vec4<f32>(base_color * (1.0 + emission_strength * 0.5), 1.0);
 }

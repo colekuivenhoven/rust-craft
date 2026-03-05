@@ -14,6 +14,8 @@ use crate::texture::{
     TEX_COBBLESTONE, 
     TEX_VINES, 
     TEX_PLANKS,
+    TEX_BEDROCK,
+    TEX_FROZEN_STONE,
     TEX_NONE
 };
 
@@ -42,6 +44,8 @@ pub enum BlockType {
     GrassTuftTall,
     CraftingTable,
     Vines,
+    Bedrock,
+    FrozenStone,
     Boundary, // Virtual block type for unloaded chunk boundaries.
 }
 
@@ -64,6 +68,8 @@ impl BlockType {
             BlockType::GrassTuftTall => "Tall Grass",
             BlockType::CraftingTable => "Crafting Table",
             BlockType::Vines => "Vines",
+            BlockType::Bedrock => "Bedrock",
+            BlockType::FrozenStone => "Frozen Stone",
             BlockType::Boundary => "Boundary",
         }
     }
@@ -129,6 +135,8 @@ impl BlockType {
             BlockType::GrassTuftTall => [1.0, 1.0, 1.0], // Uses texture
             BlockType::CraftingTable => [1.0, 1.0, 1.0], // Uses texture
             BlockType::Vines => [1.0, 1.0, 1.0], // Uses texture
+            BlockType::Bedrock => [1.0, 1.0, 1.0], // Uses texture
+            BlockType::FrozenStone => [1.0, 1.0, 1.0], // Uses texture
             BlockType::Boundary => [0.0, 0.0, 0.0], // Never rendered
         }
     }
@@ -151,6 +159,8 @@ impl BlockType {
             BlockType::GrassTuftTall => "Tall Grass Tuft",
             BlockType::CraftingTable => "Crafting Table",
             BlockType::Vines => "Vines",
+            BlockType::Bedrock => "Bedrock",
+            BlockType::FrozenStone => "Frozen Stone",
             BlockType::Boundary => "Boundary",
         }
     }
@@ -173,6 +183,8 @@ impl BlockType {
             BlockType::GrassTuftTall => 16,
             BlockType::CraftingTable => 17,
             BlockType::Vines => 18,
+            BlockType::Bedrock => 19,
+            BlockType::FrozenStone => 20,
             BlockType::Boundary => 15,
         }
     }
@@ -197,6 +209,8 @@ impl BlockType {
             15 => BlockType::Boundary,
             17 => BlockType::CraftingTable,
             18 => BlockType::Vines,
+            19 => BlockType::Bedrock,
+            20 => BlockType::FrozenStone,
             _ => BlockType::Air,
         }
     }
@@ -256,6 +270,12 @@ impl BlockType {
             // Planks
             BlockType::Planks => FaceTextures::all(TEX_PLANKS),
 
+            // Bedrock
+            BlockType::Bedrock => FaceTextures::all(TEX_BEDROCK),
+
+            // Frozen Stone
+            BlockType::FrozenStone => FaceTextures::all(TEX_FROZEN_STONE),
+
             // All other blocks use color fallback
             _ => FaceTextures::all(TEX_NONE),
         }
@@ -280,6 +300,8 @@ impl BlockType {
             BlockType::GrassTuftTall => 0.1,
             BlockType::CraftingTable => 2.5,
             BlockType::Vines => 0.1,
+            BlockType::Bedrock => 0.0,
+            BlockType::FrozenStone => 2.5,
             BlockType::Boundary => 0.0,
         }
     }
@@ -296,7 +318,7 @@ impl BlockType {
     }
 
     pub fn is_breakable(&self) -> bool {
-        !matches!(self, BlockType::Air | BlockType::Water | BlockType::Boundary)
+        !matches!(self, BlockType::Air | BlockType::Water | BlockType::Bedrock | BlockType::Boundary)
     }
 }
 

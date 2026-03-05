@@ -214,6 +214,7 @@ pub struct State {
     show_enemy_hitboxes: bool,
     smooth_lighting: bool,
     hud_enabled: bool,
+    frozen_stone_ceiling: bool,
 
     // Underwater effect (Post-Processing)
     camera_underwater: bool,
@@ -234,6 +235,19 @@ pub struct State {
     motion_blur_bind_group_layout: wgpu::BindGroupLayout,
     motion_blur_bind_group: wgpu::BindGroup,
     motion_blur_uniform_buffer: wgpu::Buffer,
+
+    // Bloom (Post-Processing)
+    bloom_texture_a: wgpu::Texture,
+    bloom_texture_a_view: wgpu::TextureView,
+    bloom_texture_b: wgpu::Texture,
+    bloom_texture_b_view: wgpu::TextureView,
+    bloom_emissive_pipeline: wgpu::RenderPipeline, // renders only emissive blocks to bloom texture
+    bloom_blur_h_pipeline: wgpu::RenderPipeline,
+    bloom_blur_v_pipeline: wgpu::RenderPipeline,
+    bloom_composite_pipeline: wgpu::RenderPipeline,
+    bloom_bind_group_layout: wgpu::BindGroupLayout,
+    bloom_a_bind_group: wgpu::BindGroup,           // reads bloom_texture_a
+    bloom_b_bind_group: wgpu::BindGroup,           // reads bloom_texture_b
 
     // Damage flash effect (Post-Processing)
     damage_flash_intensity: f32,
@@ -425,9 +439,19 @@ impl State {
         log::info!("Using master_seed = {}", world_config.master_seed);
 
         // Terrain generation config - loaded from config.toml alongside other settings
-        let terrain_cfg = std::sync::Arc::new(
-            crate::config::TerrainConfig::load_or_create(config_path)
-        );
+        let mut terrain_cfg_val = crate::config::TerrainConfig::load_or_create(config_path);
+
+        // Apply world type overrides
+        match world_config.world_type {
+            crate::config::WorldType::Normal => {
+                terrain_cfg_val.frozen_stone_ceiling_enabled = false;
+            }
+            crate::config::WorldType::Crust => {
+                terrain_cfg_val.frozen_stone_ceiling_enabled = true;
+            }
+        }
+
+        let terrain_cfg = std::sync::Arc::new(terrain_cfg_val);
 
         let fog_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Fog Buffer"),
@@ -583,6 +607,47 @@ impl State {
                     clamp: 0.0,
                 },
             }),
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            multiview: None,
+            cache: None,
+        });
+
+        // Bloom emissive pipeline: renders only emissive blocks into the bloom texture.
+        // Uses fs_emissive which discards non-emissive fragments.
+        // No depth stencil because bloom texture is quarter-resolution.
+        let bloom_emissive_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Bloom Emissive Pipeline"),
+            layout: Some(&render_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[Vertex::desc()],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_emissive"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: Some(wgpu::Face::Back),
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: None,
             multisample: wgpu::MultisampleState {
                 count: 1,
                 mask: !0,
@@ -833,6 +898,7 @@ impl State {
             cache: None,
         });
 
+        let frozen_stone_ceiling = terrain_cfg.frozen_stone_ceiling_enabled;
         let world = World::new(18, world_config.master_seed, terrain_cfg);
 
         // Restore from a previous session, or find a safe spawn point.
@@ -1821,6 +1887,137 @@ impl State {
             ],
         });
 
+        // ── BLOOM POST-PROCESSING ────────────────────────────────────────────
+        // Quarter-resolution textures for bloom effect (bright extract → blur → composite)
+        let bloom_w = (config.width / 4).max(1);
+        let bloom_h = (config.height / 4).max(1);
+
+        let bloom_texture_a = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Bloom Texture A"),
+            size: wgpu::Extent3d { width: bloom_w, height: bloom_h, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: config.format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let bloom_texture_a_view = bloom_texture_a.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let bloom_texture_b = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Bloom Texture B"),
+            size: wgpu::Extent3d { width: bloom_w, height: bloom_h, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: config.format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let bloom_texture_b_view = bloom_texture_b.create_view(&wgpu::TextureViewDescriptor::default());
+
+        // Bloom bind group layout: texture + sampler (shared by all bloom passes)
+        let bloom_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Bloom BGL"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+
+        // Bloom bind groups
+        let bloom_a_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Bloom A BG"),
+            layout: &bloom_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&bloom_texture_a_view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&scene_sampler) },
+            ],
+        });
+        let bloom_b_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Bloom B BG"),
+            layout: &bloom_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&bloom_texture_b_view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&scene_sampler) },
+            ],
+        });
+
+        // Bloom shader and pipelines
+        let bloom_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Bloom Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/bloom_shader.wgsl").into()),
+        });
+
+        let bloom_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Bloom Pipeline Layout"),
+            bind_group_layouts: &[&bloom_bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
+        // Helper closure: create a bloom pipeline with a given fragment entry point and blend state
+        let create_bloom_pipeline = |label: &str, fs_entry: &str, blend: Option<wgpu::BlendState>| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&bloom_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &bloom_shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &bloom_shader,
+                    entry_point: Some(fs_entry),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: config.format,
+                        blend,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    cull_mode: None,
+                    ..Default::default()
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None,
+                cache: None,
+            })
+        };
+
+        let bloom_blur_h_pipeline = create_bloom_pipeline("Bloom Blur H Pipeline", "fs_blur_h", None);
+        let bloom_blur_v_pipeline = create_bloom_pipeline("Bloom Blur V Pipeline", "fs_blur_v", None);
+        // Composite uses additive blending to overlay bloom onto scene_texture
+        let bloom_composite_pipeline = create_bloom_pipeline(
+            "Bloom Composite Pipeline",
+            "fs_composite",
+            Some(wgpu::BlendState {
+                color: wgpu::BlendComponent {
+                    src_factor: wgpu::BlendFactor::One,
+                    dst_factor: wgpu::BlendFactor::One,
+                    operation: wgpu::BlendOperation::Add,
+                },
+                alpha: wgpu::BlendComponent::OVER,
+            }),
+        );
+
         // ── PAUSE BLUR PIPELINE ───────────────────────────────────────────────
         // Reads scene_texture, applies a Gaussian blur + darkening,
         // then outputs to the swap chain as the pause backdrop.
@@ -2069,7 +2266,7 @@ impl State {
         });
 
         // ── Pause modal instance ──────────────────────────────────────────────
-        let mut pause_modal = Modal::new("PAUSED", &["RESUME", "QUIT"], modal::MODAL_W_RATIO, modal::MODAL_ASPECT);
+        let mut pause_modal = Modal::new("PAUSED", &["RESUME", "SAVE AND QUIT"], modal::MODAL_W_RATIO, modal::MODAL_ASPECT);
         pause_modal.update_layout(size.width as f32, size.height as f32);
 
         // ── Crafting table modal instance (wider + taller than pause modal) ──
@@ -2154,6 +2351,7 @@ impl State {
             show_enemy_hitboxes: player_save.as_ref().map_or(false, |s| s.show_enemy_hitboxes),
             smooth_lighting: true,
             hud_enabled: true,
+            frozen_stone_ceiling,
             // Underwater effect
             camera_underwater: false,
             underwater_pipeline,
@@ -2171,6 +2369,18 @@ impl State {
             motion_blur_bind_group_layout,
             motion_blur_bind_group,
             motion_blur_uniform_buffer,
+            // Bloom
+            bloom_texture_a,
+            bloom_texture_a_view,
+            bloom_texture_b,
+            bloom_texture_b_view,
+            bloom_emissive_pipeline,
+            bloom_blur_h_pipeline,
+            bloom_blur_v_pipeline,
+            bloom_composite_pipeline,
+            bloom_bind_group_layout,
+            bloom_a_bind_group,
+            bloom_b_bind_group,
             // Damage flash
             damage_flash_intensity: 0.0,
             damage_pipeline,
@@ -2517,6 +2727,48 @@ impl State {
                 view_formats: &[],
             });
             self.post_process_texture_view = self.post_process_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+            // Recreate Bloom Textures (quarter resolution)
+            let bloom_w = (new_size.width / 4).max(1);
+            let bloom_h = (new_size.height / 4).max(1);
+            self.bloom_texture_a = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("Bloom Texture A"),
+                size: wgpu::Extent3d { width: bloom_w, height: bloom_h, depth_or_array_layers: 1 },
+                mip_level_count: 1, sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: self.config.format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+            self.bloom_texture_a_view = self.bloom_texture_a.create_view(&wgpu::TextureViewDescriptor::default());
+            self.bloom_texture_b = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("Bloom Texture B"),
+                size: wgpu::Extent3d { width: bloom_w, height: bloom_h, depth_or_array_layers: 1 },
+                mip_level_count: 1, sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: self.config.format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+            self.bloom_texture_b_view = self.bloom_texture_b.create_view(&wgpu::TextureViewDescriptor::default());
+
+            // Recreate Bloom Bind Groups
+            self.bloom_a_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Bloom A BG"),
+                layout: &self.bloom_bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&self.bloom_texture_a_view) },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.scene_sampler) },
+                ],
+            });
+            self.bloom_b_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Bloom B BG"),
+                layout: &self.bloom_bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&self.bloom_texture_b_view) },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.scene_sampler) },
+                ],
+            });
 
             // Recreate Pause Blur Bind Group (reads from scene_texture)
             self.pause_blur_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -4549,11 +4801,11 @@ impl State {
                     view: world_render_target,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.5,
-                            g: 0.7,
-                            b: 1.0,
-                            a: 1.0,
+                        // When frozen_stone_ceiling is active, render the scene dark background. Otherwise, sky blue background.
+                        load: wgpu::LoadOp::Clear(if self.frozen_stone_ceiling {
+                            wgpu::Color { r: 0.00, g: 0.01, b: 0.02, a: 1.0 }
+                        } else {
+                            wgpu::Color { r: 0.5, g: 0.7, b: 1.0, a: 1.0 }
                         }),
                         store: wgpu::StoreOp::Store,
                     },
@@ -4968,7 +5220,7 @@ impl State {
         }
 
         // --- PASS 4: RENDER CLOUDS ---
-        if self.cloud_index_count > 0 {
+        if self.cloud_index_count > 0 && !self.frozen_stone_ceiling {
             let mut cloud_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Cloud Render Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -5173,6 +5425,110 @@ impl State {
                 hitbox_pass.set_vertex_buffer(0, hitbox_buffer.slice(..));
                 hitbox_pass.draw(0..hitbox_verts.len() as u32, 0..1);
             }
+        }
+
+        // --- BLOOM PASSES (emissive render → blur H → blur V → additive composite) ---
+        // Pass B1: Render only emissive blocks into bloom_texture_a (quarter res)
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Bloom Emissive Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.bloom_texture_a_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&self.bloom_emissive_pipeline);
+            pass.set_bind_group(0, &self.camera_bind_group, &[]);
+            pass.set_bind_group(1, &self.texture_atlas.bind_group, &[]);
+            pass.set_bind_group(2, &self.fog_bind_group, &[]);
+
+            // Re-render chunk geometry — fs_emissive discards non-emissive fragments
+            for (&(cx, cz), buffers) in self.chunk_buffers.iter() {
+                let min = Vector3::new(
+                    (cx * CHUNK_SIZE as i32) as f32, 0.0,
+                    (cz * CHUNK_SIZE as i32) as f32,
+                );
+                let max = Vector3::new(
+                    min.x + CHUNK_SIZE as f32, CHUNK_HEIGHT as f32,
+                    min.z + CHUNK_SIZE as f32,
+                );
+                if !self.frustum.is_box_visible(min, max) {
+                    continue;
+                }
+                pass.set_vertex_buffer(0, buffers.vertex_buffer.slice(..));
+                pass.set_index_buffer(buffers.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+                pass.draw_indexed(0..buffers.index_count, 0, 0..1);
+            }
+        }
+
+        // Pass B2: Horizontal blur bloom_texture_a → bloom_texture_b
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Bloom Blur H Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.bloom_texture_b_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&self.bloom_blur_h_pipeline);
+            pass.set_bind_group(0, &self.bloom_a_bind_group, &[]);
+            pass.draw(0..3, 0..1);
+        }
+
+        // Pass B3: Vertical blur bloom_texture_b → bloom_texture_a
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Bloom Blur V Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.bloom_texture_a_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&self.bloom_blur_v_pipeline);
+            pass.set_bind_group(0, &self.bloom_b_bind_group, &[]);
+            pass.draw(0..3, 0..1);
+        }
+
+        // Pass B4: Additive composite bloom_texture_a onto scene_texture
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Bloom Composite Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.scene_texture_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load, // preserve existing scene content
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&self.bloom_composite_pipeline);
+            pass.set_bind_group(0, &self.bloom_a_bind_group, &[]);
+            pass.draw(0..3, 0..1);
         }
 
         // --- PASS 6: POST-PROCESSING (Motion Blur + Underwater + Damage) ---

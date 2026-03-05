@@ -40,7 +40,7 @@ pub enum MenuPhase {
 
 pub enum MenuAction {
     None,
-    StartNewGame { world_name: String },
+    StartNewGame { world_name: String, world_type: crate::config::WorldType },
     LoadGame { world_name: String },
     Quit,
 }
@@ -164,7 +164,10 @@ pub struct MenuState {
     ng_panel_y: f32,
     ng_panel_w: f32,
     ng_panel_h: f32,
-    /// Hover state for the two New-Game buttons (CREATE / BACK).
+    /// Selected world type (Normal / Crust).
+    world_type: crate::config::WorldType,
+    /// Hover state for the New-Game buttons (WORLD TYPE / CREATE / BACK).
+    ng_type_hovered: bool,
     ng_create_hovered: bool,
     ng_back_hovered: bool,
 
@@ -541,6 +544,8 @@ impl MenuState {
             ng_panel_y: ngy,
             ng_panel_w: ngw,
             ng_panel_h: ngh,
+            world_type: crate::config::WorldType::Normal,
+            ng_type_hovered: false,
             ng_create_hovered: false,
             ng_back_hovered: false,
             load_game_modal,
@@ -779,6 +784,7 @@ impl MenuState {
         self.phase = MenuPhase::NewGame;
         self.text_input.clear();
         self.error_msg = None;
+        self.world_type = crate::config::WorldType::Normal;
     }
 
     fn enter_load_game(&mut self) {
@@ -799,7 +805,7 @@ impl MenuState {
             self.error_msg = Some("WORLD ALREADY EXISTS");
             return MenuAction::None;
         }
-        MenuAction::StartNewGame { world_name: name }
+        MenuAction::StartNewGame { world_name: name, world_type: self.world_type }
     }
 
     fn update_hover(&mut self, px: f32, py: f32) {
@@ -820,9 +826,10 @@ impl MenuState {
                 }
             }
             MenuPhase::NewGame => {
-                let layout = ng_layout(self.ng_panel_x, self.ng_panel_y, self.ng_panel_w, self.ng_panel_h);
-                self.ng_create_hovered = hit(px, py, layout.create_x, layout.create_y, layout.btn_w, layout.btn_h);
-                self.ng_back_hovered   = hit(px, py, layout.create_x, layout.back_y,   layout.btn_w, layout.btn_h);
+                let l = ng_layout(self.ng_panel_x, self.ng_panel_y, self.ng_panel_w, self.ng_panel_h);
+                self.ng_type_hovered   = hit(px, py, l.type_x,   l.row_y,  l.type_w,   l.btn_h);
+                self.ng_create_hovered = hit(px, py, l.create_x, l.row_y,  l.create_w, l.btn_h);
+                self.ng_back_hovered   = hit(px, py, l.left_x,   l.back_y, l.btn_w,    l.btn_h);
             }
             MenuPhase::LoadGame => {
                 for slot in &mut self.world_slots {
@@ -851,6 +858,9 @@ impl MenuState {
                 }
             }
             MenuPhase::NewGame => {
+                if self.ng_type_hovered {
+                    self.world_type = self.world_type.next();
+                }
                 if self.ng_create_hovered {
                     return self.try_create_world();
                 }
@@ -1010,15 +1020,17 @@ impl MenuState {
             &self.text_input,
             self.cursor_visible,
             self.error_msg,
-            l.create_x, l.field_y, l.btn_w, l.btn_h,
+            l.left_x, l.field_y, l.btn_w, l.btn_h,
             text_s,
             sw, sh,
         );
 
-        // CREATE button
-        push_dyn_button(ui, "CREATE", l.create_x, l.create_y, l.btn_w, l.btn_h, self.ng_create_hovered, text_s, sw, sh);
-        // BACK button
-        push_dyn_button(ui, "BACK",   l.create_x, l.back_y,   l.btn_w, l.btn_h, self.ng_back_hovered,   text_s, sw, sh);
+        // TYPE + CREATE row (side by side)
+        let type_label = format!("TYPE: {}", self.world_type.display_name());
+        push_dyn_button(ui, &type_label, l.type_x,   l.row_y, l.type_w,   l.btn_h, self.ng_type_hovered,   text_s, sw, sh);
+        push_dyn_button(ui, "CREATE",    l.create_x, l.row_y, l.create_w, l.btn_h, self.ng_create_hovered, text_s, sw, sh);
+        // BACK button (full width)
+        push_dyn_button(ui, "BACK", l.left_x, l.back_y, l.btn_w, l.btn_h, self.ng_back_hovered, text_s, sw, sh);
     }
 
     // ── Load World view ───────────────────────────────────────────────────────
@@ -1157,33 +1169,49 @@ struct NgLayout {
     text_s: f32,
     btn_w: f32,
     btn_h: f32,
-    /// X of input field AND the two buttons (all share same left edge).
-    create_x: f32,
+    /// X of input field and full-width buttons.
+    left_x: f32,
     field_y: f32,
-    create_y: f32,
+    /// TYPE and CREATE share a row: each is half-width with a gap.
+    type_x: f32,
+    type_w: f32,
+    create_x: f32,
+    create_w: f32,
+    row_y: f32,
     back_y: f32,
 }
 
 /// Compute the full vertical layout for the New-Game view.
 ///
 /// Stack (top → bottom), anchored to the same ratios as the main menu:
-///   title  at MAIN_TITLE_Y_RATIO
-///   field  at MAIN_BTN_Y_RATIO  (same row as first main-menu button)
-///   CREATE gap MAIN_BTN_GAP_RATIO below field
-///   BACK   gap MAIN_BTN_GAP_RATIO below CREATE
+///   title      at MAIN_TITLE_Y_RATIO
+///   field      at MAIN_BTN_Y_RATIO
+///   [TYPE] [CREATE]  gap below field (same row, half-width each)
+///   BACK             gap below the TYPE/CREATE row
 fn ng_layout(px: f32, py: f32, pw: f32, ph: f32) -> NgLayout {
     let title_s = (ph * MODAL_TITLE_SCALE_RATIO * 0.75).max(1.0);
     let text_s  = (ph * MODAL_BTN_TEXT_SCALE_RATIO * 0.75).max(1.0);
     let btn_w   = pw * MODAL_BUTTON_W_RATIO;
     let btn_h   = ph * MAIN_BTN_H_RATIO;
-    let create_x = (px + (pw - btn_w) * 0.5).round();
+    let left_x  = (px + (pw - btn_w) * 0.5).round();
 
-    let title_y  = (py + ph * MAIN_TITLE_Y_RATIO).round();
-    let field_y  = (py + ph * MAIN_BTN_Y_RATIO).round();
-    let create_y = (field_y + btn_h + ph * MAIN_BTN_GAP_RATIO).round();
-    let back_y   = (create_y + btn_h + ph * MAIN_BTN_GAP_RATIO).round();
+    let title_y = (py + ph * MAIN_TITLE_Y_RATIO).round();
+    let field_y = (py + ph * MAIN_BTN_Y_RATIO).round();
+    let row_y   = (field_y + btn_h + ph * MAIN_BTN_GAP_RATIO).round();
+    let back_y  = (row_y   + btn_h + ph * MAIN_BTN_GAP_RATIO).round();
 
-    NgLayout { px, py, pw, ph, title_s, title_y, text_s, btn_w, btn_h, create_x, field_y, create_y, back_y }
+    // Split row into two buttons with a gap between them
+    let gap = (btn_w * 0.04).max(4.0).round();
+    let half_w = ((btn_w - gap) * 0.5).round();
+    let type_x   = left_x;
+    let create_x = left_x + half_w + gap;
+
+    NgLayout {
+        px, py, pw, ph, title_s, title_y, text_s, btn_w, btn_h,
+        left_x, field_y,
+        type_x, type_w: half_w, create_x, create_w: half_w,
+        row_y, back_y,
+    }
 }
 
 /// Simple AABB hit test in pixel space.
