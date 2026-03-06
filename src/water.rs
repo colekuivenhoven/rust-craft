@@ -1,4 +1,5 @@
 use crate::block::BlockType;
+use crate::chunk::{WATER_LEVEL_SOURCE, WATER_LEVEL_MAX_FLOW, WATER_LEVEL_MIN_FLOW};
 use crate::world::World;
 use std::collections::VecDeque;
 
@@ -31,32 +32,49 @@ impl WaterSimulation {
     }
 
     fn process_water_physics(&mut self, world: &mut World) {
-        let batch_size = 100.min(self.pending_updates.len());
-        let mut new_water_blocks = Vec::new();
+        let batch_size = 200.min(self.pending_updates.len());
+        let mut new_water: Vec<(i32, i32, i32, u8)> = Vec::new();
 
         for _ in 0..batch_size {
             if let Some((x, y, z)) = self.pending_updates.pop_front() {
                 let block = world.get_block_world(x, y, z);
+                if block != BlockType::Water {
+                    continue;
+                }
 
-                if block == BlockType::Water {
-                    // Water flows down
-                    let below = world.get_block_world(x, y - 1, z);
-                    if below == BlockType::Air {
-                        new_water_blocks.push((x, y - 1, z));
-                        continue;
-                    }
+                let level = world.get_water_level_world(x, y, z);
+                if level == 0 {
+                    continue;
+                }
 
-                    // Water spreads horizontally
-                    let directions = [(1, 0), (-1, 0), (0, 1), (0, -1)];
+                // Water flows down first (full source block)
+                let below = world.get_block_world(x, y - 1, z);
+                if below == BlockType::Air {
+                    new_water.push((x, y - 1, z, WATER_LEVEL_SOURCE));
+                    continue;
+                }
+
+                // Horizontal spreading: level decreases by 1
+                if level >= WATER_LEVEL_MIN_FLOW + 1 || level == WATER_LEVEL_SOURCE {
+                    let flow_level = if level == WATER_LEVEL_SOURCE {
+                        WATER_LEVEL_MAX_FLOW
+                    } else {
+                        level - 1
+                    };
+
+                    let directions = [(1i32, 0i32), (-1, 0), (0, 1), (0, -1)];
                     for &(dx, dz) in &directions {
                         let nx = x + dx;
                         let nz = z + dz;
                         let neighbor = world.get_block_world(nx, y, nz);
 
                         if neighbor == BlockType::Air {
-                            // Simple spreading logic - water spreads to adjacent air blocks
-                            if rand::random::<f32>() > 0.7 {
-                                new_water_blocks.push((nx, y, nz));
+                            new_water.push((nx, y, nz, flow_level));
+                        } else if neighbor == BlockType::Water {
+                            // If neighbor has a lower level, update it
+                            let neighbor_level = world.get_water_level_world(nx, y, nz);
+                            if neighbor_level < flow_level {
+                                new_water.push((nx, y, nz, flow_level));
                             }
                         }
                     }
@@ -65,15 +83,29 @@ impl WaterSimulation {
         }
 
         // Apply new water blocks
-        for (x, y, z) in new_water_blocks {
-            world.set_block_world(x, y, z, BlockType::Water);
-            self.schedule_update(x, y, z);
+        for (x, y, z, level) in new_water {
+            let existing = world.get_block_world(x, y, z);
+            let existing_level = if existing == BlockType::Water {
+                world.get_water_level_world(x, y, z)
+            } else {
+                0
+            };
+
+            // Only place/update if we're increasing the level
+            if level > existing_level {
+                if existing != BlockType::Water {
+                    world.set_block_world(x, y, z, BlockType::Water);
+                }
+                world.set_water_level_world(x, y, z, level);
+                self.schedule_update(x, y, z);
+            }
         }
     }
 
     pub fn add_water_source(&mut self, x: i32, y: i32, z: i32, world: &mut World) {
         if world.get_block_world(x, y, z) == BlockType::Air {
             world.set_block_world(x, y, z, BlockType::Water);
+            world.set_water_level_world(x, y, z, WATER_LEVEL_SOURCE);
             self.schedule_update(x, y, z);
         }
     }

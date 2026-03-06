@@ -24,6 +24,7 @@ pub struct ChunkLoadResult {
 pub struct ChunkSaveRequest {
     pub position: (i32, i32),
     pub blocks: Box<[[[BlockType; CHUNK_SIZE]; CHUNK_HEIGHT]; CHUNK_SIZE]>,
+    pub water_levels: Box<[[[u8; CHUNK_SIZE]; CHUNK_HEIGHT]; CHUNK_SIZE]>,
     pub modified: bool,
 }
 
@@ -152,6 +153,7 @@ impl ChunkLoader {
                             request.position.0,
                             request.position.1,
                             request.blocks,
+                            request.water_levels,
                         );
                         if let Err(e) = chunk_storage::save_chunk(&chunk) {
                             eprintln!("Background save failed for {:?}: {}", request.position, e);
@@ -176,12 +178,13 @@ impl ChunkLoader {
     }
 
     /// Queue a chunk to be saved in the background
-    pub fn queue_save(&self, position: (i32, i32), blocks: Box<[[[BlockType; CHUNK_SIZE]; CHUNK_HEIGHT]; CHUNK_SIZE]>, modified: bool) {
+    pub fn queue_save(&self, position: (i32, i32), blocks: Box<[[[BlockType; CHUNK_SIZE]; CHUNK_HEIGHT]; CHUNK_SIZE]>, water_levels: Box<[[[u8; CHUNK_SIZE]; CHUNK_HEIGHT]; CHUNK_SIZE]>, modified: bool) {
         if let Some(ref tx) = self.save_request_tx {
             self.pending_saves.fetch_add(1, Ordering::SeqCst);
             if tx.send(ChunkSaveRequest {
                 position,
                 blocks,
+                water_levels,
                 modified,
             }).is_err() {
                 // Channel closed, decrement counter

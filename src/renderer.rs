@@ -887,14 +887,14 @@ impl State {
                 topology: wgpu::PrimitiveTopology::TriangleList,
                 strip_index_format: None,
                 front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None, // Render both sides of water faces
+                cull_mode: Some(wgpu::Face::Back), // Cull back faces; underwater view handled by dedicated underwater pass
                 polygon_mode: wgpu::PolygonMode::Fill,
                 unclipped_depth: false,
                 conservative: false,
             },
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: false, // Don't write depth for transparent water
+                depth_write_enabled: false, // No depth write; back-to-front sort handles transparency order
                 depth_compare: wgpu::CompareFunction::Less,
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
@@ -4280,6 +4280,23 @@ impl State {
 
         // Remove the block from the world
         self.world.set_block_world(x, y, z, BlockType::Air);
+
+        // Clear water level if it was water
+        if block_type == BlockType::Water {
+            self.world.set_water_level_world(x, y, z, 0);
+        }
+
+        // Schedule water updates for adjacent water blocks (they may flow into the gap)
+        let directions: [(i32, i32, i32); 6] = [(1,0,0),(-1,0,0),(0,1,0),(0,-1,0),(0,0,1),(0,0,-1)];
+        for &(dx, dy, dz) in &directions {
+            let nx = x + dx;
+            let ny = y + dy;
+            let nz = z + dz;
+            if self.world.get_block_world(nx, ny, nz) == BlockType::Water {
+                self.water_simulation.schedule_update(nx, ny, nz);
+            }
+        }
+
         println!("Broke block: {:?}", block_type);
 
         // Break any cross-model block sitting on top (e.g. grass tufts)
@@ -4473,6 +4490,13 @@ impl State {
 
                     self.world
                         .set_block_world(place_x, place_y, place_z, block_type);
+
+                    // If placing water, set it as a source block and schedule flow
+                    if block_type == BlockType::Water {
+                        self.world.set_water_level_world(place_x, place_y, place_z, crate::chunk::WATER_LEVEL_SOURCE);
+                        self.water_simulation.schedule_update(place_x, place_y, place_z);
+                    }
+
                     self.player
                         .inventory
                         .remove_item(self.player.inventory.selected_slot, 1.0);
@@ -5188,32 +5212,51 @@ impl State {
             water_pass.set_bind_group(1, &self.water_bind_group, &[]);
             water_pass.set_bind_group(2, &self.fog_bind_group, &[]);
 
-            // Render water using cached GPU buffers with frustum culling
-            for (&(cx, cz), buffers) in self.chunk_buffers.iter() {
-                if let (Some(wvb), Some(wib)) = (&buffers.water_vertex_buffer, &buffers.water_index_buffer) {
-                    if buffers.water_index_count > 0 {
-                        // Calculate chunk bounding box
-                        let min = Vector3::new(
-                            (cx * CHUNK_SIZE as i32) as f32,
-                            0.0,
-                            (cz * CHUNK_SIZE as i32) as f32,
-                        );
-                        let max = Vector3::new(
-                            min.x + CHUNK_SIZE as f32,
-                            CHUNK_HEIGHT as f32,
-                            min.z + CHUNK_SIZE as f32,
-                        );
+            // Collect water chunks, sort back-to-front for correct alpha blending:
+            // far water renders first, then near water blends on top.
+            let cam_x = self.camera.position.x;
+            let cam_z = self.camera.position.z;
+            let half_chunk = CHUNK_SIZE as f32 * 0.5;
 
-                        // Skip chunks outside the view frustum
-                        if !self.frustum.is_box_visible(min, max) {
-                            continue;
-                        }
+            let mut water_chunks: Vec<(&(i32, i32), &ChunkBuffers)> = self.chunk_buffers.iter()
+                .filter(|(_, buffers)| {
+                    buffers.water_vertex_buffer.is_some()
+                        && buffers.water_index_buffer.is_some()
+                        && buffers.water_index_count > 0
+                })
+                .collect();
 
-                        water_pass.set_vertex_buffer(0, wvb.slice(..));
-                        water_pass.set_index_buffer(wib.slice(..), wgpu::IndexFormat::Uint16);
-                        water_pass.draw_indexed(0..buffers.water_index_count, 0, 0..1);
-                    }
+            water_chunks.sort_by(|a, b| {
+                let (ax, az) = *a.0;
+                let (bx, bz) = *b.0;
+                let da = (ax as f32 * CHUNK_SIZE as f32 + half_chunk - cam_x).powi(2)
+                       + (az as f32 * CHUNK_SIZE as f32 + half_chunk - cam_z).powi(2);
+                let db = (bx as f32 * CHUNK_SIZE as f32 + half_chunk - cam_x).powi(2)
+                       + (bz as f32 * CHUNK_SIZE as f32 + half_chunk - cam_z).powi(2);
+                db.partial_cmp(&da).unwrap_or(std::cmp::Ordering::Equal)
+            });
+
+            for (&(cx, cz), buffers) in &water_chunks {
+                let min = Vector3::new(
+                    (cx * CHUNK_SIZE as i32) as f32,
+                    0.0,
+                    (cz * CHUNK_SIZE as i32) as f32,
+                );
+                let max = Vector3::new(
+                    min.x + CHUNK_SIZE as f32,
+                    CHUNK_HEIGHT as f32,
+                    min.z + CHUNK_SIZE as f32,
+                );
+
+                if !self.frustum.is_box_visible(min, max) {
+                    continue;
                 }
+
+                let wvb = buffers.water_vertex_buffer.as_ref().unwrap();
+                let wib = buffers.water_index_buffer.as_ref().unwrap();
+                water_pass.set_vertex_buffer(0, wvb.slice(..));
+                water_pass.set_index_buffer(wib.slice(..), wgpu::IndexFormat::Uint16);
+                water_pass.draw_indexed(0..buffers.water_index_count, 0, 0..1);
             }
         }
 

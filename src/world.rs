@@ -157,7 +157,7 @@ impl World {
             if let Some(chunk) = self.chunks.remove(&pos) {
                 if chunk.modified {
                     // Queue save in background thread
-                    self.chunk_loader.queue_save(pos, chunk.blocks, chunk.modified);
+                    self.chunk_loader.queue_save(pos, chunk.blocks, chunk.water_levels, chunk.modified);
                 }
             }
         }
@@ -189,6 +189,38 @@ impl World {
             chunk.get_block(local_x, y as usize, local_z)
         } else {
             BlockType::Air
+        }
+    }
+
+    pub fn get_water_level_world(&self, x: i32, y: i32, z: i32) -> u8 {
+        if y < 0 || y >= crate::chunk::CHUNK_HEIGHT as i32 {
+            return 0;
+        }
+
+        let chunk_x = x.div_euclid(CHUNK_SIZE as i32);
+        let chunk_z = z.div_euclid(CHUNK_SIZE as i32);
+        let local_x = x.rem_euclid(CHUNK_SIZE as i32) as usize;
+        let local_z = z.rem_euclid(CHUNK_SIZE as i32) as usize;
+
+        if let Some(chunk) = self.chunks.get(&(chunk_x, chunk_z)) {
+            chunk.get_water_level(local_x, y as usize, local_z)
+        } else {
+            0
+        }
+    }
+
+    pub fn set_water_level_world(&mut self, x: i32, y: i32, z: i32, level: u8) {
+        if y < 0 || y >= crate::chunk::CHUNK_HEIGHT as i32 {
+            return;
+        }
+
+        let chunk_x = x.div_euclid(CHUNK_SIZE as i32);
+        let chunk_z = z.div_euclid(CHUNK_SIZE as i32);
+        let local_x = x.rem_euclid(CHUNK_SIZE as i32) as usize;
+        let local_z = z.rem_euclid(CHUNK_SIZE as i32) as usize;
+
+        if let Some(chunk) = self.chunks.get_mut(&(chunk_x, chunk_z)) {
+            chunk.set_water_level(local_x, y as usize, local_z, level);
         }
     }
 

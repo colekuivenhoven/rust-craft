@@ -603,7 +603,11 @@ pub fn create_face_vertices_with_alpha(pos: Vector3<f32>, block_type: BlockType,
 /// - 1.0 = vertex is adjacent to a solid block (shore foam)
 /// - 0.0 = vertex is interior water (no shore foam)
 ///
-/// is_surface_water: true if there's no water block above this one
+/// `corner_heights` contains the absolute Y height for each of the 4 top-face corners:
+///   [0] = (-X, +Z), [1] = (+X, +Z), [2] = (+X, -Z), [3] = (-X, -Z)
+/// `corner_wave_scales` controls how much each corner is affected by wave animation (0.0-1.0).
+///   Scales proportionally with water level so shallow water has smaller waves.
+/// For non-surface water, pass y+1.0 for heights and 0.0 for wave scales.
 pub fn create_water_face_vertices(
     pos: Vector3<f32>,
     face_index: usize,
@@ -612,39 +616,55 @@ pub fn create_water_face_vertices(
     uvs: [[f32; 2]; 4],
     edge_factors: [f32; 4],
     is_surface_water: bool,
+    corner_heights: [f32; 4],
+    corner_wave_scales: [f32; 4],
 ) -> [Vertex; 4] {
     let color = BlockType::Water.get_color();
     let x = pos.x;
     let y = pos.y;
     let z = pos.z;
 
-    // Determine wave factor for each vertex based on face type and surface status
-    // For all faces, vertices 2 and 3 are at the top edge (y+1)
+    // h0=(-X,+Z), h1=(+X,+Z), h2=(+X,-Z), h3=(-X,-Z)
+    let [h0, h1, h2, h3] = corner_heights;
+    let [w0, w1, w2, w3] = corner_wave_scales;
+
+    // Map per-corner wave scales to per-vertex wave factors based on face type.
+    // Top face: each vertex uses its corner's wave scale.
+    // Side faces: bottom vertices = 0.0, top vertices = their corner's wave scale.
+    // Bottom face: all 0.0.
     let wave_factors: [f32; 4] = match face_index {
-        2 => [1.0, 1.0, 1.0, 1.0], // Top face: always affected (only rendered on surface)
-        3 => [0.0, 0.0, 0.0, 0.0], // Bottom face: never affected
-        _ if is_surface_water => [0.0, 0.0, 1.0, 1.0], // Side faces: top vertices (2,3) affected
-        _ => [0.0, 0.0, 0.0, 0.0], // Non-surface side faces: no wave
+        // Top face: [(-X,+Z), (+X,+Z), (+X,-Z), (-X,-Z)]
+        2 => [w0, w1, w2, w3],
+        3 => [0.0, 0.0, 0.0, 0.0],
+        // Front (+Z): top verts are v2=(+X,+Z)=w1, v3=(-X,+Z)=w0
+        0 if is_surface_water => [0.0, 0.0, w1, w0],
+        // Back (-Z): top verts are v2=(-X,-Z)=w3, v3=(+X,-Z)=w2
+        1 if is_surface_water => [0.0, 0.0, w3, w2],
+        // Right (+X): top verts are v2=(+X,-Z)=w2, v3=(+X,+Z)=w1
+        4 if is_surface_water => [0.0, 0.0, w2, w1],
+        // Left (-X): top verts are v2=(-X,+Z)=w0, v3=(-X,-Z)=w3
+        _ if is_surface_water => [0.0, 0.0, w0, w3],
+        _ => [0.0, 0.0, 0.0, 0.0],
     };
 
     match face_index {
-        0 => [ // Front face (+Z)
+        0 => [ // Front face (+Z) - top verts: h1(+X,+Z), h0(-X,+Z)
             Vertex { position: [x, y, z + 1.0], color, normal: [0.0, 0.0, 1.0], light_level: light_values[0], alpha: wave_factors[0], uv: uvs[0], tex_index, ao: edge_factors[0] },
             Vertex { position: [x + 1.0, y, z + 1.0], color, normal: [0.0, 0.0, 1.0], light_level: light_values[1], alpha: wave_factors[1], uv: uvs[1], tex_index, ao: edge_factors[1] },
-            Vertex { position: [x + 1.0, y + 1.0, z + 1.0], color, normal: [0.0, 0.0, 1.0], light_level: light_values[2], alpha: wave_factors[2], uv: uvs[2], tex_index, ao: edge_factors[2] },
-            Vertex { position: [x, y + 1.0, z + 1.0], color, normal: [0.0, 0.0, 1.0], light_level: light_values[3], alpha: wave_factors[3], uv: uvs[3], tex_index, ao: edge_factors[3] },
+            Vertex { position: [x + 1.0, h1, z + 1.0], color, normal: [0.0, 0.0, 1.0], light_level: light_values[2], alpha: wave_factors[2], uv: uvs[2], tex_index, ao: edge_factors[2] },
+            Vertex { position: [x, h0, z + 1.0], color, normal: [0.0, 0.0, 1.0], light_level: light_values[3], alpha: wave_factors[3], uv: uvs[3], tex_index, ao: edge_factors[3] },
         ],
-        1 => [ // Back face (-Z)
+        1 => [ // Back face (-Z) - top verts: h3(-X,-Z), h2(+X,-Z)
             Vertex { position: [x + 1.0, y, z], color, normal: [0.0, 0.0, -1.0], light_level: light_values[0], alpha: wave_factors[0], uv: uvs[0], tex_index, ao: edge_factors[0] },
             Vertex { position: [x, y, z], color, normal: [0.0, 0.0, -1.0], light_level: light_values[1], alpha: wave_factors[1], uv: uvs[1], tex_index, ao: edge_factors[1] },
-            Vertex { position: [x, y + 1.0, z], color, normal: [0.0, 0.0, -1.0], light_level: light_values[2], alpha: wave_factors[2], uv: uvs[2], tex_index, ao: edge_factors[2] },
-            Vertex { position: [x + 1.0, y + 1.0, z], color, normal: [0.0, 0.0, -1.0], light_level: light_values[3], alpha: wave_factors[3], uv: uvs[3], tex_index, ao: edge_factors[3] },
+            Vertex { position: [x, h3, z], color, normal: [0.0, 0.0, -1.0], light_level: light_values[2], alpha: wave_factors[2], uv: uvs[2], tex_index, ao: edge_factors[2] },
+            Vertex { position: [x + 1.0, h2, z], color, normal: [0.0, 0.0, -1.0], light_level: light_values[3], alpha: wave_factors[3], uv: uvs[3], tex_index, ao: edge_factors[3] },
         ],
-        2 => [ // Top face (+Y)
-            Vertex { position: [x, y + 1.0, z + 1.0], color, normal: [0.0, 1.0, 0.0], light_level: light_values[0], alpha: wave_factors[0], uv: uvs[0], tex_index, ao: edge_factors[0] },
-            Vertex { position: [x + 1.0, y + 1.0, z + 1.0], color, normal: [0.0, 1.0, 0.0], light_level: light_values[1], alpha: wave_factors[1], uv: uvs[1], tex_index, ao: edge_factors[1] },
-            Vertex { position: [x + 1.0, y + 1.0, z], color, normal: [0.0, 1.0, 0.0], light_level: light_values[2], alpha: wave_factors[2], uv: uvs[2], tex_index, ao: edge_factors[2] },
-            Vertex { position: [x, y + 1.0, z], color, normal: [0.0, 1.0, 0.0], light_level: light_values[3], alpha: wave_factors[3], uv: uvs[3], tex_index, ao: edge_factors[3] },
+        2 => [ // Top face (+Y) - all 4 corner heights
+            Vertex { position: [x, h0, z + 1.0], color, normal: [0.0, 1.0, 0.0], light_level: light_values[0], alpha: wave_factors[0], uv: uvs[0], tex_index, ao: edge_factors[0] },
+            Vertex { position: [x + 1.0, h1, z + 1.0], color, normal: [0.0, 1.0, 0.0], light_level: light_values[1], alpha: wave_factors[1], uv: uvs[1], tex_index, ao: edge_factors[1] },
+            Vertex { position: [x + 1.0, h2, z], color, normal: [0.0, 1.0, 0.0], light_level: light_values[2], alpha: wave_factors[2], uv: uvs[2], tex_index, ao: edge_factors[2] },
+            Vertex { position: [x, h3, z], color, normal: [0.0, 1.0, 0.0], light_level: light_values[3], alpha: wave_factors[3], uv: uvs[3], tex_index, ao: edge_factors[3] },
         ],
         3 => [ // Bottom face (-Y)
             Vertex { position: [x, y, z], color, normal: [0.0, -1.0, 0.0], light_level: light_values[0], alpha: wave_factors[0], uv: uvs[0], tex_index, ao: edge_factors[0] },
@@ -652,17 +672,17 @@ pub fn create_water_face_vertices(
             Vertex { position: [x + 1.0, y, z + 1.0], color, normal: [0.0, -1.0, 0.0], light_level: light_values[2], alpha: wave_factors[2], uv: uvs[2], tex_index, ao: edge_factors[2] },
             Vertex { position: [x, y, z + 1.0], color, normal: [0.0, -1.0, 0.0], light_level: light_values[3], alpha: wave_factors[3], uv: uvs[3], tex_index, ao: edge_factors[3] },
         ],
-        4 => [ // Right face (+X)
+        4 => [ // Right face (+X) - top verts: h2(+X,-Z), h1(+X,+Z)
             Vertex { position: [x + 1.0, y, z + 1.0], color, normal: [1.0, 0.0, 0.0], light_level: light_values[0], alpha: wave_factors[0], uv: uvs[0], tex_index, ao: edge_factors[0] },
             Vertex { position: [x + 1.0, y, z], color, normal: [1.0, 0.0, 0.0], light_level: light_values[1], alpha: wave_factors[1], uv: uvs[1], tex_index, ao: edge_factors[1] },
-            Vertex { position: [x + 1.0, y + 1.0, z], color, normal: [1.0, 0.0, 0.0], light_level: light_values[2], alpha: wave_factors[2], uv: uvs[2], tex_index, ao: edge_factors[2] },
-            Vertex { position: [x + 1.0, y + 1.0, z + 1.0], color, normal: [1.0, 0.0, 0.0], light_level: light_values[3], alpha: wave_factors[3], uv: uvs[3], tex_index, ao: edge_factors[3] },
+            Vertex { position: [x + 1.0, h2, z], color, normal: [1.0, 0.0, 0.0], light_level: light_values[2], alpha: wave_factors[2], uv: uvs[2], tex_index, ao: edge_factors[2] },
+            Vertex { position: [x + 1.0, h1, z + 1.0], color, normal: [1.0, 0.0, 0.0], light_level: light_values[3], alpha: wave_factors[3], uv: uvs[3], tex_index, ao: edge_factors[3] },
         ],
-        _ => [ // Left face (-X)
+        _ => [ // Left face (-X) - top verts: h0(-X,+Z), h3(-X,-Z)
             Vertex { position: [x, y, z], color, normal: [-1.0, 0.0, 0.0], light_level: light_values[0], alpha: wave_factors[0], uv: uvs[0], tex_index, ao: edge_factors[0] },
             Vertex { position: [x, y, z + 1.0], color, normal: [-1.0, 0.0, 0.0], light_level: light_values[1], alpha: wave_factors[1], uv: uvs[1], tex_index, ao: edge_factors[1] },
-            Vertex { position: [x, y + 1.0, z + 1.0], color, normal: [-1.0, 0.0, 0.0], light_level: light_values[2], alpha: wave_factors[2], uv: uvs[2], tex_index, ao: edge_factors[2] },
-            Vertex { position: [x, y + 1.0, z], color, normal: [-1.0, 0.0, 0.0], light_level: light_values[3], alpha: wave_factors[3], uv: uvs[3], tex_index, ao: edge_factors[3] },
+            Vertex { position: [x, h0, z + 1.0], color, normal: [-1.0, 0.0, 0.0], light_level: light_values[2], alpha: wave_factors[2], uv: uvs[2], tex_index, ao: edge_factors[2] },
+            Vertex { position: [x, h3, z], color, normal: [-1.0, 0.0, 0.0], light_level: light_values[3], alpha: wave_factors[3], uv: uvs[3], tex_index, ao: edge_factors[3] },
         ],
     }
 }

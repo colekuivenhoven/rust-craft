@@ -82,8 +82,14 @@ impl BiomeWeights {
     }
 }
 
+/// Water level constants: 0 = no water, 1-7 = flowing (height = level/8), 8 = source (full block).
+pub const WATER_LEVEL_SOURCE: u8 = 8;
+pub const WATER_LEVEL_MAX_FLOW: u8 = 7;
+pub const WATER_LEVEL_MIN_FLOW: u8 = 1;
+
 pub struct Chunk {
     pub blocks: Box<[[[BlockType; CHUNK_SIZE]; CHUNK_HEIGHT]; CHUNK_SIZE]>,
+    pub water_levels: Box<[[[u8; CHUNK_SIZE]; CHUNK_HEIGHT]; CHUNK_SIZE]>,
     pub light_levels: Box<[[[u8; CHUNK_SIZE]; CHUNK_HEIGHT]; CHUNK_SIZE]>,
     pub biome_map: Vec<Vec<BiomeType>>,         // [x][z] dominant biome per column, for mesh coloring
     pub plains_weight_map: Vec<Vec<f32>>,       // [x][z] continuous plains weight for smooth color blending
@@ -136,6 +142,23 @@ impl<'a> ChunkNeighbors<'a> {
         }
     }
 
+    pub fn get_water_level(&self, x: i32, y: i32, z: i32) -> u8 {
+        if y < 0 || y >= CHUNK_HEIGHT as i32 {
+            return 0;
+        }
+
+        let (target_chunk, lx, lz) = self.resolve_coordinates(x, z);
+
+        if lx >= CHUNK_SIZE || lz >= CHUNK_SIZE {
+            return 0;
+        }
+
+        match target_chunk {
+            Some(chunk) => chunk.water_levels[lx][y as usize][lz],
+            None => 0,
+        }
+    }
+
     pub fn get_light(&self, x: i32, y: i32, z: i32) -> u8 {
         if y < 0 { return 0; }
         if y >= CHUNK_HEIGHT as i32 { return 15; }
@@ -180,6 +203,10 @@ impl Chunk {
             .into_boxed_slice()
             .try_into()
             .unwrap();
+        let water_levels: Box<[[[u8; CHUNK_SIZE]; CHUNK_HEIGHT]; CHUNK_SIZE]> = vec![[[0u8; CHUNK_SIZE]; CHUNK_HEIGHT]; CHUNK_SIZE]
+            .into_boxed_slice()
+            .try_into()
+            .unwrap();
         let light_levels: Box<[[[u8; CHUNK_SIZE]; CHUNK_HEIGHT]; CHUNK_SIZE]> = vec![[[0u8; CHUNK_SIZE]; CHUNK_HEIGHT]; CHUNK_SIZE]
             .into_boxed_slice()
             .try_into()
@@ -187,6 +214,7 @@ impl Chunk {
 
         let mut chunk = Self {
             blocks,
+            water_levels,
             light_levels,
             biome_map: vec![vec![BiomeType::Forest; CHUNK_SIZE]; CHUNK_SIZE],
             plains_weight_map: vec![vec![0.0f32; CHUNK_SIZE]; CHUNK_SIZE],
@@ -209,7 +237,7 @@ impl Chunk {
     }
 
     /// Creates a chunk with pre-loaded block data (from saved file)
-    pub fn from_saved_data(chunk_x: i32, chunk_z: i32, blocks: Box<[[[BlockType; CHUNK_SIZE]; CHUNK_HEIGHT]; CHUNK_SIZE]>) -> Self {
+    pub fn from_saved_data(chunk_x: i32, chunk_z: i32, blocks: Box<[[[BlockType; CHUNK_SIZE]; CHUNK_HEIGHT]; CHUNK_SIZE]>, water_levels: Box<[[[u8; CHUNK_SIZE]; CHUNK_HEIGHT]; CHUNK_SIZE]>) -> Self {
         let light_levels: Box<[[[u8; CHUNK_SIZE]; CHUNK_HEIGHT]; CHUNK_SIZE]> = vec![[[0u8; CHUNK_SIZE]; CHUNK_HEIGHT]; CHUNK_SIZE]
             .into_boxed_slice()
             .try_into()
@@ -217,6 +245,7 @@ impl Chunk {
 
         Self {
             blocks,
+            water_levels,
             light_levels,
             biome_map: vec![vec![BiomeType::Forest; CHUNK_SIZE]; CHUNK_SIZE],
             plains_weight_map: vec![vec![0.0f32; CHUNK_SIZE]; CHUNK_SIZE],
@@ -695,9 +724,11 @@ impl Chunk {
                                     self.blocks[x][y][z] = BlockType::Ice;
                                 } else {
                                     self.blocks[x][y][z] = BlockType::Water;
+                                    self.water_levels[x][y][z] = WATER_LEVEL_SOURCE;
                                 }
                             } else {
                                 self.blocks[x][y][z] = BlockType::Water;
+                                self.water_levels[x][y][z] = WATER_LEVEL_SOURCE;
                             }
                         }
                     }
@@ -718,6 +749,7 @@ impl Chunk {
                                 if y < CHUNK_HEIGHT {
                                     if dy < depression_depth / 2 + 1 {
                                         self.blocks[x][y][z] = BlockType::Water;
+                                        self.water_levels[x][y][z] = WATER_LEVEL_SOURCE;
                                     } else {
                                         self.blocks[x][y][z] = BlockType::Dirt;
                                     }
@@ -2360,6 +2392,22 @@ impl Chunk {
         }
     }
 
+    pub fn get_water_level(&self, x: usize, y: usize, z: usize) -> u8 {
+        if x >= CHUNK_SIZE || y >= CHUNK_HEIGHT || z >= CHUNK_SIZE {
+            0
+        } else {
+            self.water_levels[x][y][z]
+        }
+    }
+
+    pub fn set_water_level(&mut self, x: usize, y: usize, z: usize, level: u8) {
+        if x < CHUNK_SIZE && y < CHUNK_HEIGHT && z < CHUNK_SIZE {
+            self.water_levels[x][y][z] = level;
+            self.dirty = true;
+            self.modified = true;
+        }
+    }
+
     pub fn get_light(&self, x: usize, y: usize, z: usize) -> u8 {
         if x >= CHUNK_SIZE || y >= CHUNK_HEIGHT || z >= CHUNK_SIZE {
             0
@@ -2656,6 +2704,67 @@ impl Chunk {
                                 let block_above = neighbors.get_block(x as i32, y as i32 + 1, z as i32);
                                 let is_surface_water = block_above != BlockType::Water;
 
+                                // Compute per-corner heights and wave scales for water surface slopes
+                                // Corner order: [0]=(-X,+Z), [1]=(+X,+Z), [2]=(+X,-Z), [3]=(-X,-Z)
+                                let (corner_heights, corner_wave_scales) = if is_surface_water {
+                                    use crate::block::WAVE_AMPLITUDE;
+                                    let base_y = y as f32;
+
+                                    // For each corner, find the max water level among the 4 blocks sharing it
+                                    let corner_offsets: [(i32, i32); 4] = [
+                                        (-1, 1),  // corner 0: (-X, +Z)
+                                        (1, 1),   // corner 1: (+X, +Z)
+                                        (1, -1),  // corner 2: (+X, -Z)
+                                        (-1, -1), // corner 3: (-X, -Z)
+                                    ];
+
+                                    let mut heights = [0.0f32; 4];
+                                    let mut wave_scales = [0.0f32; 4];
+                                    for (i, &(cx, cz)) in corner_offsets.iter().enumerate() {
+                                        let positions = [
+                                            (x as i32, z as i32),
+                                            (x as i32 + cx, z as i32),
+                                            (x as i32, z as i32 + cz),
+                                            (x as i32 + cx, z as i32 + cz),
+                                        ];
+
+                                        let mut max_level: u8 = 0;
+                                        let mut any_above_water = false;
+                                        for &(px, pz) in &positions {
+                                            let b = neighbors.get_block(px, y as i32, pz);
+                                            if b == BlockType::Water {
+                                                let lvl = neighbors.get_water_level(px, y as i32, pz);
+                                                max_level = max_level.max(lvl);
+                                            }
+                                            let above = neighbors.get_block(px, y as i32 + 1, pz);
+                                            if above == BlockType::Water {
+                                                any_above_water = true;
+                                            }
+                                        }
+
+                                        // Wave scale proportional to water level at this corner
+                                        let height_frac;
+                                        if any_above_water || max_level >= WATER_LEVEL_SOURCE {
+                                            height_frac = 1.0;
+                                        } else if max_level > 0 {
+                                            height_frac = max_level as f32 / WATER_LEVEL_SOURCE as f32;
+                                        } else {
+                                            let own_level = neighbors.get_water_level(x as i32, y as i32, z as i32);
+                                            height_frac = own_level as f32 / WATER_LEVEL_SOURCE as f32;
+                                        }
+
+                                        let wave_scale = height_frac;
+                                        let wave_offset = 0.5 * WAVE_AMPLITUDE * wave_scale;
+                                        heights[i] = base_y + height_frac - wave_offset;
+                                        wave_scales[i] = wave_scale;
+                                    }
+                                    (heights, wave_scales)
+                                } else {
+                                    // Non-surface water: full block height, no waves
+                                    let full = y as f32 + 1.0;
+                                    ([full, full, full, full], [0.0f32; 4])
+                                };
+
                                 // Calculate edge flags for foam rendering as a bitmask
                                 // Encodes which edges have solid neighbors (same value for all vertices to avoid interpolation)
                                 // Bitmask: neg_x=1, pos_x=2, neg_z=4, pos_z=8 (divided by 16 to fit in 0-1)
@@ -2681,7 +2790,7 @@ impl Chunk {
 
                                 // Water uses separate mesh with wave factor encoded in alpha
                                 let face_verts = create_water_face_vertices(
-                                    world_pos, face_idx, light_values, tex_index, uvs, edge_factors, is_surface_water
+                                    world_pos, face_idx, light_values, tex_index, uvs, edge_factors, is_surface_water, corner_heights, corner_wave_scales
                                 );
 
                                 let base_index = water_vertices.len() as u16;

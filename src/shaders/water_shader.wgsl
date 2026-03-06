@@ -160,17 +160,13 @@ fn get_wave_height(world_pos: vec2<f32>) -> f32 {
 fn vs_main(model: VertexInput) -> VertexOutput {
     var out: VertexOutput;
 
-    // Amount to reduce the wave y center
-    // 0.0 - No reduction, 1.0 - Full reduction, 0.5 - Half reduction
-    let wave_center_reduction = 0.2;
-
     // Get wave displacement for this vertex position
     let wave_factor = model.alpha; // 0.0 = no wave, 1.0 = full wave
     let wave_height = get_wave_height(model.position.xz) * wave_factor;
 
     // Apply wave displacement to Y position
     var displaced_position = model.position;
-    displaced_position.y += wave_height - (wave_center_reduction);
+    displaced_position.y += wave_height;
 
     let world_position = vec4<f32>(displaced_position, 1.0);
     out.clip_position = camera.view_proj * world_position;

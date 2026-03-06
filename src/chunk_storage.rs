@@ -4,7 +4,7 @@ use std::fs::{self, File};
 use std::io::{Read, Write, BufReader, BufWriter};
 use std::path::PathBuf;
 
-const CHUNK_FILE_VERSION: u8 = 1;
+const CHUNK_FILE_VERSION: u8 = 2;
 
 /// Returns the file path for a chunk's save file
 fn get_chunk_path(chunk_x: i32, chunk_z: i32) -> PathBuf {
@@ -44,6 +44,15 @@ pub fn save_chunk(chunk: &Chunk) -> std::io::Result<()> {
         }
     }
 
+    // Write water level data (version 2+)
+    for x in 0..CHUNK_SIZE {
+        for y in 0..CHUNK_HEIGHT {
+            for z in 0..CHUNK_SIZE {
+                writer.write_all(&[chunk.water_levels[x][y][z]])?;
+            }
+        }
+    }
+
     writer.flush()?;
     Ok(())
 }
@@ -69,8 +78,9 @@ pub fn load_chunk(chunk_x: i32, chunk_z: i32) -> Option<Chunk> {
     if reader.read_exact(&mut version).is_err() {
         return None;
     }
-    if version[0] != CHUNK_FILE_VERSION {
-        // Version mismatch - regenerate chunk
+    let file_version = version[0];
+    if file_version != CHUNK_FILE_VERSION && file_version != 1 {
+        // Unknown version - regenerate chunk
         return None;
     }
 
@@ -107,7 +117,39 @@ pub fn load_chunk(chunk_x: i32, chunk_z: i32) -> Option<Chunk> {
         }
     }
 
-    Some(Chunk::from_saved_data(chunk_x, chunk_z, blocks))
+    // Read water level data (version 2+), or derive from block types for v1
+    let mut water_levels: Box<[[[u8; CHUNK_SIZE]; CHUNK_HEIGHT]; CHUNK_SIZE]> =
+        vec![[[0u8; CHUNK_SIZE]; CHUNK_HEIGHT]; CHUNK_SIZE]
+            .into_boxed_slice()
+            .try_into()
+            .unwrap();
+
+    if file_version >= 2 {
+        let mut level = [0u8; 1];
+        for x in 0..CHUNK_SIZE {
+            for y in 0..CHUNK_HEIGHT {
+                for z in 0..CHUNK_SIZE {
+                    if reader.read_exact(&mut level).is_err() {
+                        return None;
+                    }
+                    water_levels[x][y][z] = level[0];
+                }
+            }
+        }
+    } else {
+        // v1 migration: all existing water blocks become source
+        for x in 0..CHUNK_SIZE {
+            for y in 0..CHUNK_HEIGHT {
+                for z in 0..CHUNK_SIZE {
+                    if blocks[x][y][z] == BlockType::Water {
+                        water_levels[x][y][z] = crate::chunk::WATER_LEVEL_SOURCE;
+                    }
+                }
+            }
+        }
+    }
+
+    Some(Chunk::from_saved_data(chunk_x, chunk_z, blocks, water_levels))
 }
 
 /// Checks if a saved chunk exists for the given coordinates
