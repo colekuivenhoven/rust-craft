@@ -237,17 +237,21 @@ pub struct State {
     motion_blur_uniform_buffer: wgpu::Buffer,
 
     // Bloom (Post-Processing)
-    bloom_texture_a: wgpu::Texture,
+    bloom_emissive_texture: wgpu::Texture,          // full-res emissive render target (with depth test)
+    bloom_emissive_texture_view: wgpu::TextureView,
+    bloom_texture_a: wgpu::Texture,                 // quarter-res blur ping-pong A
     bloom_texture_a_view: wgpu::TextureView,
-    bloom_texture_b: wgpu::Texture,
+    bloom_texture_b: wgpu::Texture,                 // quarter-res blur ping-pong B
     bloom_texture_b_view: wgpu::TextureView,
-    bloom_emissive_pipeline: wgpu::RenderPipeline, // renders only emissive blocks to bloom texture
+    bloom_emissive_pipeline: wgpu::RenderPipeline,  // renders only emissive blocks (with depth test)
+    bloom_downsample_pipeline: wgpu::RenderPipeline, // full-res → quarter-res downsample
     bloom_blur_h_pipeline: wgpu::RenderPipeline,
     bloom_blur_v_pipeline: wgpu::RenderPipeline,
     bloom_composite_pipeline: wgpu::RenderPipeline,
     bloom_bind_group_layout: wgpu::BindGroupLayout,
-    bloom_a_bind_group: wgpu::BindGroup,           // reads bloom_texture_a
-    bloom_b_bind_group: wgpu::BindGroup,           // reads bloom_texture_b
+    bloom_emissive_bind_group: wgpu::BindGroup,     // reads bloom_emissive_texture (for downsample)
+    bloom_a_bind_group: wgpu::BindGroup,            // reads bloom_texture_a
+    bloom_b_bind_group: wgpu::BindGroup,            // reads bloom_texture_b
 
     // Damage flash effect (Post-Processing)
     damage_flash_intensity: f32,
@@ -618,7 +622,7 @@ impl State {
 
         // Bloom emissive pipeline: renders only emissive blocks into the bloom texture.
         // Uses fs_emissive which discards non-emissive fragments.
-        // No depth stencil because bloom texture is quarter-resolution.
+        // Depth testing (read-only) prevents bloom from leaking through walls.
         let bloom_emissive_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Bloom Emissive Pipeline"),
             layout: Some(&render_pipeline_layout),
@@ -647,7 +651,13 @@ impl State {
                 unclipped_depth: false,
                 conservative: false,
             },
-            depth_stencil: None,
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: false, // read-only — reuse main depth buffer
+                depth_compare: wgpu::CompareFunction::LessEqual, // equal depth passes (same geometry re-rendered)
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
             multisample: wgpu::MultisampleState {
                 count: 1,
                 mask: !0,
@@ -1888,7 +1898,20 @@ impl State {
         });
 
         // ── BLOOM POST-PROCESSING ────────────────────────────────────────────
-        // Quarter-resolution textures for bloom effect (bright extract → blur → composite)
+        // Full-resolution emissive texture (rendered with depth test to prevent bloom through walls)
+        let bloom_emissive_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Bloom Emissive Texture"),
+            size: wgpu::Extent3d { width: config.width, height: config.height, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: config.format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let bloom_emissive_texture_view = bloom_emissive_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        // Quarter-resolution textures for blur ping-pong
         let bloom_w = (config.width / 4).max(1);
         let bloom_h = (config.height / 4).max(1);
 
@@ -1940,6 +1963,14 @@ impl State {
         });
 
         // Bloom bind groups
+        let bloom_emissive_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Bloom Emissive BG"),
+            layout: &bloom_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&bloom_emissive_texture_view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&scene_sampler) },
+            ],
+        });
         let bloom_a_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Bloom A BG"),
             layout: &bloom_bind_group_layout,
@@ -2002,6 +2033,7 @@ impl State {
             })
         };
 
+        let bloom_downsample_pipeline = create_bloom_pipeline("Bloom Downsample Pipeline", "fs_downsample", None);
         let bloom_blur_h_pipeline = create_bloom_pipeline("Bloom Blur H Pipeline", "fs_blur_h", None);
         let bloom_blur_v_pipeline = create_bloom_pipeline("Bloom Blur V Pipeline", "fs_blur_v", None);
         // Composite uses additive blending to overlay bloom onto scene_texture
@@ -2370,15 +2402,19 @@ impl State {
             motion_blur_bind_group,
             motion_blur_uniform_buffer,
             // Bloom
+            bloom_emissive_texture,
+            bloom_emissive_texture_view,
             bloom_texture_a,
             bloom_texture_a_view,
             bloom_texture_b,
             bloom_texture_b_view,
             bloom_emissive_pipeline,
+            bloom_downsample_pipeline,
             bloom_blur_h_pipeline,
             bloom_blur_v_pipeline,
             bloom_composite_pipeline,
             bloom_bind_group_layout,
+            bloom_emissive_bind_group,
             bloom_a_bind_group,
             bloom_b_bind_group,
             // Damage flash
@@ -2728,6 +2764,18 @@ impl State {
             });
             self.post_process_texture_view = self.post_process_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
+            // Recreate Bloom Emissive Texture (full resolution)
+            self.bloom_emissive_texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("Bloom Emissive Texture"),
+                size: wgpu::Extent3d { width: new_size.width, height: new_size.height, depth_or_array_layers: 1 },
+                mip_level_count: 1, sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: self.config.format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+            self.bloom_emissive_texture_view = self.bloom_emissive_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
             // Recreate Bloom Textures (quarter resolution)
             let bloom_w = (new_size.width / 4).max(1);
             let bloom_h = (new_size.height / 4).max(1);
@@ -2753,6 +2801,14 @@ impl State {
             self.bloom_texture_b_view = self.bloom_texture_b.create_view(&wgpu::TextureViewDescriptor::default());
 
             // Recreate Bloom Bind Groups
+            self.bloom_emissive_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Bloom Emissive BG"),
+                layout: &self.bloom_bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&self.bloom_emissive_texture_view) },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.scene_sampler) },
+                ],
+            });
             self.bloom_a_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("Bloom A BG"),
                 layout: &self.bloom_bind_group_layout,
@@ -5428,19 +5484,26 @@ impl State {
         }
 
         // --- BLOOM PASSES (emissive render → blur H → blur V → additive composite) ---
-        // Pass B1: Render only emissive blocks into bloom_texture_a (quarter res)
+        // Pass B1: Render only emissive blocks into full-res emissive texture (with depth test)
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Bloom Emissive Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &self.bloom_texture_a_view,
+                    view: &self.bloom_emissive_texture_view,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
-                depth_stencil_attachment: None,
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Load,  // reuse depth from main render
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
@@ -5468,7 +5531,28 @@ impl State {
             }
         }
 
-        // Pass B2: Horizontal blur bloom_texture_a → bloom_texture_b
+        // Pass B2: Downsample emissive_texture (full-res) → bloom_texture_a (quarter-res)
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Bloom Downsample Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.bloom_texture_a_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&self.bloom_downsample_pipeline);
+            pass.set_bind_group(0, &self.bloom_emissive_bind_group, &[]);
+            pass.draw(0..3, 0..1);
+        }
+
+        // Pass B3: Horizontal blur bloom_texture_a → bloom_texture_b (both quarter-res)
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Bloom Blur H Pass"),

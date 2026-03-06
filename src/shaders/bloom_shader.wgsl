@@ -21,6 +21,12 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
     return out;
 }
 
+// --- Pass 0: Downsample (full-res → quarter-res) ---
+@fragment
+fn fs_downsample(in: VertexOutput) -> @location(0) vec4<f32> {
+    return textureSample(t_input, s_input, in.uv);
+}
+
 // --- Pass 1: Horizontal gaussian blur (9-tap) ---
 @fragment
 fn fs_blur_h(in: VertexOutput) -> @location(0) vec4<f32> {
