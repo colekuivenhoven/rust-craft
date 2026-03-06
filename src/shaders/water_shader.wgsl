@@ -235,7 +235,16 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let water_depth = linearize_depth(in.clip_position.z);
 
     // Calculate distance the view ray travels through water
-    let water_distance = max(scene_depth - water_depth, 0.0);
+    let raw_water_distance = max(scene_depth - water_depth, 0.0);
+
+    // For side faces (waterfalls, walls), the depth-based distance measures to terrain
+    // far behind the water, not the actual water thickness (~1 block). Use the normal
+    // to detect side faces and cap their absorption distance.
+    let is_top_face = abs(in.normal.y);  // 1.0 for top/bottom faces, ~0.0 for side faces
+    // Side faces: use a small fixed distance (1 block thickness)
+    // Top faces: use the full depth-based distance for proper deep-water look
+    let side_face_distance = 1.0;
+    let water_distance = mix(side_face_distance, raw_water_distance, is_top_face);
 
     // Water absorption parameters
     let absorption_coefficient = 0.25;  // How quickly light is absorbed (higher = more opaque faster)
