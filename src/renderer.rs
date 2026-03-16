@@ -1,6 +1,6 @@
 use crate::entities::bird::{BirdManager, create_bird_vertices, generate_bird_indices};
 use crate::entities::fish::{FishManager, create_fish_vertices, generate_fish_indices};
-use crate::block::{BlockType, Vertex, UiVertex, ItemCubeVertex, ModalVertex, LineVertex, create_cube_vertices, create_block_outline, create_face_vertices, create_scaled_cube_vertices, create_flat_item_vertices, create_particle_vertices, create_shadow_vertices, CUBE_INDICES};
+use crate::block::{BlockType, Vertex, UiVertex, ItemCubeVertex, ModalVertex, LineVertex, create_cube_vertices, create_block_outline, create_face_vertices, create_scaled_cube_vertices, create_flat_item_vertices, create_particle_vertices, CUBE_INDICES};
 use crate::modal::{self, Modal};
 use crate::audio::AudioManager;
 use crate::camera::{Camera, CameraController, CameraUniform, Projection, Frustum};
@@ -14,7 +14,7 @@ use crate::player::Player;
 use crate::texture::{TextureAtlas, get_face_uvs, TEX_DESTROY_BASE, TEX_NONE};
 use crate::water::WaterSimulation;
 use crate::world::World;
-use cgmath::{Point3, Vector3, InnerSpace};
+use cgmath::{Point3, Vector3, InnerSpace, SquareMatrix};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
@@ -147,7 +147,6 @@ pub struct State {
     config: wgpu::SurfaceConfiguration,
     pub size: winit::dpi::PhysicalSize<u32>,
     render_pipeline: wgpu::RenderPipeline,
-    shadow_pipeline: wgpu::RenderPipeline,  // Like render_pipeline but with polygon offset + no depth write
     water_pipeline: wgpu::RenderPipeline,  // Separate pipeline for transparent water with depth sampling
     transparent_pipeline: wgpu::RenderPipeline,  // Separate pipeline for semi-transparent blocks (ice) with no depth write
     camera: Camera,
@@ -281,6 +280,17 @@ pub struct State {
     cloud_index_count: u32,
     cloud_drift_buffer: wgpu::Buffer,
     cloud_drift_bind_group: wgpu::BindGroup,
+
+    // ── Sky / Day-Night Cycle ─────────────────────────────────────────────
+    sky_config: crate::config::SkyConfig,
+    sky_pipeline: wgpu::RenderPipeline,
+    sky_bind_group_layout: wgpu::BindGroupLayout,
+    sky_bind_group: wgpu::BindGroup,
+    sky_uniform_buffer: wgpu::Buffer,
+    // Sun uniform (shared with block shaders via bind group 3)
+    sun_buffer: wgpu::Buffer,
+    sun_bind_group_layout: wgpu::BindGroupLayout,
+    sun_bind_group: wgpu::BindGroup,
 
     // ── Pause / Modal ─────────────────────────────────────────────────────
     pub paused: bool,
@@ -486,6 +496,45 @@ impl State {
             label: Some("fog_bind_group"),
         });
 
+        // ── Sky config ───────────────────────────────────────────────────────
+        let sky_config = crate::config::SkyConfig::load_or_create(config_path);
+
+        // ── Sun uniform (bind group 3 for block shaders) ─────────────────────
+        let sun_uniform = crate::config::SunUniform {
+            sun_dir: [0.5, 1.0, 0.3, 0.0],
+            sun_color: [sky_config.sun_color_r, sky_config.sun_color_g, sky_config.sun_color_b, 1.0],
+            params: [1.0, sky_config.night_ambient, sky_config.shadow_strength, 0.0],
+        };
+
+        let sun_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Sun Uniform Buffer"),
+            contents: bytemuck::cast_slice(&[sun_uniform]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        let sun_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+            label: Some("sun_bind_group_layout"),
+        });
+
+        let sun_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &sun_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: sun_buffer.as_entire_binding(),
+            }],
+            label: Some("sun_bind_group"),
+        });
+
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/shader.wgsl").into()),
@@ -497,7 +546,7 @@ impl State {
         let render_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("Render Pipeline Layout"),
-                bind_group_layouts: &[&camera_bind_group_layout, &texture_atlas.bind_group_layout, &fog_bind_group_layout],
+                bind_group_layouts: &[&camera_bind_group_layout, &texture_atlas.bind_group_layout, &fog_bind_group_layout, &sun_bind_group_layout],
                 push_constant_ranges: &[],
             });
 
@@ -546,70 +595,6 @@ impl State {
                 depth_compare: wgpu::CompareFunction::Less,
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState {
-                count: 1,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
-            multiview: None,
-            cache: None,
-        });
-
-        // Shadow pipeline: same as main pipeline but with polygon offset and no depth write.
-        // Polygon offset (depth bias) pushes shadow fragments toward the camera in clip space,
-        // preventing z-fighting with the ground surface at all camera angles and distances.
-        let shadow_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Shadow Pipeline"),
-            layout: Some(&render_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                buffers: &[Vertex::desc()],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: config.format,
-                    blend: Some(wgpu::BlendState {
-                        color: wgpu::BlendComponent {
-                            src_factor: wgpu::BlendFactor::SrcAlpha,
-                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
-                            operation: wgpu::BlendOperation::Add,
-                        },
-                        alpha: wgpu::BlendComponent {
-                            src_factor: wgpu::BlendFactor::One,
-                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
-                            operation: wgpu::BlendOperation::Add,
-                        },
-                    }),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: Some(wgpu::Face::Back),
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: false,
-                depth_compare: wgpu::CompareFunction::LessEqual,
-                stencil: wgpu::StencilState::default(),
-                // Polygon offset: pulls shadow fragments toward the camera so they reliably
-                // sit in front of the ground face at all viewing angles and distances.
-                bias: wgpu::DepthBiasState {
-                    constant: -2,
-                    slope_scale: -1.0,
-                    clamp: 0.0,
-                },
             }),
             multisample: wgpu::MultisampleState {
                 count: 1,
@@ -849,10 +834,10 @@ impl State {
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/water_shader.wgsl").into()),
         });
 
-        // Water pipeline layout includes camera bind group, depth texture bind group, and fog bind group
+        // Water pipeline layout includes camera bind group, depth texture bind group, fog bind group, and sun bind group
         let water_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Water Pipeline Layout"),
-            bind_group_layouts: &[&camera_bind_group_layout, &water_bind_group_layout, &fog_bind_group_layout],
+            bind_group_layouts: &[&camera_bind_group_layout, &water_bind_group_layout, &fog_bind_group_layout, &sun_bind_group_layout],
             push_constant_ranges: &[],
         });
 
@@ -1420,6 +1405,88 @@ impl State {
             size: 512 * 1024, // 512KB initial size
             usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
+        });
+
+        // ── Sky Pipeline ──────────────────────────────────────────────────────
+        // Sky uniform buffer: holds inverse view-proj, camera pos, sun params, sky colors
+        // Total size: 12 * vec4 = 192 bytes
+        let sky_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Sky Uniform Buffer"),
+            size: 224, // 56 floats: mat4x4(16) + 10 * vec4(4) = 56 * 4 bytes
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let sky_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+            label: Some("sky_bind_group_layout"),
+        });
+
+        let sky_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &sky_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: sky_uniform_buffer.as_entire_binding(),
+            }],
+            label: Some("sky_bind_group"),
+        });
+
+        let sky_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Sky Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/sky_shader.wgsl").into()),
+        });
+
+        let sky_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Sky Pipeline Layout"),
+            bind_group_layouts: &[&sky_bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
+        let sky_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Sky Pipeline"),
+            layout: Some(&sky_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &sky_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[], // Fullscreen triangle — no vertex buffer needed
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &sky_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None, // Fullscreen triangle — no culling
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: None, // Sky has no depth — it's the background
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            multiview: None,
+            cache: None,
         });
 
         // Breaking overlay pipeline
@@ -2322,7 +2389,6 @@ impl State {
             config,
             size,
             render_pipeline,
-            shadow_pipeline,
             water_pipeline,
             transparent_pipeline,
             camera,
@@ -2444,6 +2510,16 @@ impl State {
             cloud_index_count: 0,
             cloud_drift_buffer,
             cloud_drift_bind_group,
+
+            // Sky / Day-Night Cycle
+            sky_config,
+            sky_pipeline,
+            sky_bind_group_layout,
+            sky_bind_group,
+            sky_uniform_buffer,
+            sun_buffer,
+            sun_bind_group_layout,
+            sun_bind_group,
 
             // Pause / Modal
             paused: false,
@@ -4557,6 +4633,94 @@ impl State {
             bytemuck::cast_slice(&[total_time]),
         );
 
+        // ── Sun / sky uniform update ─────────────────────────────────────────
+        {
+            let cycle = self.sky_config.day_cycle_secs;
+            // time_of_day: 0.0 = sunrise, 0.25 = noon, 0.5 = sunset, 0.75 = midnight
+            let time_of_day = (total_time % cycle) / cycle;
+
+            // Sun angle: full 360-degree rotation over the cycle
+            // At time_of_day=0.0 sun is at horizon (rising east), 0.25 = zenith, 0.5 = horizon (setting west)
+            let sun_angle = time_of_day * std::f32::consts::TAU;
+
+            // Sun direction: rotates in the Y-Z plane (rises from east, sets in west)
+            // X component adds slight tilt for more interesting shadows
+            let sun_y = sun_angle.cos();  // 1 at noon, -1 at midnight
+            let sun_x = 0.3 * sun_angle.sin(); // slight east-west offset
+            let sun_z = sun_angle.sin();  // main east-west axis
+
+            let sun_len = (sun_x * sun_x + sun_y * sun_y + sun_z * sun_z).sqrt();
+            let sun_dir = [sun_x / sun_len, sun_y / sun_len, sun_z / sun_len, 0.0];
+
+            // Sun intensity: 1.0 when above horizon, fades to 0 below
+            // smoothstep from -0.1 to 0.2 on sun_y
+            let sun_elevation = sun_dir[1];
+            let sun_intensity = ((sun_elevation + 0.1) / 0.3).clamp(0.0, 1.0);
+            let sun_intensity = sun_intensity * sun_intensity * (3.0 - 2.0 * sun_intensity); // smoothstep
+
+            // Write sun uniform for block shaders
+            let sun_uniform = crate::config::SunUniform {
+                sun_dir,
+                sun_color: [
+                    self.sky_config.sun_color_r * self.sky_config.sun_brightness,
+                    self.sky_config.sun_color_g * self.sky_config.sun_brightness,
+                    self.sky_config.sun_color_b * self.sky_config.sun_brightness,
+                    1.0,
+                ],
+                params: [sun_intensity, self.sky_config.night_ambient, self.sky_config.shadow_strength, time_of_day],
+            };
+            self.queue.write_buffer(
+                &self.sun_buffer,
+                0,
+                bytemuck::cast_slice(&[sun_uniform]),
+            );
+
+            // Write sky uniform for sky shader
+            // Layout: inv_view_proj (64B) + camera_pos (16B) + sun_dir (16B) + sun_color (16B)
+            //       + params (16B) + sky_params (16B) + sky_params2 (16B)
+            //       + zenith_day (16B) + horizon_day (16B) + zenith_night (16B) + sunset_color (16B)
+            //       = 12 * 16 = 192 bytes
+            let view_proj = self.projection.calc_matrix() * self.camera.get_view_matrix();
+            let inv_view_proj: [[f32; 4]; 4] = cgmath::Matrix4::from(
+                view_proj.invert().unwrap_or(cgmath::Matrix4::from_scale(1.0))
+            ).into();
+
+            let sun_radius_rad = self.sky_config.sun_radius_deg.to_radians();
+
+            let sky_data: [f32; 56] = [
+                // inv_view_proj (16 floats)
+                inv_view_proj[0][0], inv_view_proj[0][1], inv_view_proj[0][2], inv_view_proj[0][3],
+                inv_view_proj[1][0], inv_view_proj[1][1], inv_view_proj[1][2], inv_view_proj[1][3],
+                inv_view_proj[2][0], inv_view_proj[2][1], inv_view_proj[2][2], inv_view_proj[2][3],
+                inv_view_proj[3][0], inv_view_proj[3][1], inv_view_proj[3][2], inv_view_proj[3][3],
+                // camera_pos (4 floats)
+                self.camera.position.x, self.camera.position.y, self.camera.position.z, 1.0,
+                // sun_dir (4 floats)
+                sun_dir[0], sun_dir[1], sun_dir[2], 0.0,
+                // sun_color (4 floats)
+                sun_uniform.sun_color[0], sun_uniform.sun_color[1], sun_uniform.sun_color[2], 1.0,
+                // params (4 floats)
+                sun_intensity, self.sky_config.night_ambient, self.sky_config.shadow_strength, time_of_day,
+                // sky_params (4 floats)
+                sun_radius_rad, self.sky_config.sun_glow_falloff, self.sky_config.star_density, self.sky_config.star_brightness,
+                // sky_params2 (4 floats)
+                self.sky_config.star_twinkle_speed, 0.0, 0.0, total_time,
+                // zenith_day (4 floats)
+                self.sky_config.sky_zenith_day_r, self.sky_config.sky_zenith_day_g, self.sky_config.sky_zenith_day_b, 0.0,
+                // horizon_day (4 floats)
+                self.sky_config.sky_horizon_day_r, self.sky_config.sky_horizon_day_g, self.sky_config.sky_horizon_day_b, 0.0,
+                // zenith_night (4 floats)
+                self.sky_config.sky_zenith_night_r, self.sky_config.sky_zenith_night_g, self.sky_config.sky_zenith_night_b, 0.0,
+                // sunset_color (4 floats)
+                self.sky_config.sunset_color_r, self.sky_config.sunset_color_g, self.sky_config.sunset_color_b, 0.0,
+            ];
+            self.queue.write_buffer(
+                &self.sky_uniform_buffer,
+                0,
+                bytemuck::cast_slice(&sky_data),
+            );
+        }
+
         // Update FPS counter
         self.fps_frame_count += 1;
         self.fps_timer += dt;
@@ -4873,20 +5037,42 @@ impl State {
         // Motion blur then writes to swap_chain (or post_process_texture if underwater).
         let world_render_target = &self.scene_texture_view;
 
+        // --- PASS 0: RENDER SKY (background behind everything) ---
+        if !self.frozen_stone_ceiling {
+            let mut sky_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Sky Render Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: world_render_target,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            sky_pass.set_pipeline(&self.sky_pipeline);
+            sky_pass.set_bind_group(0, &self.sky_bind_group, &[]);
+            sky_pass.draw(0..3, 0..1); // Fullscreen triangle
+        }
+
         // --- PASS 1: RENDER WORLD (Opaque chunks & enemies) ---
         {
+            let clear_color = if self.frozen_stone_ceiling {
+                wgpu::LoadOp::Clear(wgpu::Color { r: 0.00, g: 0.01, b: 0.02, a: 1.0 })
+            } else {
+                wgpu::LoadOp::Load // Sky already rendered
+            };
+
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("World Render Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: world_render_target,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        // When frozen_stone_ceiling is active, render the scene dark background. Otherwise, sky blue background.
-                        load: wgpu::LoadOp::Clear(if self.frozen_stone_ceiling {
-                            wgpu::Color { r: 0.00, g: 0.01, b: 0.02, a: 1.0 }
-                        } else {
-                            wgpu::Color { r: 0.5, g: 0.7, b: 1.0, a: 1.0 }
-                        }),
+                        load: clear_color,
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -4906,6 +5092,7 @@ impl State {
             render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
             render_pass.set_bind_group(1, &self.texture_atlas.bind_group, &[]);
             render_pass.set_bind_group(2, &self.fog_bind_group, &[]);
+            render_pass.set_bind_group(3, &self.sun_bind_group, &[]);
 
             // Render chunks using cached GPU buffers with frustum culling
             for (&(cx, cz), buffers) in self.chunk_buffers.iter() {
@@ -4961,66 +5148,8 @@ impl State {
                 render_pass.draw_indexed(0..indices.len() as u32, 0, 0..1);
             }
 
-            // Render dropped item shadows first (so they appear behind items).
-            // Uses the shadow pipeline which has polygon offset + no depth write.
-            render_pass.set_pipeline(&self.shadow_pipeline);
-            for item in &self.dropped_item_manager.items {
-                // Find the ground below the item (search up to 10 blocks down)
-                let mut ground_y = None;
-                let item_x = item.position.x.floor() as i32;
-                let item_z = item.position.z.floor() as i32;
-                for check_y in (0..=(item.position.y.floor() as i32)).rev() {
-                    if self.world.get_block_world(item_x, check_y, item_z).is_solid() {
-                        ground_y = Some(check_y as f32 + 1.0); // Top of the solid block
-                        break;
-                    }
-                }
-
-                if let Some(gy) = ground_y {
-                    let height_above_ground = item.position.y - gy;
-                    // Only show shadow if within reasonable height (< 5 blocks)
-                    if height_above_ground >= 0.0 && height_above_ground < 5.0 {
-                        // Alpha decreases with height (0.5 at ground, 0 at 5 blocks up)
-                        let alpha = 0.5 * (1.0 - height_above_ground / 5.0);
-                        // Shadow radius is slightly larger than item (item is 0.25, shadow is 0.35)
-                        let shadow_radius = 0.35;
-                        let shadow_center = Point3::new(
-                            item.position.x,
-                            gy + 0.01, // Just above ground to avoid z-fighting
-                            item.position.z,
-                        );
-
-                        let (vertices, indices) = create_shadow_vertices(shadow_center, shadow_radius, alpha);
-
-                        let vertex_buffer =
-                            self.device
-                                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                                    label: Some("Shadow Vertex Buffer"),
-                                    contents: bytemuck::cast_slice(&vertices),
-                                    usage: wgpu::BufferUsages::VERTEX,
-                                });
-
-                        let index_buffer =
-                            self.device
-                                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                                    label: Some("Shadow Index Buffer"),
-                                    contents: bytemuck::cast_slice(&indices),
-                                    usage: wgpu::BufferUsages::INDEX,
-                                });
-
-                        render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
-                        render_pass
-                            .set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint16);
-                        render_pass.draw_indexed(0..indices.len() as u32, 0, 0..1);
-                    }
-                }
-            }
-
-            // Restore main pipeline for item geometry (mini-blocks / flat panels)
-            render_pass.set_pipeline(&self.render_pipeline);
-            render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
-            render_pass.set_bind_group(1, &self.texture_atlas.bind_group, &[]);
-            render_pass.set_bind_group(2, &self.fog_bind_group, &[]);
+            // Dropped items (mini-blocks, or flat panels for tuft/vine types)
+            // (Old shadow pipeline removed — lighting now handled by dynamic sun)
 
             // Render dropped items (mini-blocks, or flat panels for tuft/vine types)
             for item in &self.dropped_item_manager.items {
@@ -5244,6 +5373,7 @@ impl State {
             water_pass.set_bind_group(0, &self.camera_bind_group, &[]);
             water_pass.set_bind_group(1, &self.water_bind_group, &[]);
             water_pass.set_bind_group(2, &self.fog_bind_group, &[]);
+            water_pass.set_bind_group(3, &self.sun_bind_group, &[]);
 
             // Collect water chunks, sort back-to-front for correct alpha blending:
             // far water renders first, then near water blends on top.
@@ -5321,6 +5451,7 @@ impl State {
             transparent_pass.set_bind_group(0, &self.camera_bind_group, &[]);
             transparent_pass.set_bind_group(1, &self.texture_atlas.bind_group, &[]);
             transparent_pass.set_bind_group(2, &self.fog_bind_group, &[]);
+            transparent_pass.set_bind_group(3, &self.sun_bind_group, &[]);
 
             // Render semi-transparent blocks using cached GPU buffers with frustum culling
             for (&(cx, cz), buffers) in self.chunk_buffers.iter() {
@@ -5399,6 +5530,7 @@ impl State {
                 breaking_pass.set_bind_group(0, &self.camera_bind_group, &[]);
                 breaking_pass.set_bind_group(1, &self.texture_atlas.bind_group, &[]);
                 breaking_pass.set_bind_group(2, &self.fog_bind_group, &[]);
+                breaking_pass.set_bind_group(3, &self.sun_bind_group, &[]);
                 breaking_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
                 breaking_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint16);
                 breaking_pass.draw_indexed(0..overlay_indices.len() as u32, 0, 0..1);
@@ -5554,6 +5686,7 @@ impl State {
             pass.set_bind_group(0, &self.camera_bind_group, &[]);
             pass.set_bind_group(1, &self.texture_atlas.bind_group, &[]);
             pass.set_bind_group(2, &self.fog_bind_group, &[]);
+            pass.set_bind_group(3, &self.sun_bind_group, &[]);
 
             // Re-render chunk geometry — fs_emissive discards non-emissive fragments
             for (&(cx, cz), buffers) in self.chunk_buffers.iter() {

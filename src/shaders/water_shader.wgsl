@@ -41,6 +41,16 @@ struct FogUniform {
 @group(2) @binding(0)
 var<uniform> fog: FogUniform;
 
+// Sun uniform — dynamic directional lighting from day/night cycle
+struct SunUniform {
+    sun_dir: vec4<f32>,       // normalised direction toward sun
+    sun_color: vec4<f32>,     // color * brightness
+    params: vec4<f32>,        // [sun_intensity, night_ambient, shadow_strength, time_of_day]
+};
+
+@group(3) @binding(0)
+var<uniform> sun: SunUniform;
+
 struct VertexInput {
     @location(0) position: vec3<f32>,
     @location(1) color: vec3<f32>,
@@ -255,13 +265,18 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let transmittance = exp(-absorption_coefficient * water_distance);
     let alpha = mix(max_alpha, min_alpha, transmittance);
 
-    // Lighting calculations
-    let min_ambient = 0.05;
+    // Dynamic sun lighting
+    let sun_intensity = sun.params.x;
+    let night_ambient = sun.params.y;
+    let shadow_str = sun.params.z;
+
+    let min_ambient = mix(night_ambient, 0.05, sun_intensity);
     let voxel_light = in.light_level;
     let curved_light = pow(voxel_light, 1.4);
-    let light_dir = normalize(vec3<f32>(0.5, 1.0, 0.3));
-    let directional = max(dot(in.normal, light_dir), 0.0) * 0.15;
-    let total_light = min_ambient + curved_light * 0.9 + directional * voxel_light;
+    let light_dir = normalize(sun.sun_dir.xyz);
+    let directional = max(dot(in.normal, light_dir), 0.0) * shadow_str;
+    let sun_modulated_light = curved_light * mix(0.15, 0.9, sun_intensity);
+    let total_light = min_ambient + sun_modulated_light + directional * voxel_light * sun_intensity;
 
     // Apply X-axis directional shading for wave visualization
     // Tilt towards -X = darker, tilt towards +X = lighter

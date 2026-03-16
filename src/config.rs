@@ -558,6 +558,131 @@ impl WorldConfig {
     }
 }
 
+/// Sky / day-night cycle configuration
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SkyConfig {
+    /// Full day-night cycle length in seconds (default 600 = 10 minutes)
+    pub day_cycle_secs: f32,
+    /// Fraction of the cycle that is "day" (0.0-1.0). Rest is night.
+    pub day_fraction: f32,
+
+    // ── Sun ──────────────────────────────────────────────────────────────────
+    /// Angular radius of the sun disc in degrees
+    pub sun_radius_deg: f32,
+    /// Sun color (RGB, 0.0-1.0)
+    pub sun_color_r: f32,
+    pub sun_color_g: f32,
+    pub sun_color_b: f32,
+    /// Brightness multiplier for the sun disc
+    pub sun_brightness: f32,
+    /// How much the sun's glow extends beyond the disc (in multiples of radius)
+    pub sun_glow_falloff: f32,
+
+    // ── Stars ────────────────────────────────────────────────────────────────
+    /// Star density — higher = more stars (range ~200-2000)
+    pub star_density: f32,
+    /// Base brightness of stars (0.0-1.0)
+    pub star_brightness: f32,
+    /// Speed of star twinkling (higher = faster)
+    pub star_twinkle_speed: f32,
+
+    // ── Shadow / lighting ────────────────────────────────────────────────────
+    /// Strength of directional sun lighting (0.0-1.0)
+    pub shadow_strength: f32,
+    /// Minimum ambient light at midnight (0.0-1.0)
+    pub night_ambient: f32,
+
+    // ── Sky colors ───────────────────────────────────────────────────────────
+    /// Zenith (top of sky) color at noon (RGB)
+    pub sky_zenith_day_r: f32,
+    pub sky_zenith_day_g: f32,
+    pub sky_zenith_day_b: f32,
+    /// Horizon color at noon (RGB)
+    pub sky_horizon_day_r: f32,
+    pub sky_horizon_day_g: f32,
+    pub sky_horizon_day_b: f32,
+    /// Zenith color at night (RGB)
+    pub sky_zenith_night_r: f32,
+    pub sky_zenith_night_g: f32,
+    pub sky_zenith_night_b: f32,
+    /// Sunset/sunrise horizon tint (RGB)
+    pub sunset_color_r: f32,
+    pub sunset_color_g: f32,
+    pub sunset_color_b: f32,
+}
+
+impl Default for SkyConfig {
+    fn default() -> Self {
+        Self {
+            day_cycle_secs: 600.0,
+            day_fraction: 0.6,
+
+            sun_radius_deg: 2.5,
+            sun_color_r: 1.0,
+            sun_color_g: 0.95,
+            sun_color_b: 0.8,
+            sun_brightness: 3.0,
+            sun_glow_falloff: 3.0,
+
+            star_density: 800.0,
+            star_brightness: 0.9,
+            star_twinkle_speed: 1.5,
+
+            shadow_strength: 0.3,
+            night_ambient: 0.08,
+
+            sky_zenith_day_r: 0.3,
+            sky_zenith_day_g: 0.5,
+            sky_zenith_day_b: 1.0,
+            sky_horizon_day_r: 0.6,
+            sky_horizon_day_g: 0.8,
+            sky_horizon_day_b: 1.0,
+            sky_zenith_night_r: 0.01,
+            sky_zenith_night_g: 0.01,
+            sky_zenith_night_b: 0.03,
+            sunset_color_r: 1.0,
+            sunset_color_g: 0.4,
+            sunset_color_b: 0.1,
+        }
+    }
+}
+
+impl SkyConfig {
+    pub fn load_or_create(path: &Path) -> Self {
+        match fs::read_to_string(path) {
+            Ok(contents) => {
+                match toml::from_str(&contents) {
+                    Ok(config) => {
+                        log::info!("Loaded sky config from {}", path.display());
+                        config
+                    }
+                    Err(e) => {
+                        log::warn!("Failed to parse sky config: {}, using defaults", e);
+                        Self::default()
+                    }
+                }
+            }
+            Err(_) => {
+                log::info!("No sky config found, using defaults");
+                Self::default()
+            }
+        }
+    }
+}
+
+/// GPU-side sun uniform sent each frame.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+pub struct SunUniform {
+    /// Normalized sun direction (world space, points toward the sun)
+    pub sun_dir: [f32; 4],
+    /// Sun color * intensity (pre-multiplied)
+    pub sun_color: [f32; 4],
+    /// [sun_intensity (0-1 based on elevation), night_ambient, shadow_strength, time_of_day (0-1)]
+    pub params: [f32; 4],
+}
+
 /// Fog configuration
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct FogConfig {

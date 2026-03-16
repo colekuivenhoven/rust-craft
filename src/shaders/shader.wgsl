@@ -27,6 +27,16 @@ struct FogUniform {
 @group(2) @binding(0)
 var<uniform> fog: FogUniform;
 
+// Sun uniform — dynamic directional lighting from day/night cycle
+struct SunUniform {
+    sun_dir: vec4<f32>,       // normalised direction toward sun
+    sun_color: vec4<f32>,     // color * brightness
+    params: vec4<f32>,        // [sun_intensity, night_ambient, shadow_strength, time_of_day]
+};
+
+@group(3) @binding(0)
+var<uniform> sun: SunUniform;
+
 struct VertexInput {
     @location(0) position: vec3<f32>,
     @location(1) color: vec3<f32>,
@@ -133,18 +143,27 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let emission_strength = select(0.0, in.light_level - 2.0, is_emissive);
     let voxel_light = select(in.light_level, 1.0, is_emissive);
 
-    // Minimum ambient light (visibility even in complete darkness)
-    let min_ambient = 0.05;
+    // Dynamic sun lighting
+    let sun_intensity = sun.params.x;  // 0 at night, 1 at noon
+    let night_ambient = sun.params.y;  // minimum ambient at night
+    let shadow_str = sun.params.z;     // directional shadow strength
+
+    // Minimum ambient light — blends between night_ambient and normal based on sun
+    let min_ambient = mix(night_ambient, 0.05, sun_intensity);
 
     // Apply curve to make light falloff more pleasing
     let curved_light = pow(voxel_light, 1.4);
 
-    // Slight directional component for depth perception
-    let light_dir = normalize(vec3<f32>(0.5, 1.0, 0.3));
-    let directional = max(dot(in.normal, light_dir), 0.0) * 0.15;
+    // Directional component from dynamic sun direction
+    let light_dir = normalize(sun.sun_dir.xyz);
+    let directional = max(dot(in.normal, light_dir), 0.0) * shadow_str;
 
-    // Combine lighting: voxel light is primary, directional adds depth
-    let total_light = min_ambient + curved_light * 0.9 + directional * voxel_light;
+    // Modulate voxel light by sun intensity (outdoor light dims at night)
+    // Emissive/block light (encoded > 1.5) is NOT dimmed by sun
+    let sun_modulated_light = curved_light * mix(0.15, 0.9, sun_intensity);
+
+    // Combine lighting
+    let total_light = min_ambient + sun_modulated_light + directional * voxel_light * sun_intensity;
 
     // Apply ambient occlusion (skip for emissive blocks — they glow uniformly)
     let final_light = select(total_light * in.ao, total_light, is_emissive);
