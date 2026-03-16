@@ -30,7 +30,8 @@ struct LightRemovalNode {
 }
 
 /// Calculate all light levels for a chunk from scratch.
-/// Call this when a chunk is first generated.
+/// Only block-emitted light (GlowStone, etc.) is baked here.
+/// Sunlight is handled dynamically via shadow mapping in the shader.
 pub fn calculate_chunk_lighting(chunk: &mut Chunk) {
     // Clear existing light
     for x in 0..CHUNK_SIZE {
@@ -43,32 +44,7 @@ pub fn calculate_chunk_lighting(chunk: &mut Chunk) {
 
     let mut light_queue: VecDeque<LightNode> = VecDeque::new();
 
-    // Phase 1: Sunlight propagation (top-down)
-    for x in 0..CHUNK_SIZE {
-        for z in 0..CHUNK_SIZE {
-            let mut sunlight = SUNLIGHT_LEVEL;
-            for y in (0..CHUNK_HEIGHT).rev() {
-                let block = chunk.blocks[x][y][z];
-
-                if block.is_solid() && !block.is_transparent() {
-                    sunlight = 0;
-                } else if block.is_transparent() && !block.no_shadow_casting() {
-                    sunlight = sunlight.saturating_sub(1);
-                }
-
-                if sunlight > 0 {
-                    chunk.light_levels[x][y][z] = sunlight;
-                    light_queue.push_back(LightNode {
-                        x: x as i32,
-                        y: y as i32,
-                        z: z as i32,
-                    });
-                }
-            }
-        }
-    }
-
-    // Phase 2: Block light sources (GlowStone, etc.)
+    // Block light sources only (GlowStone, etc.)
     for x in 0..CHUNK_SIZE {
         for y in 0..CHUNK_HEIGHT {
             for z in 0..CHUNK_SIZE {
@@ -85,13 +61,14 @@ pub fn calculate_chunk_lighting(chunk: &mut Chunk) {
         }
     }
 
-    // Phase 3: BFS light propagation
+    // BFS light propagation from emitters
     propagate_light(chunk, &mut light_queue);
 
     chunk.light_dirty = false;
 }
 
 /// Called when a block is removed (broken) at position (x, y, z).
+/// Re-floods block light from neighboring emitters.
 pub fn on_block_removed(chunk: &mut Chunk, x: usize, y: usize, z: usize) {
     let ix = x as i32;
     let iy = y as i32;
@@ -99,48 +76,7 @@ pub fn on_block_removed(chunk: &mut Chunk, x: usize, y: usize, z: usize) {
 
     let mut light_queue: VecDeque<LightNode> = VecDeque::new();
 
-    // Check if this column receives sunlight from above
-    let mut receives_sunlight = true;
-    for check_y in (y + 1)..CHUNK_HEIGHT {
-        let block = chunk.blocks[x][check_y][z];
-        if block.is_solid() && !block.is_transparent() {
-            receives_sunlight = false;
-            break;
-        }
-    }
-
-    if receives_sunlight {
-        // Calculate sunlight level at this position
-        let mut sunlight = SUNLIGHT_LEVEL;
-        for check_y in ((y + 1)..CHUNK_HEIGHT).rev() {
-            let block = chunk.blocks[x][check_y][z];
-            if block.is_transparent() && !block.no_shadow_casting() {
-                sunlight = sunlight.saturating_sub(1);
-            }
-        }
-
-        // Fill sunlight down
-        for fill_y in (0..=y).rev() {
-            let block = chunk.blocks[x][fill_y][z];
-            if block.is_solid() && !block.is_transparent() {
-                break;
-            }
-            if block.is_transparent() && !block.no_shadow_casting() {
-                sunlight = sunlight.saturating_sub(1);
-            }
-
-            if sunlight > chunk.light_levels[x][fill_y][z] {
-                chunk.light_levels[x][fill_y][z] = sunlight;
-                light_queue.push_back(LightNode {
-                    x: ix,
-                    y: fill_y as i32,
-                    z: iz,
-                });
-            }
-        }
-    }
-
-    // Check neighbors for light that should flood in
+    // Check neighbors for block light that should flood in
     let mut max_neighbor_light: u8 = 0;
     for &(dx, dy, dz) in &DIRECTIONS {
         let nx = ix + dx;
@@ -185,37 +121,13 @@ pub fn on_block_placed(chunk: &mut Chunk, x: usize, y: usize, z: usize) {
         return;
     }
 
-    // If the block is solid and blocks light, remove light
+    // If the block is solid and blocks block-emitted light, remove it
     if block.is_solid() && !block.is_transparent() {
         let old_light = chunk.light_levels[x][y][z];
         chunk.light_levels[x][y][z] = 0;
 
         if old_light > 0 {
             remove_light_optimized(chunk, x, y, z, old_light);
-        }
-
-        // Check if we blocked sunlight for blocks below
-        let mut was_sunlit = true;
-        for check_y in (y + 1)..CHUNK_HEIGHT {
-            let check_block = chunk.blocks[x][check_y][z];
-            if check_block.is_solid() && !check_block.is_transparent() {
-                was_sunlit = false;
-                break;
-            }
-        }
-
-        if was_sunlit {
-            for below_y in (0..y).rev() {
-                let below_block = chunk.blocks[x][below_y][z];
-                if below_block.is_solid() && !below_block.is_transparent() {
-                    break;
-                }
-                let below_light = chunk.light_levels[x][below_y][z];
-                if below_light > 0 {
-                    chunk.light_levels[x][below_y][z] = 0;
-                    remove_light_optimized(chunk, x, below_y, z, below_light);
-                }
-            }
         }
     }
 }

@@ -592,6 +592,16 @@ pub struct SkyConfig {
     pub shadow_strength: f32,
     /// Minimum ambient light at midnight (0.0-1.0)
     pub night_ambient: f32,
+    /// Shadow map resolution in pixels (width = height)
+    pub shadow_map_resolution: u32,
+    /// Shadow map coverage in world units (centered on the player)
+    pub shadow_map_range: f32,
+    /// Shadow map depth range (how far above/below the player to capture)
+    pub shadow_map_depth: f32,
+    /// Small depth bias to prevent shadow acne
+    pub shadow_bias: f32,
+    /// Shadow softness / PCF blur radius in texels (0.5 = sharp, 2.0+ = soft)
+    pub shadow_softness: f32,
 
     // ── Sky colors ───────────────────────────────────────────────────────────
     /// Zenith (top of sky) color at noon (RGB)
@@ -631,6 +641,11 @@ impl Default for SkyConfig {
 
             shadow_strength: 0.3,
             night_ambient: 0.08,
+            shadow_map_resolution: 4096,
+            shadow_map_range: 200.0,
+            shadow_map_depth: 256.0,
+            shadow_bias: 0.005,
+            shadow_softness: 1.0,
 
             sky_zenith_day_r: 0.3,
             sky_zenith_day_g: 0.5,
@@ -675,12 +690,16 @@ impl SkyConfig {
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct SunUniform {
+    /// Sun's view-projection matrix for shadow mapping
+    pub sun_view_proj: [[f32; 4]; 4],
     /// Normalized sun direction (world space, points toward the sun)
     pub sun_dir: [f32; 4],
     /// Sun color * intensity (pre-multiplied)
     pub sun_color: [f32; 4],
-    /// [sun_intensity (0-1 based on elevation), night_ambient, shadow_strength, time_of_day (0-1)]
+    /// [sun_intensity (0-1 based on elevation), night_ambient, shadow_strength, shadow_bias]
     pub params: [f32; 4],
+    /// [shadow_softness, unused, unused, unused]
+    pub params2: [f32; 4],
 }
 
 /// Fog configuration

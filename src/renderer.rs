@@ -291,6 +291,13 @@ pub struct State {
     sun_buffer: wgpu::Buffer,
     sun_bind_group_layout: wgpu::BindGroupLayout,
     sun_bind_group: wgpu::BindGroup,
+    // Shadow map
+    shadow_map_texture: wgpu::Texture,
+    shadow_map_view: wgpu::TextureView,
+    shadow_map_sampler: wgpu::Sampler,
+    shadow_map_pipeline: wgpu::RenderPipeline,
+    shadow_map_camera_buffer: wgpu::Buffer,
+    shadow_map_camera_bind_group: wgpu::BindGroup,
 
     // ── Pause / Modal ─────────────────────────────────────────────────────
     pub paused: bool,
@@ -499,11 +506,17 @@ impl State {
         // ── Sky config ───────────────────────────────────────────────────────
         let sky_config = crate::config::SkyConfig::load_or_create(config_path);
 
-        // ── Sun uniform (bind group 3 for block shaders) ─────────────────────
+        // ── Sun uniform + shadow map (bind group 3 for block shaders) ─────────
+        let identity_mat: [[f32; 4]; 4] = [
+            [1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0],
+        ];
         let sun_uniform = crate::config::SunUniform {
+            sun_view_proj: identity_mat,
             sun_dir: [0.5, 1.0, 0.3, 0.0],
             sun_color: [sky_config.sun_color_r, sky_config.sun_color_g, sky_config.sun_color_b, 1.0],
-            params: [1.0, sky_config.night_ambient, sky_config.shadow_strength, 0.0],
+            params: [1.0, sky_config.night_ambient, sky_config.shadow_strength, sky_config.shadow_bias],
+            params2: [sky_config.shadow_softness, 0.0, 0.0, 0.0],
         };
 
         let sun_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -512,10 +525,99 @@ impl State {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
+        // Shadow map depth texture
+        let shadow_res = sky_config.shadow_map_resolution;
+        let shadow_map_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Shadow Map Texture"),
+            size: wgpu::Extent3d {
+                width: shadow_res,
+                height: shadow_res,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let shadow_map_view = shadow_map_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let shadow_map_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Shadow Map Sampler"),
+            compare: Some(wgpu::CompareFunction::LessEqual),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+
         let sun_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                    count: None,
+                },
+            ],
+            label: Some("sun_bind_group_layout"),
+        });
+
+        let sun_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &sun_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: sun_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&shadow_map_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&shadow_map_sampler),
+                },
+            ],
+            label: Some("sun_bind_group"),
+        });
+
+        // ── Shadow map render pipeline ───────────────────────────────────────
+        let shadow_map_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Shadow Map Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/shadow_map_shader.wgsl").into()),
+        });
+
+        // Sun camera bind group for shadow pass (just a view-proj matrix)
+        let shadow_map_camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Shadow Map Camera Buffer"),
+            contents: bytemuck::cast_slice(&identity_mat),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        let shadow_map_camera_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                visibility: wgpu::ShaderStages::VERTEX,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,
@@ -523,16 +625,16 @@ impl State {
                 },
                 count: None,
             }],
-            label: Some("sun_bind_group_layout"),
+            label: Some("shadow_map_camera_bind_group_layout"),
         });
 
-        let sun_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            layout: &sun_bind_group_layout,
+        let shadow_map_camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &shadow_map_camera_bind_group_layout,
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
-                resource: sun_buffer.as_entire_binding(),
+                resource: shadow_map_camera_buffer.as_entire_binding(),
             }],
-            label: Some("sun_bind_group"),
+            label: Some("shadow_map_camera_bind_group"),
         });
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -542,6 +644,53 @@ impl State {
 
         // Create texture atlas
         let texture_atlas = TextureAtlas::new(&device, &queue);
+
+        // Shadow map pipeline (depth-only pass from sun's perspective)
+        let shadow_map_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Shadow Map Pipeline Layout"),
+            bind_group_layouts: &[&shadow_map_camera_bind_group_layout, &texture_atlas.bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
+        let shadow_map_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Shadow Map Pipeline"),
+            layout: Some(&shadow_map_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shadow_map_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[Vertex::desc()],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shadow_map_shader,
+                entry_point: Some("fs_main"),
+                targets: &[], // depth-only, no color attachment
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: Some(wgpu::Face::Back),
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            multiview: None,
+            cache: None,
+        });
 
         let render_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -2520,6 +2669,12 @@ impl State {
             sun_buffer,
             sun_bind_group_layout,
             sun_bind_group,
+            shadow_map_texture,
+            shadow_map_view,
+            shadow_map_sampler,
+            shadow_map_pipeline,
+            shadow_map_camera_buffer,
+            shadow_map_camera_bind_group,
 
             // Pause / Modal
             paused: false,
@@ -4658,8 +4813,55 @@ impl State {
             let sun_intensity = ((sun_elevation + 0.1) / 0.3).clamp(0.0, 1.0);
             let sun_intensity = sun_intensity * sun_intensity * (3.0 - 2.0 * sun_intensity); // smoothstep
 
+            // ── Compute sun's orthographic view-projection for shadow map ────
+            let shadow_range = self.sky_config.shadow_map_range;
+            let shadow_depth = self.sky_config.shadow_map_depth;
+            let half = shadow_range * 0.5;
+
+            // Sun "eye" position: offset from player along sun direction by full depth
+            // so the entire shadow volume is in front of the near plane
+            let sun_eye = cgmath::Point3::new(
+                self.camera.position.x + sun_dir[0] * shadow_depth,
+                self.camera.position.y + sun_dir[1] * shadow_depth,
+                self.camera.position.z + sun_dir[2] * shadow_depth,
+            );
+            let sun_target = cgmath::Point3::new(
+                self.camera.position.x,
+                self.camera.position.y,
+                self.camera.position.z,
+            );
+
+            // Choose up vector that isn't parallel to sun direction
+            let sun_dir_v = Vector3::new(sun_dir[0], sun_dir[1], sun_dir[2]);
+            let up_candidate = if sun_dir_v.y.abs() > 0.99 {
+                Vector3::new(0.0, 0.0, 1.0)
+            } else {
+                Vector3::new(0.0, 1.0, 0.0)
+            };
+
+            let sun_view = cgmath::Matrix4::look_at_rh(sun_eye, sun_target, up_candidate);
+            let sun_proj = cgmath::ortho(-half, half, -half, half, 0.1, shadow_depth * 2.0);
+            // Correction matrix: remap z from OpenGL [-1,1] to wgpu [0,1]
+            #[rustfmt::skip]
+            let opengl_to_wgpu = cgmath::Matrix4::new(
+                1.0, 0.0, 0.0, 0.0,
+                0.0, 1.0, 0.0, 0.0,
+                0.0, 0.0, 0.5, 0.0,
+                0.0, 0.0, 0.5, 1.0,
+            );
+            let sun_view_proj_mat = opengl_to_wgpu * sun_proj * sun_view;
+            let sun_view_proj: [[f32; 4]; 4] = sun_view_proj_mat.into();
+
+            // Write sun camera for shadow map render pass
+            self.queue.write_buffer(
+                &self.shadow_map_camera_buffer,
+                0,
+                bytemuck::cast_slice(&sun_view_proj),
+            );
+
             // Write sun uniform for block shaders
             let sun_uniform = crate::config::SunUniform {
+                sun_view_proj,
                 sun_dir,
                 sun_color: [
                     self.sky_config.sun_color_r * self.sky_config.sun_brightness,
@@ -4667,7 +4869,8 @@ impl State {
                     self.sky_config.sun_color_b * self.sky_config.sun_brightness,
                     1.0,
                 ],
-                params: [sun_intensity, self.sky_config.night_ambient, self.sky_config.shadow_strength, time_of_day],
+                params: [sun_intensity, self.sky_config.night_ambient, self.sky_config.shadow_strength, self.sky_config.shadow_bias],
+                params2: [self.sky_config.shadow_softness, 0.0, 0.0, 0.0],
             };
             self.queue.write_buffer(
                 &self.sun_buffer,
@@ -5036,6 +5239,34 @@ impl State {
         // Always render world to scene_texture for motion blur post-processing.
         // Motion blur then writes to swap_chain (or post_process_texture if underwater).
         let world_render_target = &self.scene_texture_view;
+
+        // --- SHADOW MAP PASS: Render depth from sun's perspective ---
+        {
+            let mut shadow_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Shadow Map Pass"),
+                color_attachments: &[],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.shadow_map_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+
+            shadow_pass.set_pipeline(&self.shadow_map_pipeline);
+            shadow_pass.set_bind_group(0, &self.shadow_map_camera_bind_group, &[]);
+            shadow_pass.set_bind_group(1, &self.texture_atlas.bind_group, &[]);
+
+            for (_, buffers) in self.chunk_buffers.iter() {
+                shadow_pass.set_vertex_buffer(0, buffers.vertex_buffer.slice(..));
+                shadow_pass.set_index_buffer(buffers.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+                shadow_pass.draw_indexed(0..buffers.index_count, 0, 0..1);
+            }
+        }
 
         // --- PASS 0: RENDER SKY (background behind everything) ---
         if !self.frozen_stone_ceiling {

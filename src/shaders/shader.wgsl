@@ -29,13 +29,21 @@ var<uniform> fog: FogUniform;
 
 // Sun uniform — dynamic directional lighting from day/night cycle
 struct SunUniform {
-    sun_dir: vec4<f32>,       // normalised direction toward sun
-    sun_color: vec4<f32>,     // color * brightness
-    params: vec4<f32>,        // [sun_intensity, night_ambient, shadow_strength, time_of_day]
+    sun_view_proj: mat4x4<f32>,  // shadow map view-projection matrix
+    sun_dir: vec4<f32>,          // normalised direction toward sun
+    sun_color: vec4<f32>,        // color * brightness
+    params: vec4<f32>,           // [sun_intensity, night_ambient, shadow_strength, shadow_bias]
+    params2: vec4<f32>,          // [shadow_softness, unused, unused, unused]
 };
 
 @group(3) @binding(0)
 var<uniform> sun: SunUniform;
+
+@group(3) @binding(1)
+var shadow_map: texture_depth_2d;
+
+@group(3) @binding(2)
+var shadow_sampler: sampler_comparison;
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
@@ -141,32 +149,79 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Encoding: light_level = 2.0 + emission_strength (0.0-1.0)
     let is_emissive = in.light_level > 1.5;
     let emission_strength = select(0.0, in.light_level - 2.0, is_emissive);
-    let voxel_light = select(in.light_level, 1.0, is_emissive);
+    // Block-emitted light (glowstone etc.) — independent of sun
+    let block_light = select(in.light_level, 0.0, is_emissive);
+    let block_light_curved = pow(block_light, 1.4);
 
     // Dynamic sun lighting
     let sun_intensity = sun.params.x;  // 0 at night, 1 at noon
     let night_ambient = sun.params.y;  // minimum ambient at night
     let shadow_str = sun.params.z;     // directional shadow strength
+    let shadow_bias = sun.params.w;    // depth bias for shadow acne
 
-    // voxel_light = sky exposure (0 = fully underground, 1 = open sky)
-    // Actual brightness is computed from the sun direction, not baked in.
-    let sky_exposure = pow(voxel_light, 1.4); // curved for pleasing falloff
+    // ── Shadow map lookup ────────────────────────────────────────────────
+    // Project fragment position into sun's clip space
+    let light_clip = sun.sun_view_proj * vec4<f32>(in.frag_pos, 1.0);
+    let light_ndc = light_clip.xyz / light_clip.w;
+
+    // Convert from NDC [-1,1] to UV [0,1] (flip Y for texture coordinates)
+    let shadow_uv = vec2<f32>(light_ndc.x * 0.5 + 0.5, -light_ndc.y * 0.5 + 0.5);
+    let frag_depth = light_ndc.z - shadow_bias;
+
+    let shadow_soft = sun.params2.x; // PCF blur radius in texels
+
+    // 16-sample Poisson disk offsets for smooth, soft shadow edges
+    let poisson = array<vec2<f32>, 16>(
+        vec2<f32>(-0.94201624, -0.39906216),
+        vec2<f32>( 0.94558609, -0.76890725),
+        vec2<f32>(-0.09418410, -0.92938870),
+        vec2<f32>( 0.34495938,  0.29387760),
+        vec2<f32>(-0.91588581,  0.45771432),
+        vec2<f32>(-0.81544232, -0.87912464),
+        vec2<f32>(-0.38277543,  0.27676845),
+        vec2<f32>( 0.97484398,  0.75648379),
+        vec2<f32>( 0.44323325, -0.97511554),
+        vec2<f32>( 0.53742981, -0.47373420),
+        vec2<f32>(-0.26496911, -0.41893023),
+        vec2<f32>( 0.79197514,  0.19090188),
+        vec2<f32>(-0.24188840,  0.99706507),
+        vec2<f32>(-0.81409955,  0.91437590),
+        vec2<f32>( 0.19984126,  0.78641367),
+        vec2<f32>( 0.14383161, -0.14100790),
+    );
+
+    // Sample shadow map — 1.0 = lit, 0.0 = in shadow
+    var shadow = 1.0;
+    if (shadow_uv.x >= 0.0 && shadow_uv.x <= 1.0 && shadow_uv.y >= 0.0 && shadow_uv.y <= 1.0
+        && frag_depth >= 0.0 && frag_depth <= 1.0) {
+        let texel_size = 1.0 / f32(textureDimensions(shadow_map).x);
+        let spread = texel_size * shadow_soft;
+        var pcf = 0.0;
+        for (var i = 0; i < 16; i += 1) {
+            let offset = poisson[i] * spread;
+            pcf += textureSampleCompare(shadow_map, shadow_sampler, shadow_uv + offset, frag_depth);
+        }
+        shadow = pcf / 16.0;
+    }
 
     // Sun direction and face alignment
     let light_dir = normalize(sun.sun_dir.xyz);
     let sun_dot = max(dot(in.normal, light_dir), 0.0);
 
-    // Directional sun light: only hits sky-exposed faces that face the sun
-    let directional_sun = sky_exposure * sun_dot * sun_intensity * shadow_str;
+    // Directional sun light: shadow map determines if this fragment is lit by the sun
+    let directional_sun = shadow * sun_dot * sun_intensity * shadow_str;
 
-    // Ambient sky light: sky-exposed areas get soft fill even on faces not facing the sun
-    let sky_ambient = sky_exposure * sun_intensity * 0.4;
+    // Ambient sky light: not shadowed (simulates sky hemisphere fill light)
+    let sky_ambient = sun_intensity * 0.35;
+
+    // Block-emitted light (glowstone) — always visible, independent of sun
+    let block_contrib = block_light_curved * 0.9;
 
     // Base ambient: small amount everywhere (visibility in complete darkness)
     let base_ambient = night_ambient;
 
-    // Combine: base + sky fill + directional sun
-    let total_light = base_ambient + sky_ambient + directional_sun;
+    // Combine all light sources
+    let total_light = base_ambient + sky_ambient + directional_sun + block_contrib;
 
     // Apply ambient occlusion (skip for emissive blocks — they glow uniformly)
     let final_light = select(total_light * in.ao, total_light, is_emissive);
