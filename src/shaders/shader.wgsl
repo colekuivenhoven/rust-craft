@@ -148,22 +148,25 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let night_ambient = sun.params.y;  // minimum ambient at night
     let shadow_str = sun.params.z;     // directional shadow strength
 
-    // Minimum ambient light — blends between night_ambient and normal based on sun
-    let min_ambient = mix(night_ambient, 0.05, sun_intensity);
+    // voxel_light = sky exposure (0 = fully underground, 1 = open sky)
+    // Actual brightness is computed from the sun direction, not baked in.
+    let sky_exposure = pow(voxel_light, 1.4); // curved for pleasing falloff
 
-    // Apply curve to make light falloff more pleasing
-    let curved_light = pow(voxel_light, 1.4);
-
-    // Directional component from dynamic sun direction
+    // Sun direction and face alignment
     let light_dir = normalize(sun.sun_dir.xyz);
-    let directional = max(dot(in.normal, light_dir), 0.0) * shadow_str;
+    let sun_dot = max(dot(in.normal, light_dir), 0.0);
 
-    // Modulate voxel light by sun intensity (outdoor light dims at night)
-    // Emissive/block light (encoded > 1.5) is NOT dimmed by sun
-    let sun_modulated_light = curved_light * mix(0.15, 0.9, sun_intensity);
+    // Directional sun light: only hits sky-exposed faces that face the sun
+    let directional_sun = sky_exposure * sun_dot * sun_intensity * shadow_str;
 
-    // Combine lighting
-    let total_light = min_ambient + sun_modulated_light + directional * voxel_light * sun_intensity;
+    // Ambient sky light: sky-exposed areas get soft fill even on faces not facing the sun
+    let sky_ambient = sky_exposure * sun_intensity * 0.4;
+
+    // Base ambient: small amount everywhere (visibility in complete darkness)
+    let base_ambient = night_ambient;
+
+    // Combine: base + sky fill + directional sun
+    let total_light = base_ambient + sky_ambient + directional_sun;
 
     // Apply ambient occlusion (skip for emissive blocks — they glow uniformly)
     let final_light = select(total_light * in.ao, total_light, is_emissive);

@@ -270,13 +270,15 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let night_ambient = sun.params.y;
     let shadow_str = sun.params.z;
 
-    let min_ambient = mix(night_ambient, 0.05, sun_intensity);
-    let voxel_light = in.light_level;
-    let curved_light = pow(voxel_light, 1.4);
+    // voxel_light = sky exposure (0 = underground, 1 = open sky)
+    let sky_exposure = pow(in.light_level, 1.4);
     let light_dir = normalize(sun.sun_dir.xyz);
-    let directional = max(dot(in.normal, light_dir), 0.0) * shadow_str;
-    let sun_modulated_light = curved_light * mix(0.15, 0.9, sun_intensity);
-    let total_light = min_ambient + sun_modulated_light + directional * voxel_light * sun_intensity;
+    let sun_dot = max(dot(in.normal, light_dir), 0.0);
+
+    let directional_sun = sky_exposure * sun_dot * sun_intensity * shadow_str;
+    let sky_ambient = sky_exposure * sun_intensity * 0.4;
+    let base_ambient = night_ambient;
+    let total_light = base_ambient + sky_ambient + directional_sun;
 
     // Apply X-axis directional shading for wave visualization
     // Tilt towards -X = darker, tilt towards +X = lighter

@@ -256,16 +256,16 @@ star_twinkle_speed = 1.5               # Star twinkling speed
 
 # Shadow / lighting
 shadow_strength = 0.3                  # Directional sun light strength (0.0-1.0)
-night_ambient = 0.008                   # Minimum ambient light at midnight (0.0-1.0)
+night_ambient = 0.02                   # Minimum ambient light at midnight (0.0-1.0)
 
 # Sky colors (RGB 0.0-1.0)
 sky_zenith_day_r = 0.3                 # Top-of-sky color at noon
 sky_zenith_day_g = 0.5
 sky_zenith_day_b = 1.0
-sky_horizon_day_r = 0.6               # Horizon color at noon
+sky_horizon_day_r = 0.6                # Horizon color at noon
 sky_horizon_day_g = 0.8
 sky_horizon_day_b = 1.0
-sky_zenith_night_r = 0.01             # Top-of-sky color at midnight
+sky_zenith_night_r = 0.01              # Top-of-sky color at midnight
 sky_zenith_night_g = 0.01
 sky_zenith_night_b = 0.03
 sunset_color_r = 1.0                   # Sunset/sunrise horizon tint
