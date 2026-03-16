@@ -114,7 +114,7 @@ impl BlockType {
     /// Returns true if this block is transparent specifically for water face culling.
     /// Boundary blocks are NOT transparent for water to prevent rendering artifacts.
     pub fn is_transparent_for_water(&self) -> bool {
-        matches!(self, BlockType::Air | BlockType::Water | BlockType::Leaves | BlockType::Vines)
+        matches!(self, BlockType::Air | BlockType::Water | BlockType::Leaves | BlockType::GrassTuft | BlockType::GrassTuftTall | BlockType::Vines)
     }
 
     pub fn get_color(&self) -> [f32; 3] {
@@ -456,7 +456,7 @@ pub const AO_STRENGTH: f32 = 0.5;
 // ============================================================================
 
 /// Maximum wave height in blocks (vertical displacement)
-pub const WAVE_AMPLITUDE: f32 = 0.9;
+pub const WAVE_AMPLITUDE: f32 = 0.0;
 
 /// Base frequency of waves (lower = larger wavelength)
 pub const WAVE_FREQUENCY: f32 = 0.2;

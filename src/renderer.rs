@@ -5183,7 +5183,40 @@ impl State {
             },
         );
 
-        // --- PASS 2: RENDER WATER (Transparent) ---
+        // --- PASS 2: RENDER CLOUDS (before water so they appear behind transparent water) ---
+        if self.cloud_index_count > 0 && !self.frozen_stone_ceiling {
+            let mut cloud_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Cloud Render Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: world_render_target,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load, // Keep existing color
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Load, // Keep existing depth
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+
+            cloud_pass.set_pipeline(&self.cloud_pipeline);
+            cloud_pass.set_bind_group(0, &self.camera_bind_group, &[]);
+            cloud_pass.set_bind_group(1, &self.fog_bind_group, &[]);
+            cloud_pass.set_bind_group(2, &self.cloud_drift_bind_group, &[]);
+            cloud_pass.set_vertex_buffer(0, self.cloud_vertex_buffer.slice(..));
+            cloud_pass.set_index_buffer(self.cloud_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+            cloud_pass.draw_indexed(0..self.cloud_index_count, 0, 0..1);
+        }
+
+        // --- PASS 3: RENDER WATER (Transparent) ---
         {
             let mut water_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Water Render Pass"),
@@ -5260,7 +5293,7 @@ impl State {
             }
         }
 
-        // --- PASS 3: RENDER SEMI-TRANSPARENT BLOCKS (Ice) ---
+        // --- PASS 4: RENDER SEMI-TRANSPARENT BLOCKS (Ice) ---
         {
             let mut transparent_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Transparent Render Pass"),
@@ -5316,39 +5349,6 @@ impl State {
                     }
                 }
             }
-        }
-
-        // --- PASS 4: RENDER CLOUDS ---
-        if self.cloud_index_count > 0 && !self.frozen_stone_ceiling {
-            let mut cloud_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Cloud Render Pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: world_render_target,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load, // Keep existing color
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.depth_view,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Load, // Keep existing depth
-                        store: wgpu::StoreOp::Store,
-                    }),
-                    stencil_ops: None,
-                }),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-
-            cloud_pass.set_pipeline(&self.cloud_pipeline);
-            cloud_pass.set_bind_group(0, &self.camera_bind_group, &[]);
-            cloud_pass.set_bind_group(1, &self.fog_bind_group, &[]);
-            cloud_pass.set_bind_group(2, &self.cloud_drift_bind_group, &[]);
-            cloud_pass.set_vertex_buffer(0, self.cloud_vertex_buffer.slice(..));
-            cloud_pass.set_index_buffer(self.cloud_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-            cloud_pass.draw_indexed(0..self.cloud_index_count, 0, 0..1);
         }
 
         // --- PASS 5: OVERLAYS (Breaking, Outlines, Debug) ---

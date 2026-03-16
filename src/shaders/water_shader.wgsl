@@ -248,8 +248,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     // Water absorption parameters
     let absorption_coefficient = 0.25;  // How quickly light is absorbed (higher = more opaque faster)
-    let min_alpha = 0.4;               // Minimum opacity (shallow water)
-    let max_alpha = 0.9;               // Maximum opacity (very deep water)
+    let min_alpha = 0.99;               // Minimum opacity (shallow water)
+    let max_alpha = 1.0;               // Maximum opacity (very deep water)
 
     // Exponential absorption: Beer-Lambert law - transmittance = e^(-coefficient * distance)
     let transmittance = exp(-absorption_coefficient * water_distance);

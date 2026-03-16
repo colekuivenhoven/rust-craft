@@ -86,6 +86,7 @@ impl BiomeWeights {
 pub const WATER_LEVEL_SOURCE: u8 = 8;
 pub const WATER_LEVEL_MAX_FLOW: u8 = 7;
 pub const WATER_LEVEL_MIN_FLOW: u8 = 1;
+pub const WATER_SURFACE_HEIGHT: f32 = 1.0;
 
 pub struct Chunk {
     pub blocks: Box<[[[BlockType; CHUNK_SIZE]; CHUNK_HEIGHT]; CHUNK_SIZE]>,
@@ -2745,7 +2746,7 @@ impl Chunk {
                                         // Wave scale proportional to water level at this corner
                                         let height_frac;
                                         if any_above_water || max_level >= WATER_LEVEL_SOURCE {
-                                            height_frac = 1.0;
+                                            height_frac = WATER_SURFACE_HEIGHT;
                                         } else if max_level > 0 {
                                             height_frac = max_level as f32 / WATER_LEVEL_SOURCE as f32;
                                         } else {
@@ -2754,7 +2755,7 @@ impl Chunk {
                                         }
 
                                         let wave_scale = height_frac;
-                                        let wave_offset = 0.5 * WAVE_AMPLITUDE * wave_scale;
+                                        let wave_offset = 0.0 * WAVE_AMPLITUDE * wave_scale;
                                         heights[i] = base_y + height_frac - wave_offset;
                                         wave_scales[i] = wave_scale;
                                     }
@@ -2770,10 +2771,11 @@ impl Chunk {
                                 // Bitmask: neg_x=1, pos_x=2, neg_z=4, pos_z=8 (divided by 16 to fit in 0-1)
                                 let edge_flags: f32 = if face_idx == 2 {
                                     // Top face - check horizontal neighbors for shore foam
-                                    let solid_neg_x = neighbors.get_block(x as i32 - 1, y as i32, z as i32).is_solid();
-                                    let solid_pos_x = neighbors.get_block(x as i32 + 1, y as i32, z as i32).is_solid();
-                                    let solid_neg_z = neighbors.get_block(x as i32, y as i32, z as i32 - 1).is_solid();
-                                    let solid_pos_z = neighbors.get_block(x as i32, y as i32, z as i32 + 1).is_solid();
+                                    let foams_water = |b: BlockType| b.is_solid() || matches!(b, BlockType::GrassTuft | BlockType::GrassTuftTall);
+                                    let solid_neg_x = foams_water(neighbors.get_block(x as i32 - 1, y as i32, z as i32));
+                                    let solid_pos_x = foams_water(neighbors.get_block(x as i32 + 1, y as i32, z as i32));
+                                    let solid_neg_z = foams_water(neighbors.get_block(x as i32, y as i32, z as i32 - 1));
+                                    let solid_pos_z = foams_water(neighbors.get_block(x as i32, y as i32, z as i32 + 1));
 
                                     // Encode as bitmask (all vertices get same value - no interpolation issues)
                                     let mut flags: u32 = 0;
