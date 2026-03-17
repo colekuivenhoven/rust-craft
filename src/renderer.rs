@@ -4870,7 +4870,7 @@ impl State {
                     1.0,
                 ],
                 params: [sun_intensity, self.sky_config.night_ambient, self.sky_config.shadow_strength, self.sky_config.shadow_bias],
-                params2: [self.sky_config.shadow_softness, 0.0, 0.0, 0.0],
+                params2: [self.sky_config.shadow_softness, self.sky_config.shadow_normal_bias, 0.0, 0.0],
             };
             self.queue.write_buffer(
                 &self.sun_buffer,

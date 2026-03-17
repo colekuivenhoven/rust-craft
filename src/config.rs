@@ -600,6 +600,8 @@ pub struct SkyConfig {
     pub shadow_map_depth: f32,
     /// Small depth bias to prevent shadow acne
     pub shadow_bias: f32,
+    /// Normal offset bias — moves shadow lookup along surface normal to prevent acne (world units)
+    pub shadow_normal_bias: f32,
     /// Shadow softness / PCF blur radius in texels (0.5 = sharp, 2.0+ = soft)
     pub shadow_softness: f32,
 
@@ -644,7 +646,8 @@ impl Default for SkyConfig {
             shadow_map_resolution: 4096,
             shadow_map_range: 200.0,
             shadow_map_depth: 256.0,
-            shadow_bias: 0.005,
+            shadow_bias: 0.0003,
+            shadow_normal_bias: 0.3,
             shadow_softness: 1.0,
 
             sky_zenith_day_r: 0.3,
@@ -698,7 +701,7 @@ pub struct SunUniform {
     pub sun_color: [f32; 4],
     /// [sun_intensity (0-1 based on elevation), night_ambient, shadow_strength, shadow_bias]
     pub params: [f32; 4],
-    /// [shadow_softness, unused, unused, unused]
+    /// [shadow_softness, shadow_normal_bias, unused, unused]
     pub params2: [f32; 4],
 }
 

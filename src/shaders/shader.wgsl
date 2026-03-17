@@ -160,8 +160,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let shadow_bias = sun.params.w;    // depth bias for shadow acne
 
     // ── Shadow map lookup ────────────────────────────────────────────────
-    // Project fragment position into sun's clip space
-    let light_clip = sun.sun_view_proj * vec4<f32>(in.frag_pos, 1.0);
+    // Normal bias: offset the lookup position along the surface normal to prevent shadow acne
+    let normal_bias = sun.params2.y;
+    let biased_pos = in.frag_pos + in.normal * normal_bias;
+
+    // Project biased position into sun's clip space
+    let light_clip = sun.sun_view_proj * vec4<f32>(biased_pos, 1.0);
     let light_ndc = light_clip.xyz / light_clip.w;
 
     // Convert from NDC [-1,1] to UV [0,1] (flip Y for texture coordinates)

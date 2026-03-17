@@ -260,7 +260,8 @@ night_ambient = 0.02                   # Minimum ambient light at midnight (0.0-
 shadow_map_resolution = 8192           # Shadow map texture resolution (width = height)
 shadow_map_range = 500.0               # Shadow map coverage in world units (centered on player)
 shadow_map_depth = 256.0               # Shadow map depth range (vertical capture range)
-shadow_bias = 0.015                    # Depth bias to prevent shadow acne artifacts
+shadow_bias = 0.0003                   # Depth bias to prevent shadow acne (keep very small; old 0.015 ate shadows)
+shadow_normal_bias = 0.3               # Normal offset bias in world units — prevents acne without erasing shadows (0.1-0.5)
 shadow_softness = 1.5                  # Shadow blur / PCF radius in texels (0.5 = sharp, 2.0+ = soft)
 
 # Sky colors (RGB 0.0-1.0)

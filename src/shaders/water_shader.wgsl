@@ -283,7 +283,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let block_light = pow(in.light_level, 1.4) * 0.9;
 
     // ── Shadow map lookup ────────────────────────────────────────────────
-    let light_clip = sun.sun_view_proj * vec4<f32>(in.frag_pos, 1.0);
+    // Normal bias: offset along surface normal to prevent shadow acne
+    let normal_bias = sun.params2.y;
+    let biased_pos = in.frag_pos + in.normal * normal_bias;
+
+    let light_clip = sun.sun_view_proj * vec4<f32>(biased_pos, 1.0);
     let light_ndc = light_clip.xyz / light_clip.w;
     let shadow_uv = vec2<f32>(light_ndc.x * 0.5 + 0.5, -light_ndc.y * 0.5 + 0.5);
     let frag_depth = light_ndc.z - shadow_bias;
