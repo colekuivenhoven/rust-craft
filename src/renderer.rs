@@ -1028,7 +1028,7 @@ impl State {
             },
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: false, // No depth write; back-to-front sort handles transparency order
+                depth_write_enabled: true, // Write depth so only the closest water face renders per pixel; prevents transparency sorting artifacts in waterfalls
                 depth_compare: wgpu::CompareFunction::Less,
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
