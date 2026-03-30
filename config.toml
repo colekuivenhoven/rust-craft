@@ -238,7 +238,7 @@ ceiling_ice_stalactite_max_length = 8     # Max blocks hanging down
 ceiling_ice_stalactite_grid_spacing = 6    # Grid spacing between potential stalactite centers
 
 #* ── Sky / Day-Night Cycle Settings ──────────────────────────────────────────────
-day_cycle_secs = 600.0                 # Full day/night cycle length in seconds (600 = 10 minutes)
+day_cycle_secs = 1800.0                 # Full day/night cycle length in seconds (600 = 10 minutes)
 day_fraction = 0.6                     # Fraction of cycle that is daytime (0.0-1.0)
 
 # Sun appearance
