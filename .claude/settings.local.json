@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(wc -l c:/Users/kuive/OneDrive/Desktop/Sandbox/Craft/src/entities/*.rs)",
+      "Bash(grep \"    pub\\\\|    //\")",
+      "Bash(wc -l c:/Users/kuive/OneDrive/Desktop/Sandbox/Craft/src/*.rs c:/Users/kuive/OneDrive/Desktop/Sandbox/Craft/src/**/*.rs)",
+      "Bash(cargo check:*)",
+      "Bash(mv src/block.rs.tmp src/block.rs)",
+      "Bash(echo \"exit: $?\")",
+      "Bash(cargo build:*)",
+      "Bash(wc -l /c/Users/kuive/OneDrive/Desktop/Sandbox/Craft/src/render/*.rs)"
+    ]
+  }
+}

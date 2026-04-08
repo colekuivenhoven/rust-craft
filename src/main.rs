@@ -1,5 +1,6 @@
 mod bitmap_font;
 mod block;
+mod block_mesh;
 mod camera;
 mod chunk;
 mod chunk_loader;
@@ -16,8 +17,9 @@ mod menu;
 mod modal;
 mod particle;
 mod player;
-mod renderer;
+mod render;
 mod save_context;
+mod terrain;
 mod texture;
 mod water;
 mod world;
@@ -73,7 +75,7 @@ fn main() {
 
 enum AppPhase {
     Menu(menu::MenuState),
-    Playing(renderer::State),
+    Playing(render::State),
 }
 
 #[derive(Default)]
@@ -159,7 +161,7 @@ impl ApplicationHandler for App {
                 let _ = wc.save(std::path::Path::new(&save_context::world_config_path()));
                 // Drop MenuState (releases its wgpu surface) before creating the game
                 self.phase = None;
-                let mut state = pollster::block_on(renderer::State::new(window));
+                let mut state = pollster::block_on(render::State::new(window));
                 state.capture_mouse();
                 self.phase = Some(AppPhase::Playing(state));
                 return;
@@ -168,7 +170,7 @@ impl ApplicationHandler for App {
                 save_context::set_world(&world_name);
                 // Drop MenuState first
                 self.phase = None;
-                let mut state = pollster::block_on(renderer::State::new(window));
+                let mut state = pollster::block_on(render::State::new(window));
                 state.capture_mouse();
                 self.phase = Some(AppPhase::Playing(state));
                 return;
